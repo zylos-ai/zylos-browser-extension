@@ -1,0 +1,12 @@
+{
+  "extends": "./.wxt/tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "types": ["chrome", "vite/client"],
+    "allowJs": true,
+    "checkJs": false,
+    "skipLibCheck": true
+  }
+}

@@ -1,0 +1,219 @@
+{
+  "protocol": 1,
+  "valid": [
+    { "input": { "op": "pause" }, "expected": { "op": "pause" } },
+    {
+      "input": { "op": "finalize", "taskId": "12345678-1234-4123-8123-123456789abc" },
+      "expected": { "op": "finalize", "taskId": "12345678-1234-4123-8123-123456789abc", "keep": [] }
+    },
+    {
+      "input": { "op": "finalize", "taskId": "12345678-1234-4123-8123-123456789abc", "keep": [3] },
+      "expected": {
+        "op": "finalize",
+        "taskId": "12345678-1234-4123-8123-123456789abc",
+        "keep": [3]
+      }
+    },
+    { "input": { "op": "finish" }, "expected": { "op": "finish" } },
+    {
+      "input": { "op": "observe" },
+      "expected": { "op": "observe", "interactive": false }
+    },
+    {
+      "input": { "op": "observe", "interactive": true },
+      "expected": { "op": "observe", "interactive": true }
+    },
+    {
+      "input": {
+        "op": "snapshot"
+      },
+      "expected": {
+        "op": "snapshot",
+        "interactive": false
+      }
+    },
+    {
+      "input": {
+        "op": "snapshot",
+        "interactive": true
+      },
+      "expected": {
+        "op": "snapshot",
+        "interactive": true
+      }
+    },
+    {
+      "input": {
+        "op": "click",
+        "ref": "@x-e1"
+      },
+      "expected": {
+        "op": "click",
+        "ref": "@x-e1"
+      }
+    },
+    {
+      "input": {
+        "op": "fill",
+        "ref": "@x-e1",
+        "text": "中文"
+      },
+      "expected": {
+        "op": "fill",
+        "ref": "@x-e1",
+        "text": "中文"
+      }
+    },
+    {
+      "input": {
+        "op": "type",
+        "ref": "@x-e1",
+        "text": "!"
+      },
+      "expected": {
+        "op": "type",
+        "ref": "@x-e1",
+        "text": "!"
+      }
+    },
+    {
+      "input": {
+        "op": "scroll",
+        "direction": "down"
+      },
+      "expected": {
+        "op": "scroll",
+        "direction": "down",
+        "pixels": 500
+      }
+    },
+    {
+      "input": {
+        "op": "keypress",
+        "key": "Enter"
+      },
+      "expected": {
+        "op": "keypress",
+        "key": "Enter"
+      }
+    },
+    {
+      "input": {
+        "op": "open",
+        "url": "https://example.com"
+      },
+      "expected": {
+        "op": "open",
+        "url": "https://example.com"
+      }
+    },
+    {
+      "input": {
+        "op": "new-tab",
+        "url": "https://example.com"
+      },
+      "expected": {
+        "op": "new-tab",
+        "url": "https://example.com"
+      }
+    },
+    {
+      "input": {
+        "op": "switch-tab",
+        "tabId": 1
+      },
+      "expected": {
+        "op": "switch-tab",
+        "tabId": 1
+      }
+    },
+    {
+      "input": {
+        "op": "tabs"
+      },
+      "expected": {
+        "op": "tabs"
+      }
+    },
+    {
+      "input": {
+        "op": "screenshot"
+      },
+      "expected": {
+        "op": "screenshot"
+      }
+    },
+    {
+      "input": {
+        "op": "stop"
+      },
+      "expected": {
+        "op": "stop"
+      }
+    }
+  ],
+  "invalid": [
+    { "op": "finalize" },
+    { "op": "finalize", "taskId": "old-task" },
+    { "op": "finalize", "taskId": "12345678-1234-4123-8123-123456789abc", "keep": [-1] },
+    { "op": "pause", "close": true },
+    { "op": "finish", "tabId": 1 },
+    { "op": "observe", "interactive": "true" },
+    { "op": "observe", "url": "https://unrelated.example" },
+    {},
+    {
+      "op": "evaluate",
+      "expression": "test"
+    },
+    {
+      "op": "grant"
+    },
+    {
+      "op": "click"
+    },
+    {
+      "op": "click",
+      "ref": "@x",
+      "unknown": 1
+    },
+    {
+      "op": "switch-tab",
+      "tabId": -1
+    },
+    {
+      "op": "switch-tab",
+      "tabId": 1.2
+    },
+    {
+      "op": "open",
+      "url": "not a URL"
+    },
+    {
+      "op": "keypress",
+      "key": "F1"
+    },
+    {
+      "op": "scroll",
+      "direction": "sideways"
+    },
+    {
+      "op": "scroll",
+      "direction": "down",
+      "pixels": 0
+    },
+    {
+      "op": "scroll",
+      "direction": "down",
+      "pixels": 2001
+    },
+    {
+      "op": "fill",
+      "ref": "@e1",
+      "text": 12
+    },
+    {
+      "op": "snapshot",
+      "interactive": "true"
+    }
+  ]
+}

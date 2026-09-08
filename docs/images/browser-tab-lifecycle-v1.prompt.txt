@@ -1,0 +1,16 @@
+Create a polished Chinese UI explainer infographic, a single image containing FOUR separate wide mini-illustrations stacked vertically. This is for a Notion product design document. Use the supplied screenshot ONLY as reference for the Chrome tab bar and the green "Coco Agent · 工作中" tab group, NOT the website content, personal tabs, account or screenshot itself. Redraw everything as abstract clean vector-like browser UI with crisp Chinese typography, white background, light gray Chrome tab bars, emerald green active group, amber paused group. Large readable text, extremely minimal copy. No flowchart boxes, no code, no paragraphs, no photo, no decorative robots. Four cards full width with ample white gutters, total approx 1600x1800 portrait. Each card contains a numbered short heading and an enlarged Chrome-like tab strip with actual rounded tab silhouettes, close x icons, group pill and matching thin colored underline around grouped tabs. Persistent ungrouped personal tabs always on left titled "邮箱" and "文档". Preserve these same two tabs every panel. Label group "Coco Agent" or as below. Use subtle thin annotation arrows pointing to group, short one-line captions.
+
+Panel 1 title exact "01  你允许，才创建".
+Visual: small authorization card on left says "允许浏览器操作？" with green "允许" button, arrow to Chrome tab strip right: gray personal tabs 邮箱 文档 then new GREEN group pill "Coco Agent · 工作中" with one tab "工作页". Clearly connects permission to creation. Caption "授权后才出现专用标签组".
+
+Panel 2 title "02  各用各的，不串页".
+Visual full width Chrome tab bar: personal 邮箱 文档 on left outside grouping; right green pill "Coco Agent · 工作中" grouping two tabs "搜索页" "详情页" with green boundary/underline only under these two. Two short arrows from below: under personal tabs "你继续用" and under grouped tabs "Agent 在这里操作". Active personal 文档 tab can be white to show user is elsewhere.
+
+Panel 3 title "03  需要登录，先暂停".
+Visual same personal 邮箱 文档 tabs; amber group pill "Coco Agent · 等待继续" around single "登录页" tab. Tiny login form below group and small "继续" button indicating user continuation, no active automated pointer. Caption "页面保留，等你登录后继续".
+
+Panel 4 title "04  任务结束，分组消失".
+Visual two slim alternative Chrome tab bars stacked within card. First row label "默认": only ungrouped 邮箱 文档 then empty space and +. NO group pill, NO colored outline, NO stopped badge. Small annotation "临时页关闭".
+Second row label "你要求保留": ungrouped 邮箱 文档 结果页 all neutral gray, NO colored group. Small annotation "结果留下，交还给你".
+Bottom one short footer "不保留「已停止」分组".
+Important show group absent in both final rows, do not imply all results automatically kept. Only text listed, correctly spelled simplified Chinese. All headings and browser tabs legible at Notion document width. No large overall title, these four panels ARE the image.
