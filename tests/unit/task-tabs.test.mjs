@@ -15,6 +15,7 @@ async function fixture() {
       id,
       {
         id,
+        index: id - 1,
         windowId: 1,
         groupId: -1,
         incognito: false,
@@ -131,6 +132,17 @@ async function fixture() {
 test('finalize closes only task-created temporary tabs, keeps explicit results, and rejects old tasks', async () => {
   const s = await fixture();
   await s.executor.attach(1, 'new');
+  assert.deepEqual(
+    s.calls.find((c) => c.method === 'tabs.create'),
+    {
+      method: 'tabs.create',
+      windowId: 1,
+      index: 1,
+      openerTabId: 1,
+      url: 'about:blank',
+      active: false,
+    },
+  );
   const task = s.executor.currentControl();
   const result = await s.command({ op: 'new-tab', url: 'https://example.com/result' });
   s.tabs.get(2).groupId = task.groupId; // A user tab in the group is still not ours.
@@ -420,4 +432,36 @@ test('additional work tabs are bounded; removing a non-target never adopts anoth
   assert.equal(s.executor.currentControl().tabIds.includes(1), false);
   assert.equal(s.executor.currentControl().tabIds.includes(2), false);
   await s.executor.release();
+});
+
+test('平台首个 open 在来源窗口旁创建真实 URL，任务 ID 不重新生成', async () => {
+  const s = await fixture();
+  const taskId = '11111111-1111-4111-8111-111111111111';
+  await s.executor.attach(1, 'new', { url: 'https://example.com/start', taskId, windowId: 1 });
+  assert.deepEqual(
+    s.calls.find((c) => c.method === 'tabs.create'),
+    {
+      method: 'tabs.create',
+      windowId: 1,
+      index: 1,
+      openerTabId: 1,
+      url: 'https://example.com/start',
+      active: true,
+    },
+  );
+  assert.equal(s.executor.currentControl().sessionId, taskId);
+  await s.command({ op: 'finalize', taskId, keep: [] });
+  assert.deepEqual([...s.tabs.keys()], [1, 2]);
+  assert.equal(s.groups.size, 0);
+});
+test('来源窗口不符时首个 open 不回退当前窗口', async () => {
+  const s = await fixture();
+  await assert.rejects(
+    s.executor.attach(1, 'new', {
+      url: 'https://example.com/start',
+      taskId: crypto.randomUUID(),
+      windowId: 8,
+    }),
+  );
+  assert.equal(s.calls.filter((c) => c.method === 'tabs.create').length, 0);
 });

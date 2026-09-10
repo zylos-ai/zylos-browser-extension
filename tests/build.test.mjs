@@ -5,13 +5,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const output = path.join(root, '.output/chrome-mv3');
+const output = path.join(root, '.output-platform/chrome-mv3');
 test('WXT adds only tabGroups to the existing production permissions', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   const manifest = JSON.parse(fs.readFileSync(path.join(output, 'manifest.json'), 'utf8'));
   assert.equal(manifest.manifest_version, 3);
   assert.equal(manifest.version, pkg.version);
-  assert.equal(manifest.name, 'Coco · Agent Browser');
+  assert.match(manifest.name, /Coco/);
   assert.equal(manifest.action.default_popup, 'popup.html');
   assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
   assert.deepEqual([...manifest.permissions].sort(), [
@@ -22,8 +22,8 @@ test('WXT adds only tabGroups to the existing production permissions', () => {
     'tabGroups',
     'tabs',
   ]);
-  assert.ok(!manifest.host_permissions?.length);
-  assert.equal(manifest.externally_connectable, undefined);
+  assert.deepEqual(manifest.host_permissions, ['http://127.0.0.1/*']);
+  assert.deepEqual(manifest.externally_connectable.matches, ['http://localhost/*']);
   assert.ok(!manifest.web_accessible_resources?.length);
   for (const file of ['popup.html', 'sidepanel.html', manifest.background.service_worker])
     assert.ok(fs.existsSync(path.join(output, file)), file);

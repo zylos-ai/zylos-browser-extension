@@ -156,17 +156,29 @@ export async function release(cleanup = true, strict = false) {
   await chrome.action.setBadgeText({ text: '' });
   publish();
 }
-// tabId is supplied only by an explicit panel authorization, never by a model.
-export async function attach(tabId: number, mode: 'current' | 'new' = 'current') {
+// tabId comes from explicit panel consent or a verified chat handoff, never a model.
+export async function attach(
+  tabId: number,
+  mode: 'current' | 'new' = 'current',
+  initial?: { url: string; taskId: string; windowId: number },
+) {
+  if (initial && (mode !== 'new' || !allowed(initial.url))) fail('INVALID_URL');
   const releasing = release();
   const revision = consentRevision;
   await releasing;
   let tab = await chrome.tabs.get(tabId);
   if (revision !== consentRevision) fail('STOPPED');
   if (tab.incognito) fail('UNSUPPORTED_WINDOW', '不支持无痕窗口');
-  const taskId = crypto.randomUUID();
+  if (initial && tab.windowId !== initial.windowId) fail('INVALID_CHAT_SOURCE');
+  const taskId = initial?.taskId || crypto.randomUUID();
   if (mode === 'new') {
-    tab = await chrome.tabs.create({ windowId: tab.windowId, url: 'about:blank', active: false });
+    tab = await chrome.tabs.create({
+      windowId: tab.windowId,
+      index: tab.index + 1,
+      openerTabId: tab.id,
+      url: initial?.url || 'about:blank',
+      active: !!initial,
+    });
     if (tab.id === undefined) fail('TAB_UNAVAILABLE');
     try {
       await recordTask(taskId, tab.windowId, null, tab.id, true);

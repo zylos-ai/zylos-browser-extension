@@ -13,20 +13,25 @@ test('uses WXT default source and output structure without legacy wrappers', () 
   expect(pkg.scripts['install:local']).toBeUndefined();
   expect(pkg.dependencies.ws).toBeUndefined();
   expect(fs.readFileSync(path.join(root, 'wxt.config.ts'), 'utf8')).not.toMatch(
-    /srcDir:|outDir:|entrypointsDir:/,
+    /srcDir:|entrypointsDir:/,
+  );
+  // Keep the installed platform artifact path stable; only one runtime ships.
+  expect(fs.readFileSync(path.join(root, 'wxt.config.ts'), 'utf8')).toContain(
+    "outDir: '.output-platform'",
   );
   for (const item of [
     'entrypoints/background/index.ts',
     'entrypoints/popup/index.html',
     'entrypoints/sidepanel/index.html',
-    'hooks/useAgent.ts',
-    'components/App.tsx',
+    'components/ExecutorPanel.tsx',
     'assets/styles.css',
     'utils/automation/executor.ts',
   ]) {
     expect(fs.existsSync(path.join(root, item)), item).toBe(true);
   }
   for (const item of [
+    'components/App.tsx',
+    'entrypoints/background/runtime.ts',
     'browser',
     'extension',
     'artifacts',
