@@ -32,6 +32,7 @@ import {
   deviceProbeSchema,
   deviceProofSchema,
   chatActionSenderAllowed,
+  assertInitialTaskURL,
   type PlatformState,
   type PlatformTask,
 } from '../../utils/platform';
@@ -542,6 +543,7 @@ export function startPlatformBackground() {
       return;
     }
     const id = z.string().parse(m.id);
+    const receivedAt = performance.now();
     const resultType = m.type === 'command' || m.type === 'bootstrap' ? 'result' : 'cdp-response';
     if (inFlight.has(id) || processed.has(id) || inFlight.size >= 32) {
       send({ type: resultType, id, ok: false, error: { code: 'DUPLICATE_OR_BUSY' } });
@@ -603,6 +605,7 @@ export function startPlatformBackground() {
           );
           const source = await sourceFor(reserved);
           assertStartable(reserved);
+          assertInitialTaskURL(reserved, request.url);
           await attach(source.tabId, 'new', {
             url: request.url,
             taskId: t.control_session_id,
@@ -655,6 +658,17 @@ export function startPlatformBackground() {
           error: browserOperationError(e),
         });
     } finally {
+      console.info(
+        JSON.stringify({
+          component: 'browser',
+          stage: 'extension_command',
+          task_id: t.id,
+          activation_id: t.activation_id,
+          command_id: id,
+          duration_ms: Math.round(performance.now() - receivedAt),
+          at: new Date().toISOString(),
+        }),
+      );
       inFlight.delete(id);
       processed.add(id);
       if (processed.size > 500) processed.delete(processed.values().next().value!);

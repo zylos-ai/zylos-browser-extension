@@ -69,7 +69,13 @@ export function ExecutorPanel() {
       {task?.state === 'preparing' && <p role="status">正在准备浏览器，无须再次授权。</p>}
       {task?.state === 'running' && (
         <section>
-          <h2>{state.hasWorkTab ? 'Agent 正在操作' : '已授权，等待 Agent 打开网页'}</h2>
+          <h2>
+            {state.hasWorkTab
+              ? 'Agent 正在操作'
+              : task.command_started_at
+                ? '正在打开网页'
+                : '已授权，等待 Agent 打开网页'}
+          </h2>
           {state.hasWorkTab ? (
             <button className="link" onClick={() => void request({ type: 'platform-reveal' })}>
               查看工作标签
@@ -98,6 +104,11 @@ export function ExecutorPanel() {
       )}
       {task?.state === 'closed' && (
         <p>
+          {task.outcome === 'startup_timeout'
+            ? 'Agent 未在启动期限内开始，本次授权已停止。'
+            : task.outcome === 'prepare_timeout'
+              ? '浏览器准备超时，本次授权已停止。'
+              : ''}
           {task.cleanup_state === 'unknown' || task.cleanup_state === 'partial'
             ? '任务已停止，请检查遗留工作标签。'
             : '本次任务已结束，结果在 OpenMAX 对话中。'}

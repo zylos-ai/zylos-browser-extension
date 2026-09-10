@@ -8,9 +8,19 @@ import {
   chatActionSenderAllowed,
   deviceProbeSchema,
   deviceProofSchema,
+  assertInitialTaskURL,
+  type PlatformTask,
 } from '../../utils/platform';
 
 describe('platform trust boundary', () => {
+  it('首步必须匹配授权卡保存的网站，不能换成别的任务', () => {
+    const task = { initial_url: 'https://example.com' } as PlatformTask;
+    expect(() => assertInitialTaskURL(task, 'https://example.com/')).not.toThrow();
+    expect(() => assertInitialTaskURL(task, 'https://evil.test')).toThrow('TASK_PLAN_CHANGED');
+    expect(() => assertInitialTaskURL(task, 'https://example.com/buy')).toThrow(
+      'TASK_PLAN_CHANGED',
+    );
+  });
   it('accepts RFC3339 intent expiry with an explicit server timezone', () => {
     const intent = {
       browser_proof: 'p'.repeat(100),

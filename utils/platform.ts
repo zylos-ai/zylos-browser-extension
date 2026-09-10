@@ -33,8 +33,17 @@ export const platformTaskSchema = z.object({
   absolute_deadline: z.string(),
   outcome: z.string(),
   cleanup_state: z.string(),
+  initial_url: z.string().optional(),
+  task_summary: z.string().optional(),
+  ready_at: z.string().optional(),
+  command_started_at: z.string().optional(),
 });
 export type PlatformTask = z.infer<typeof platformTaskSchema>;
+
+export function assertInitialTaskURL(task: PlatformTask, url: string) {
+  if (task.initial_url && new URL(task.initial_url).href !== new URL(url).href)
+    throw new PlatformApiError('TASK_PLAN_CHANGED', 409);
+}
 
 export function browserOperationError(error: unknown) {
   return {
