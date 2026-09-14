@@ -1,6 +1,6 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ExecutorPanel } from '../components/ExecutorPanel';
+import { RemotePanel } from '../components/RemotePanel';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import '../assets/styles.css';
 
@@ -10,7 +10,7 @@ export function mount() {
   createRoot(root).render(
     <StrictMode>
       <ErrorBoundary>
-        <ExecutorPanel />
+        <RemotePanel />
       </ErrorBoundary>
     </StrictMode>,
   );

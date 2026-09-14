@@ -1,50 +1,70 @@
-# Coco Browser Extension — 用户态平台模式
+# Coco Browser Extension
 
-WXT + React + TypeScript / Chrome MV3。**OpenMAX 是唯一聊天入口，插件只做用户登录、
-任务执行和紧急停止。** 默认构建已统一为平台模式，不再打包旧聊天/配对/插件授权界面。
+WXT + React + TypeScript / Chrome MV3。默认只使用 Zylos remote 接入：
+插件通过 WebSocket + key 连接 [zylos-browser-remote](../zylos-browser-remote)，
+在侧边栏聊天，在专用工作标签里执行 Agent 的浏览器命令。
 
-## 用户流程
+使用 WXT 标准命令和默认输出目录：`npm run build` → `.output/chrome-mv3`。
+没有构建模式开关，`npm run dev`、`npm run build` 和 `npm run zip` 都使用 remote 入口。
 
-1. 安装并打开插件，点击登录，进入 OpenMAX **个人主页** `/workspace/account?browser_login=1`。
-2. 沿用 Workspace 登录；在个人主页确认当前账号后，background 自动保存独立插件会话，无需回 Popup，也不选择或绑定 Agent。Connections 只负责另行给 Agent 开通 Browser 能力，不是插件登录入口。
-3. 私聊 Agent 下达浏览器任务，在对话里允许。
-4. 平台中转通知 background 准备任务；此时不创建页面、不连接调试器。
-5. Agent 第一次 open 时，在原聊天窗口旁直接打开目标 URL，并标记任务组。
-6. 完成时清理临时标签；用户明确要保留的页面退出分组。等待登录则暂停，回聊天明确继续。
+## 本地启动
 
-登录不等于任务授权。执行端、任务、激活和标签归属校验都保留。
-用户切换页面不改变 Agent 的目标。不保存“已停止/已完成”分组。
+在 Coco 根目录运行：
 
-## 本地开发
+```sh
+./Browser-dev.sh
+```
+
+脚本构建插件，检查通道链接和 key，启动缺少的 C4 / Agent 监控服务，并启动或复用 relay。
+`--check` 只检查现状，`--no-build` 复用已有插件产物。
+
+1. Chrome 打开 `chrome://extensions`，启用开发者模式。
+2. 加载本项目 `.output/chrome-mv3`。
+3. 在插件侧边栏「设置」填写 `ws://127.0.0.1:3802/ext` 和 relay 发出的完整 key。
+4. 点击「保存并连接」，在侧边栏向 Agent 发送任务。
+
+后续构建仍使用同一个目录，在 Chrome 扩展页点击刷新即可。
+Finder 隐藏点开头的目录，可按 `Command + Shift + G` 粘贴完整路径。
+
+## 从旧构建目录迁移
+
+以前从 `.output-remote/chrome-mv3` 或 `.output-platform/chrome-mv3` 加载的扩展，
+需要在 Chrome 中停用旧条目，重新加载 `.output/chrome-mv3`。
+加载路径变化可能改变扩展 ID，旧的 Chrome storage 不会自动迁移；在新插件中重新填写
+relay 地址和原来的 key 即可。keyId 由 key 决定，继续使用同一个 key 就仍是同一个 C4 endpoint。
+
+如果没有保存原来的明文 key，可在 relay 项目执行 `node scripts/key.js new --label local-chrome`
+生成一个新 key；relay 的 keys.json 只存摘要，不能从中取回旧 key。
+
+## 聊天与浏览器操作
+
+- 用户消息：侧边栏 → relay → C4 → Agent。
+- Agent 回复：C4 send → relay → 侧边栏气泡。
+- 浏览器命令：Agent CLI → relay `/rpc` → 插件执行引擎 → 结果原路返回。
+- `utils/remote-commands.ts` 校验命令；URL 黑名单、工作标签归属、幂等回放、密码/OTP 拒填和停用开关由插件执行。
+- 第一次 `open` 在用户当前标签旁创建工作标签并分组，之后的命令只作用于任务标签。
+
+协议与错误码见 [PROTOCOL.md](../zylos-browser-remote/docs/PROTOCOL.md)。
+
+## 开发与验证
 
 ```sh
 npm ci
 npm test
-npm run build
 npm run test:build
 ```
 
-Chrome 加载 **.output-platform/chrome-mv3**；build:platform 是同一个构建的兼容命令。
-输出路径保留，是为了不改变现有安装 ID。旧 .output 文件不自动删除，但不再更新或使用。
-npm run dev 会使用 WXT 开发浏览器，不能拿个人 Chrome profile 作测试副本。
-
-完整本地系统从 Coco 根目录 `bash dev.sh` 启动。必须一起升级 API/Relay/Channel/OpenMAX/FE，
-不能将新版插件混接旧服务。插件不直接连接 Agent IP。
+`npm run test:build` 会执行标准构建并检查生成的 manifest、页面资源、remote 协议和聊天入口。
+`npm run zip` 在 `.output` 内生成发布压缩包。`npm run dev` 使用 WXT 的开发浏览器流程；
+测试自己 Chrome 中的登录状态时，使用上面的本地启动和手动加载流程。
 
 ## 源码
 
-- entrypoints/background/platform.ts：用户登录交接、平台事件、任务准备、执行与失效处理。
-- components/ExecutorPanel.tsx：简洁状态、连接引导、查看工作页和停止。
-- utils/platform.ts：平台契约；utils/messages.ts：内部面板来源校验。
-- utils/automation/：任务标签、CDP、真实鼠标轨迹、模拟光标、归属清理日志。
-- tests/：协议、UI、授权边界、标签生命周期；跨项目真实 CLI 测试在 Channel。
+- `entrypoints/background/index.ts`：唯一后台入口，启动 `remote.ts`。
+- `entrypoints/background/remote.ts`：连接、心跳、聊天、命令分发。
+- `components/RemotePanel.tsx`：聊天、设置、任务状态和停止按钮。
+- `utils/remote.ts`：relay 协议和存储结构。
+- `utils/remote-commands.ts` / `utils/guard.ts`：命令校验和 URL 策略。
+- `utils/automation/`：任务标签、CDP、鼠标轨迹、模拟光标和清理日志。
 
-没有独立聊天框、手填 Agent 地址、配对码、手动授权工作标签或 Popup 再批准。
-保留已有截图、鼠标、敏感输入保护和工作标签隔离，不重写无关执行能力。
-
-## 实施范围
-
-[完整实施设计](docs/specs/openmax-browser-connector/implementation-design.md)
-是本轮代码与评审稿的对应说明。其余早期 docs 保留作历史资料，不作为运行步骤。
-当前包仅允许本机开发 origin；商店正式包、生产登录回调、WSS、BFF/SDK、
-多实例路由和隐私审查仍需补齐，不能直接发布这个本地构建。
+`docs/specs/openmax-browser-connector/` 是旧平台接入的历史设计与验证记录，不是当前启动指南。

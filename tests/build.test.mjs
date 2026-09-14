@@ -5,8 +5,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const output = path.join(root, '.output-platform/chrome-mv3');
-test('WXT adds only tabGroups to the existing production permissions', () => {
+const output = path.join(root, '.output/chrome-mv3');
+test('WXT emits the remote extension with its required permissions and entrypoints', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   const manifest = JSON.parse(fs.readFileSync(path.join(output, 'manifest.json'), 'utf8'));
   assert.equal(manifest.manifest_version, 3);
@@ -22,8 +22,8 @@ test('WXT adds only tabGroups to the existing production permissions', () => {
     'tabGroups',
     'tabs',
   ]);
-  assert.deepEqual(manifest.host_permissions, ['http://127.0.0.1/*']);
-  assert.deepEqual(manifest.externally_connectable.matches, ['http://localhost/*']);
+  assert.equal(manifest.host_permissions, undefined);
+  assert.equal(manifest.externally_connectable, undefined);
   assert.ok(!manifest.web_accessible_resources?.length);
   for (const file of ['popup.html', 'sidepanel.html', manifest.background.service_worker])
     assert.ok(fs.existsSync(path.join(output, file)), file);

@@ -9,13 +9,12 @@
   "scripts": {
     "dev": "wxt",
     "build": "wxt build",
-    "build:platform": "wxt build",
     "zip": "wxt zip",
     "postinstall": "wxt prepare",
     "typecheck": "wxt prepare && tsc --noEmit",
     "test": "npm run typecheck && vitest run",
     "test:unit": "vitest run",
-    "test:build": "npm run build && node --test tests/build.test.mjs tests/platform-build.test.mjs",
+    "test:build": "npm run build && node --test tests/build.test.mjs tests/remote-build.test.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
@@ -38,5 +37,5 @@
     "vitest": "^5.0.0",
     "wxt": "^0.21.4"
   },
-  "description": "Coco OpenMAX browser executor — WXT + React, platform-authorized task tabs"
+  "description": "Coco browser executor — WXT + React. Connect to a zylos-browser-remote relay for side-panel chat and browser tasks."
 }

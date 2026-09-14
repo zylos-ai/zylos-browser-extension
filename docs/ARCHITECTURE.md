@@ -1,5 +1,9 @@
 # 架构和开发边界
 
+> 以下是旧 Channel / OpenMAX 接入的历史演进记录。当前插件固定使用 remote 入口，
+> 标准构建输出为 `.output/chrome-mv3`；当前结构和启动步骤见 [README](../README.md)，
+> 消息协议见 [relay PROTOCOL](../../zylos-browser-remote/docs/PROTOCOL.md)。
+
 ## 专用工作标签（0.8.0）
 
 路由改为显式 task 会话，不跟随前台焦点。ControlCard 的授权按钮创建独立后台标签，或按用户选择指定当前页；executor 维护确切 tabIds 和 selected tabId，用 Chrome 原生绿色组标记。组成员关系不是授权，不能借拖入同组获取私人页控制权。Channel 的 CDP lease 同时绑定 deviceId、sessionId 和该逻辑目标。

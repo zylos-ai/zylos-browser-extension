@@ -1,6 +1,5 @@
 node_modules/
 .output/
-.output-platform/
 .wxt/
 coverage/
 .DS_Store

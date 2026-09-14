@@ -1,4 +1,17 @@
-# v0.5.0：改为 WXT 默认结构
+# 构建目录迁移
+
+## 2026-09-14：remote 成为唯一构建入口
+
+- 普通 `npm run build` 直接构建 remote 插件，输出到 WXT 默认的 `.output/chrome-mv3`。
+- 移除 `WXT_TRANSPORT` 选择器以及 `build:platform`、`build:remote` 等分模式命令。
+- 删除旧 `.output` 中的历史产物，以及 `.output-platform`、`.output-remote` 目录，重新生成当前构建。
+- Coco 根目录 `Browser-dev.sh` 使用新的命令和输出路径。
+
+在 Chrome 停用旧扩展，重新加载 `.output/chrome-mv3`，填写 relay 地址和原 key。
+不能假设旧加载路径的 Chrome storage 自动迁移；使用原 key 可以保持原 C4 endpoint。
+后续在同一目录构建，只需刷新扩展。完整步骤见 [README](../README.md)。
+
+## 历史记录：v0.5.0 改为 WXT 默认结构
 
 ## 变化
 

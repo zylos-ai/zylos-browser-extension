@@ -15,15 +15,15 @@ test('uses WXT default source and output structure without legacy wrappers', () 
   expect(fs.readFileSync(path.join(root, 'wxt.config.ts'), 'utf8')).not.toMatch(
     /srcDir:|entrypointsDir:/,
   );
-  // Keep the installed platform artifact path stable; only one runtime ships.
-  expect(fs.readFileSync(path.join(root, 'wxt.config.ts'), 'utf8')).toContain(
-    "outDir: '.output-platform'",
-  );
+  const wxtConfig = fs.readFileSync(path.join(root, 'wxt.config.ts'), 'utf8');
+  expect(wxtConfig).not.toMatch(/outDir:|WXT_TRANSPORT/);
+  expect(pkg.scripts['build:platform']).toBeUndefined();
+  expect(pkg.scripts['build:remote']).toBeUndefined();
   for (const item of [
     'entrypoints/background/index.ts',
     'entrypoints/popup/index.html',
     'entrypoints/sidepanel/index.html',
-    'components/ExecutorPanel.tsx',
+    'components/RemotePanel.tsx',
     'assets/styles.css',
     'utils/automation/executor.ts',
   ]) {
