@@ -112,6 +112,7 @@ export function startRemoteBackground() {
     state.connected = false;
     state.connecting = false;
     inflight.clear();
+    idem.cancel();
     try {
       old?.close(1000, reason);
     } catch {
@@ -155,6 +156,7 @@ export function startRemoteBackground() {
       state.connected = false;
       state.connecting = false;
       inflight.clear();
+      idem.cancel();
       // 4001 = superseded by a newer socket of ours (another window / reload); do not fight it.
       if (ev.code === 4001) state.error = '另一处连接已接管此 key';
       else if (ev.code === 1006 && !state.error)
@@ -273,6 +275,7 @@ export function startRemoteBackground() {
     backoff = BACKOFF_MIN_MS;
     if (!config.enabled) {
       // Kill switch: the owner flipped it, so end any task too.
+      idem.cancel();
       await release().catch(() => {});
       state.error = '';
       publish();
@@ -308,7 +311,7 @@ export function startRemoteBackground() {
       if (!socket && config.enabled && state.configured) void connect();
     });
   });
-  void chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true }).catch(() => {});
+  void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 
   // ---------------------------------------------------------------- panel
   chrome.runtime.onMessage.addListener((raw, sender, reply) => {
@@ -354,6 +357,7 @@ export function startRemoteBackground() {
           await revealTask();
           return snapshot();
         case 'remote-stop':
+          idem.cancel();
           await release();
           return snapshot();
       }

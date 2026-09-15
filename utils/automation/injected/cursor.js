@@ -22,12 +22,6 @@ function renderCursor(update) {
     }
     return;
   }
-  // Only renew an existing visual. A heartbeat must not reveal a hidden screenshot
-  // overlay, interrupt a movement, or resurrect a removed cursor.
-  if (update.action === 'heartbeat') {
-    if (state?.owner === update.owner && state.host.isConnected) state.renew?.();
-    return;
-  }
   if (!state || state.owner !== update.owner || !state.host.isConnected) {
     if (state) {
       state.cancelMovement?.();
@@ -97,18 +91,8 @@ function renderCursor(update) {
   // Native trajectory samples must match the dispatched coordinate, including edges.
   const x = update.nativePoint ? update.x : Math.max(2, Math.min(innerWidth - 4, update.x));
   const y = update.nativePoint ? update.y : Math.max(2, Math.min(innerHeight - 4, update.y));
-  // MCP's first input may have no preceding mouse event. Show an honest UI proxy
-  // arriving from a neutral corner, not an inferred position of the user's mouse.
-  const previous =
-    state.position ||
-    (update.animateFromAnchor
-      ? { x: Math.max(2, innerWidth - 60), y: Math.max(2, innerHeight - 60) }
-      : null);
-  const from = state.position
-    ? getComputedStyle(state.pointer).transform
-    : previous
-      ? `translate(${previous.x}px,${previous.y}px)`
-      : null;
+  const previous = state.position;
+  const from = previous ? getComputedStyle(state.pointer).transform : null;
   state.cancelMovement?.();
   state.host.dataset.action = update.action;
   state.host.style.setProperty('visibility', 'visible', 'important');

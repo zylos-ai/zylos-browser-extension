@@ -1,10 +1,11 @@
+import { PageActions, type ElementRef } from './page-actions';
+import { frameEvent, frameSessions, enableFrames, clearFrameSessions } from './frames';
+import { isBlockedUrl } from '../guard';
 import { cursorExpression } from './cursor';
 import { cleanupTask, recordTask } from './task-lifecycle';
 import { PointerMotion } from './pointer-motion';
-import domActionSource from './injected/dom-action.js?raw';
 import type { Command } from '../commands';
-import type { CdpResults, Cursor, DomResults, GrantedTab, Point, Scope } from './types';
-import { CDP_METHODS, type CdpBind, type CdpBinding, type CdpRequest } from '../cdp-protocol';
+import type { CdpResults, Cursor, GrantedTab, Point, Scope } from './types';
 
 let grant: GrantedTab | null = null;
 const pointerMotion = new PointerMotion();
@@ -12,39 +13,21 @@ let cursor: Cursor | null = null;
 let control: Scope | null = null;
 let parked = false;
 let pauseTimer: ReturnType<typeof setTimeout> | undefined;
-let cdpBinding: CdpBinding | null = null;
-let cursorHeartbeat: ReturnType<typeof setTimeout> | undefined;
-function stopCursorHeartbeat() {
-  clearTimeout(cursorHeartbeat);
-  cursorHeartbeat = undefined;
-}
-function keepEngineCursor(visual: Cursor, binding: CdpBinding) {
-  stopCursorHeartbeat();
-  const alive = () =>
-    cursor === visual && cdpBinding === binding && !!control && !parked && grant === visual.lease;
-  if (!alive()) return;
-  cursorHeartbeat = setTimeout(async () => {
-    if (!alive()) return;
-    try {
-      await chrome.debugger.sendCommand({ tabId: visual.tabId }, 'Runtime.evaluate', {
-        contextId: visual.contextId,
-        expression: cursorExpression({ action: 'heartbeat', owner: visual.owner }),
-        returnByValue: true,
-        timeout: 500,
-      });
-      if (alive()) keepEngineCursor(visual, binding);
-    } catch {
-      /* The page visual expires by itself if the connection is lost. */
-    }
-  }, 1000);
-}
-let cdpEvent: (event: unknown) => void = () => {};
-export const onCdpEvent = (fn: typeof cdpEvent) => {
-  cdpEvent = fn;
-};
 let attachmentQueue: Promise<unknown> = Promise.resolve();
 let consentRevision = 0;
-let refs = new Map<string, { backendNodeId: number; generation: number }>();
+let operationRevision = 0;
+const refs = new Map<string, ElementRef>();
+let dialog: {
+  tabId: number;
+  sessionId?: string;
+  type: string;
+  message: string;
+  defaultPrompt: string;
+} | null = null;
+let dragData: unknown = null;
+let popupQueue: Promise<unknown> = Promise.resolve();
+const newPopups: number[] = [];
+
 let generation = 0;
 let changed: (tab: GrantedTab | null) => void = () => {};
 function fail(code: string, message = code): never {
@@ -103,8 +86,10 @@ function serial<T>(fn: () => Promise<T>): Promise<T> {
   return next;
 }
 async function detachCurrent(strict = false) {
-  cdpBinding = null;
   const old = grant;
+  clearFrameSessions();
+  dialog = null;
+  dragData = null;
   grant = null;
   invalidate();
   publish();
@@ -126,7 +111,6 @@ async function detachCurrent(strict = false) {
   }
 }
 async function clearCursor() {
-  stopCursorHeartbeat();
   const previous = cursor;
   cursor = null;
   if (!previous) return;
@@ -141,12 +125,14 @@ async function clearCursor() {
 }
 export async function release(cleanup = true, strict = false) {
   clearTimeout(pauseTimer);
-  cdpBinding = null;
+
   const previous = control;
   // Revoke synchronously: queued or in-flight attachments cannot revive consent.
   control = null;
+  newPopups.length = 0;
   parked = true;
   consentRevision++;
+  operationRevision++;
   invalidate();
   publish();
   await serial(() => detachCurrent(strict));
@@ -156,53 +142,49 @@ export async function release(cleanup = true, strict = false) {
   await chrome.action.setBadgeText({ text: '' });
   publish();
 }
-// tabId comes from explicit panel consent or a verified chat handoff, never a model.
-export async function attach(
-  tabId: number,
-  mode: 'current' | 'new' = 'current',
-  initial?: { url: string; taskId: string; windowId: number },
-) {
-  if (initial && (mode !== 'new' || !allowed(initial.url))) fail('INVALID_URL');
+// The Remote dispatcher supplies a verified source window; every task gets a new tab.
+export async function createTask(initial: {
+  sourceTabId: number;
+  windowId: number;
+  url: string;
+  taskId: string;
+}) {
+  if (!allowed(initial.url)) fail('INVALID_URL');
   const releasing = release();
   const revision = consentRevision;
   await releasing;
-  let tab = await chrome.tabs.get(tabId);
+  const source = await chrome.tabs.get(initial.sourceTabId);
   if (revision !== consentRevision) fail('STOPPED');
-  if (tab.incognito) fail('UNSUPPORTED_WINDOW', '不支持无痕窗口');
-  if (initial && tab.windowId !== initial.windowId) fail('INVALID_CHAT_SOURCE');
-  const taskId = initial?.taskId || crypto.randomUUID();
-  if (mode === 'new') {
-    tab = await chrome.tabs.create({
-      windowId: tab.windowId,
-      index: tab.index + 1,
-      openerTabId: tab.id,
-      url: initial?.url || 'about:blank',
-      active: !!initial,
-    });
-    if (tab.id === undefined) fail('TAB_UNAVAILABLE');
-    try {
-      await recordTask(taskId, tab.windowId, null, tab.id, true);
-    } catch (error) {
-      await chrome.tabs.remove(tab.id).catch(() => {});
-      throw error;
-    }
-    if (revision !== consentRevision) {
-      await cleanupTask(taskId).catch(() => {});
-      fail('STOPPED');
-    }
-  }
+  if (source.incognito) fail('UNSUPPORTED_WINDOW', '不支持无痕窗口');
+  if (source.windowId !== initial.windowId) fail('INVALID_TASK_SOURCE');
+  const taskId = initial.taskId;
+  const tab = await chrome.tabs.create({
+    windowId: source.windowId,
+    index: source.index + 1,
+    openerTabId: source.id,
+    url: initial.url,
+    active: true,
+  });
   if (tab.id === undefined) fail('TAB_UNAVAILABLE');
-  // Chrome otherwise creates the group in the focused window (possibly the
-  // panel's window), moving our explicitly selected tab out of its task window.
+  try {
+    await recordTask(taskId, tab.windowId, null, tab.id, true);
+  } catch (error) {
+    await chrome.tabs.remove(tab.id).catch(() => {});
+    throw error;
+  }
+  if (revision !== consentRevision) {
+    await cleanupTask(taskId).catch(() => {});
+    fail('STOPPED');
+  }
   let groupId: number;
   try {
     groupId = await chrome.tabs.group({
       tabIds: [tab.id],
       createProperties: { windowId: tab.windowId },
     });
-    await recordTask(taskId, tab.windowId, groupId, tab.id, mode === 'new');
+    await recordTask(taskId, tab.windowId, groupId, tab.id, true);
   } catch (error) {
-    if (mode === 'new') await cleanupTask(taskId).catch(() => {});
+    await cleanupTask(taskId).catch(() => {});
     throw error;
   }
   const session: Scope = {
@@ -245,7 +227,7 @@ function syncTarget() {
       // No active-tab fallback. Closing/moving/ungrouping the task target revokes
       // control even while it was parked after finish.
       void release();
-      fail('TASK_TAB_UNAVAILABLE', '工作标签已关闭或移出任务组，请重新授权');
+      fail('TASK_TAB_UNAVAILABLE', '工作标签已关闭或移出任务组，请重新创建任务');
     }
     if (!inspectable(tab)) {
       await detachCurrent();
@@ -282,6 +264,11 @@ function syncTarget() {
         title: (fresh.title || '').slice(0, 500),
       };
       invalidate();
+      await enableFrames({ tabId: tab.id });
+      // Keep the controlled renderer active without selecting the user's tab.
+      await chrome.debugger.sendCommand({ tabId: tab.id }, 'Emulation.setFocusEmulationEnabled', {
+        enabled: true,
+      });
       publish();
     } finally {
       if (grant?.id !== tab.id) await chrome.debugger.detach({ tabId: tab.id }).catch(() => {});
@@ -296,48 +283,37 @@ function refreshTaskTarget() {
 export function initializeExecutor() {
   chrome.debugger.onDetach.addListener((source, reason) => {
     if (grant?.id !== source.tabId) return;
-    stopCursorHeartbeat();
+
     cursor = null; // The visual's short TTL also cleans up after external detachment.
     grant = null;
-    cdpBinding = null;
+
     invalidate();
     publish();
     void release(); // Closing the task tab / Chrome Cancel / DevTools ends control.
   });
   chrome.debugger.onEvent.addListener((source, method, params) => {
     if (source.tabId !== grant?.id) return;
-    if (cdpBinding && source.tabId === cdpBinding.tabId && !('sessionId' in source)) {
-      // Only the top-page events needed by the engine. Never forward network headers/cookies.
-      const eventMethods =
-        /^(Page\.(frameNavigated|frameStartedLoading|frameStoppedLoading|lifecycleEvent|loadEventFired|domContentEventFired|navigatedWithinDocument)|Runtime\.(executionContextCreated|executionContextDestroyed|executionContextsCleared)|Network\.(requestWillBeSent|responseReceived|loadingFinished|loadingFailed))$/;
-      if (eventMethods.test(method)) {
-        let safe = params as Record<string, unknown> | undefined;
-        if (method.startsWith('Network.') && safe) {
-          const request = safe.request as { url?: string; method?: string } | undefined;
-          const response = safe.response as
-            { url?: string; status?: number; mimeType?: string } | undefined;
-          safe = {
-            requestId: safe.requestId,
-            timestamp: safe.timestamp,
-            type: safe.type,
-            ...(request ? { request: { url: request.url, method: request.method } } : {}),
-            ...(response
-              ? {
-                  response: {
-                    url: response.url,
-                    status: response.status,
-                    mimeType: response.mimeType,
-                  },
-                }
-              : {}),
-          };
-        }
-        cdpEvent({ type: 'cdp-event', leaseId: cdpBinding.leaseId, method, params: safe || {} });
-      }
+    const childSource = source as { tabId: number; sessionId?: string };
+    frameEvent(childSource, method, params);
+    if (method === 'Input.dragIntercepted') dragData = (params as { data: unknown }).data;
+    if (method === 'Page.javascriptDialogOpening') {
+      const p = params as { type: string; message: string; defaultPrompt?: string };
+      dialog = {
+        tabId: source.tabId!,
+        sessionId: childSource.sessionId,
+        type: p.type,
+        message: p.message,
+        defaultPrompt: p.defaultPrompt || '',
+      };
+      publish();
     }
+    if (method === 'Page.javascriptDialogClosed') {
+      dialog = null;
+      publish();
+    }
+    if (childSource.sessionId) return;
     const frame = (params as { frame?: { parentId?: string; url: string } } | undefined)?.frame;
     if (grant && method === 'Page.frameNavigated' && frame && !frame.parentId) {
-      stopCursorHeartbeat();
       cursor = null;
       invalidate();
       if (!allowed(frame.url)) refreshTaskTarget();
@@ -351,7 +327,6 @@ export function initializeExecutor() {
       (method === 'Runtime.executionContextDestroyed' &&
         (params as { executionContextId?: number })?.executionContextId === cursor?.contextId)
     ) {
-      stopCursorHeartbeat();
       cursor = null;
     }
   });
@@ -380,6 +355,61 @@ export function initializeExecutor() {
     if (info.title) grant.title = info.title.slice(0, 500);
     changed(currentGrant());
   });
+  chrome.tabs.onCreated.addListener((tab) => {
+    const session = control;
+    if (
+      !session ||
+      tab.id === undefined ||
+      tab.openerTabId === undefined ||
+      !session.tabIds.includes(tab.openerTabId) ||
+      tab.incognito
+    )
+      return;
+    const id = tab.id,
+      opener = tab.openerTabId;
+    const work = async () => {
+      if (control !== session || session.tabIds.includes(id) || session.tabIds.length >= 8) return;
+      const parent = await chrome.tabs.get(opener).catch(() => null);
+      let fresh = await chrome.tabs.get(id).catch(() => null);
+      if (
+        control !== session ||
+        !parent ||
+        !inScope(parent, session) ||
+        !fresh ||
+        fresh.openerTabId !== opener ||
+        fresh.incognito
+      )
+        return;
+      if (
+        fresh.url &&
+        fresh.url !== 'about:blank' &&
+        (!allowed(fresh.url) || isBlockedUrl(fresh.url))
+      )
+        return;
+      if (fresh.windowId !== session.windowId) {
+        await chrome.tabs.move(id, { windowId: session.windowId, index: -1 });
+        fresh = await chrome.tabs.get(id);
+      }
+      if (control !== session) return;
+      await recordTask(session.sessionId, session.windowId, session.groupId, id, true);
+      if (control !== session) {
+        await cleanupTask(session.sessionId).catch(() => {});
+        return;
+      }
+      await chrome.tabs.group({ tabIds: [id], groupId: session.groupId });
+      if (control !== session) {
+        await cleanupTask(session.sessionId).catch(() => {});
+        return;
+      }
+      session.tabIds.push(id);
+      newPopups.push(id);
+      publish();
+    };
+    popupQueue = popupQueue
+      .catch(() => {})
+      .then(work)
+      .catch(() => {});
+  });
   // Browser focus is the user's, not an authorization or routing signal.
   const lostTab = (id: number) => {
     if (!control?.tabIds.includes(id)) return;
@@ -406,79 +436,6 @@ export async function revealTask() {
   if (control !== session) fail('STOPPED');
   await chrome.tabs.update(session.tabId, { active: true });
   if (control === session) await chrome.windows.update(session.windowId, { focused: true });
-}
-
-export async function bindCdp(request: CdpBind) {
-  const session = control;
-  if (!session || session.sessionId !== request.controlSessionId) fail('CONTROL_NOT_GRANTED');
-  if (Date.now() > request.deadline) fail('COMMAND_EXPIRED');
-  parked = false;
-  await syncTarget();
-  if (control !== session) fail('STOPPED');
-  if (Date.now() > request.deadline) fail('COMMAND_EXPIRED');
-  if (!grant) fail('NO_CONTROLLABLE_TAB', '请先打开普通网页，或使用 open 导航当前标签');
-  await markTask(session, 'working');
-  if (control !== session) fail('STOPPED');
-  cdpBinding = { leaseId: request.leaseId, controlSessionId: session.sessionId, tabId: grant.id };
-  return { ...cdpBinding, url: grant.url, title: grant.title };
-}
-
-async function engineCursor(
-  lease: GrantedTab,
-  action: string,
-  point: Partial<Point> = {},
-  wait = false,
-  nativePoint = false,
-  moving = false,
-) {
-  const binding = cdpBinding;
-  const revision = generation;
-  const valid = () =>
-    !!control && grant === lease && cdpBinding === binding && generation === revision && !parked;
-  try {
-    if (!valid()) return;
-    if (['hide', 'restore'].includes(action) && !cursor) return;
-    if (!cursor || cursor.lease !== lease) {
-      const tree = (await chrome.debugger.sendCommand(
-        { tabId: lease.id },
-        'Page.getFrameTree',
-      )) as CdpResults['Page.getFrameTree'];
-      const world = (await chrome.debugger.sendCommand(
-        { tabId: lease.id },
-        'Page.createIsolatedWorld',
-        {
-          frameId: tree.frameTree.frame.id,
-          worldName: 'coco-visual-cursor',
-        },
-      )) as { executionContextId: number };
-      if (!valid()) return;
-      cursor = {
-        lease,
-        tabId: lease.id,
-        contextId: world.executionContextId,
-        owner: crypto.randomUUID(),
-      };
-    }
-    await chrome.debugger.sendCommand({ tabId: lease.id }, 'Runtime.evaluate', {
-      contextId: cursor.contextId,
-      expression: cursorExpression({
-        action,
-        owner: cursor.owner,
-        ...point,
-        waitForArrival: wait,
-        animateFromAnchor: true,
-        nativePoint,
-        moving,
-      }),
-      awaitPromise: true,
-      returnByValue: true,
-      timeout: 750,
-    });
-    if (valid() && cursor && binding && !['hide', 'restore'].includes(action))
-      keepEngineCursor(cursor, binding);
-  } catch {
-    /* Visual feedback must never retry a real action. */
-  }
 }
 
 async function dispatchPointer(
@@ -510,146 +467,8 @@ async function dispatchPointer(
   });
 }
 
-export async function executeCdp(request: CdpRequest) {
-  const binding = cdpBinding;
-  const lease = grant;
-  const session = control;
-  const actionRevision = generation;
-  const check = () => {
-    if (
-      !binding ||
-      cdpBinding !== binding ||
-      !lease ||
-      grant !== lease ||
-      control !== session ||
-      binding.leaseId !== request.leaseId ||
-      binding.tabId !== request.tabId ||
-      binding.controlSessionId !== request.controlSessionId
-    )
-      fail('CDP_SESSION_EXPIRED');
-    if (Date.now() > request.deadline) fail('COMMAND_EXPIRED');
-  };
-  check();
-  if (!CDP_METHODS.has(request.method) || request.sessionId) fail('CDP_METHOD_NOT_ALLOWED');
-  const tab = await chrome.tabs.get(request.tabId);
-  check();
-  if (!inScope(tab, session) || tab.id !== session?.tabId || !inspectable(tab))
-    fail('PAGE_CHANGED');
-  if (request.method === 'Page.navigate' && !allowed(String(request.params.url || '')))
-    fail('UNSUPPORTED_PAGE');
-  if (request.method === 'Page.captureScreenshot' && request.params.captureBeyondViewport === true)
-    fail('CDP_METHOD_NOT_ALLOWED', '当前仅允许可见视口截图');
-  const target = { tabId: request.tabId };
-  let inputPoint: unknown;
-  // Keep the existing password / 2FA handoff boundary. The model cannot call raw eval.
-  if (request.method === 'Runtime.callFunctionOn' && typeof request.params.objectId === 'string') {
-    const focusing =
-      typeof request.params.functionDeclaration === 'string' &&
-      /^function\(\)\s*\{\s*this\.focus\(\);?\s*\}$/.test(request.params.functionDeclaration);
-    const sensitive = (await chrome.debugger.sendCommand(target, 'Runtime.callFunctionOn', {
-      objectId: request.params.objectId,
-      returnByValue: true,
-      functionDeclaration: `function(){const e=this; const sensitive=!!(e instanceof Element && e.matches("input[type=password],input[autocomplete=one-time-code]"));
-        const r=${focusing} && e instanceof Element ? e.getBoundingClientRect() : null;
-        return {sensitive,point:r && r.width>0 && r.height>0 && r.bottom>0 && r.top<innerHeight && r.right>0 && r.left<innerWidth ? {x:Math.max(0,r.left)+(Math.min(innerWidth,r.right)-Math.max(0,r.left))/2,y:Math.max(0,r.top)+(Math.min(innerHeight,r.bottom)-Math.max(0,r.top))/2}:null}}`,
-    })) as { result?: { value?: { sensitive?: boolean; point?: unknown } } };
-    check();
-    if (sensitive.result?.value?.sensitive) fail('SENSITIVE_INPUT', '密码和验证码请由用户输入');
-    if (focusing) inputPoint = sensitive.result?.value?.point;
-  }
-  // Tab can move focus into a protected field between keyDown and keyUp.
-  // Permit only a text-free release so the key is never left logically pressed.
-  const keyRelease =
-    request.method === 'Input.dispatchKeyEvent' &&
-    request.params.type === 'keyUp' &&
-    !request.params.text &&
-    !request.params.unmodifiedText;
-  if (['Input.insertText', 'Input.dispatchKeyEvent'].includes(request.method) && !keyRelease) {
-    const sensitive = (await chrome.debugger.sendCommand(target, 'Runtime.evaluate', {
-      expression: `(() => {let e=document.activeElement; while(e?.shadowRoot?.activeElement) e=e.shadowRoot.activeElement;
-        const sensitive=!!e?.matches("input[type=password],input[autocomplete=one-time-code]");
-        const r=e && e!==document.body && e!==document.documentElement ? e.getBoundingClientRect() : null;
-        return {sensitive,point:r && r.width>0 && r.height>0 && r.bottom>0 && r.top<innerHeight && r.right>0 && r.left<innerWidth ? {x:Math.max(0,r.left)+(Math.min(innerWidth,r.right)-Math.max(0,r.left))/2,y:Math.max(0,r.top)+(Math.min(innerHeight,r.bottom)-Math.max(0,r.top))/2}:null}})()`,
-      returnByValue: true,
-    })) as { result?: { value?: { sensitive?: boolean; point?: unknown } } };
-    check();
-    if (sensitive.result?.value?.sensitive) fail('SENSITIVE_INPUT', '密码和验证码请由用户输入');
-    inputPoint = sensitive.result?.value?.point;
-  }
-  if (inputPoint && typeof inputPoint === 'object' && lease) {
-    const { x, y } = inputPoint as Point;
-    if (Number.isFinite(x) && Number.isFinite(y))
-      await engineCursor(
-        lease,
-        request.method === 'Input.dispatchKeyEvent' ? 'key' : 'input',
-        { x, y },
-        true,
-      );
-  }
-  if (request.method === 'Input.dispatchMouseEvent' && lease) {
-    const checkMotion = () => {
-      check();
-      if (generation !== actionRevision) fail('PAGE_CHANGED');
-    };
-    return dispatchPointer(
-      request.params,
-      checkMotion,
-      async (method, params) => {
-        checkMotion();
-        const fresh = await chrome.tabs.get(lease.id);
-        checkMotion();
-        if (
-          !inScope(fresh, session) ||
-          fresh.id !== session?.tabId ||
-          !inspectable(fresh) ||
-          fresh.url !== lease.url
-        )
-          fail('PAGE_CHANGED');
-        const result = await chrome.debugger.sendCommand(target, method, params);
-        checkMotion();
-        return result || {};
-      },
-      (action, point, moving) => engineCursor(lease, action, point, false, true, moving),
-    );
-  }
-  const capture = request.method === 'Page.captureScreenshot';
-  if (capture && cursor && lease) await engineCursor(lease, 'hide');
-  try {
-    check();
-    if (
-      inputPoint &&
-      ['Input.insertText', 'Input.dispatchKeyEvent'].includes(request.method) &&
-      !keyRelease
-    ) {
-      // The user/page can change focus while the visual is moving. Recheck the
-      // protected-field boundary immediately before delivering text or keys.
-      const fresh = (await chrome.debugger.sendCommand(target, 'Runtime.evaluate', {
-        expression:
-          '(() => {let e=document.activeElement; while(e?.shadowRoot?.activeElement) e=e.shadowRoot.activeElement; return !!e?.matches("input[type=password],input[autocomplete=one-time-code]")})()',
-        returnByValue: true,
-      })) as { result?: { value?: unknown } };
-      check();
-      if (fresh.result?.value === true) fail('SENSITIVE_INPUT', '密码和验证码请由用户输入');
-    }
-    // A page can navigate while the UI pointer is arriving. Never dispatch an
-    // old coordinate/text action into the new document after that visual wait.
-    if (
-      generation !== actionRevision &&
-      ((request.method.startsWith('Input.') &&
-        !keyRelease &&
-        request.params.type !== 'mouseReleased') ||
-        inputPoint)
-    )
-      fail('PAGE_CHANGED');
-    const result = await chrome.debugger.sendCommand(target, request.method, request.params);
-    check();
-    return result || {};
-  } finally {
-    if (capture && cursor && lease && cdpBinding === binding) await engineCursor(lease, 'restore');
-  }
-}
-
 export async function execute(command: Command, deadline: number) {
+  const startedOperationRevision = operationRevision;
   if (command.op === 'finalize') {
     if (Date.now() > deadline) fail('COMMAND_EXPIRED');
     if (control && control.sessionId !== command.taskId)
@@ -662,7 +481,8 @@ export async function execute(command: Command, deadline: number) {
     return result;
   }
   if (command.op === 'finish' || command.op === 'pause') {
-    cdpBinding = null;
+    operationRevision++;
+
     const session = control;
     if (Date.now() > deadline) fail('COMMAND_EXPIRED');
     parked = true;
@@ -689,13 +509,16 @@ export async function execute(command: Command, deadline: number) {
   const session = control;
   if (!session) {
     if (command.op === 'tabs') return { tabs: [], control: null };
-    fail('CONTROL_NOT_GRANTED', '请在插件中创建或授权 Agent 工作标签');
+    if (command.op === 'dialog' && command.action === 'get') return { dialog: null };
+    fail('CONTROL_NOT_GRANTED', '请先用 open 创建 Agent 工作标签');
   }
   const checkSession = () => {
+    if (operationRevision !== startedOperationRevision) fail('STOPPED');
     if (control !== session) fail('STOPPED');
     if (Date.now() > deadline) fail('COMMAND_EXPIRED');
   };
   if (command.op === 'tabs') {
+    await popupQueue;
     const tabs = await chrome.tabs.query({ windowId: session.windowId });
     checkSession();
     return {
@@ -710,6 +533,168 @@ export async function execute(command: Command, deadline: number) {
           selected: t.id === session.tabId,
         })),
     };
+  }
+  if (command.op === 'dialog') {
+    checkSession();
+    const current = dialog;
+    if (command.action === 'get') return { dialog: current ? { ...current } : null };
+    if (!current || !session.tabIds.includes(current.tabId)) fail('NO_DIALOG');
+    await chrome.debugger.sendCommand(
+      { tabId: current.tabId, ...(current.sessionId ? { sessionId: current.sessionId } : {}) },
+      'Page.handleJavaScriptDialog',
+      {
+        accept: command.action === 'accept',
+        ...(command.promptText !== undefined ? { promptText: command.promptText } : {}),
+      },
+    );
+    checkSession();
+    if (dialog === current) dialog = null;
+    return { handled: true, type: current.type };
+  }
+  if (command.op === 'wait') {
+    const until = Math.min(deadline, Date.now() + command.timeoutMs);
+    while (Date.now() < until) {
+      checkSession();
+      if (dialog) fail('DIALOG_OPEN', `${dialog.type}: ${dialog.message}; use dialog`);
+      if (command.condition === 'new-tab') {
+        await popupQueue;
+        const id = newPopups.find((id) => session.tabIds.includes(id));
+        if (id !== undefined) {
+          newPopups.splice(newPopups.indexOf(id), 1);
+          return { matched: true, tabId: id };
+        }
+      } else if (command.condition === 'url' || command.condition === 'loaded') {
+        const tab = await chrome.tabs.get(session.tabId);
+        checkSession();
+        if (
+          inScope(tab, session) &&
+          inspectable(tab) &&
+          !isBlockedUrl(tab.url) &&
+          tab.status === 'complete' &&
+          !tab.pendingUrl &&
+          (command.condition !== 'url' || tab.url === command.url)
+        )
+          return { matched: true, url: tab.url };
+      } else {
+        try {
+          let matches: { ref: string; state: any }[];
+          if (command.selector)
+            matches = (
+              (await execute(
+                { op: 'find', selector: command.selector, frameId: command.frameId },
+                until,
+              )) as { matches: typeof matches }
+            ).matches;
+          else if (command.ref)
+            matches = [
+              {
+                ref: command.ref,
+                state: await execute({ op: 'inspect', ref: command.ref }, until),
+              },
+            ];
+          else {
+            const tab = await chrome.tabs.get(session.tabId);
+            checkSession();
+            if (!inScope(tab, session) || !inspectable(tab)) fail('PAGE_LOADING');
+            if (isBlockedUrl(tab.url)) fail('BLOCKED_URL');
+            parked = false;
+            await syncTarget();
+            checkSession();
+            const version = generation;
+            const verify = () => {
+              checkSession();
+              if (generation !== version) fail('PAGE_CHANGED');
+            };
+            const actions = new PageActions({
+              send: (method, params = {}, sessionId) => {
+                verify();
+                return boundedCdp(
+                  () =>
+                    chrome.debugger.sendCommand(
+                      { tabId: session.tabId, ...(sessionId ? { sessionId } : {}) },
+                      method,
+                      params,
+                    ),
+                  verify,
+                );
+              },
+              check: verify,
+              refs,
+              generation,
+              mouse: async () => {},
+              preview: async () => {},
+              dragData: () => null,
+            });
+            for (const frame of await actions.safeFrames()) {
+              if (command.frameId && frame.id !== command.frameId) continue;
+              if (await actions.query(frame, 'text', command.text))
+                return { matched: true, frameId: frame.id };
+            }
+            matches = [];
+          }
+          const condition = command.condition;
+          const match = matches.find(
+            ({ state }) =>
+              condition === 'attached' ||
+              (condition === 'visible' && state.visible) ||
+              (condition === 'enabled' && state.visible && !state.disabled) ||
+              (condition === 'clickable' && state.clickable) ||
+              (condition === 'checked' && state.checked === (command.checked ?? true)) ||
+              (condition === 'text' && state.text?.includes(command.text!)),
+          );
+          if (match) return { matched: true, ...match };
+          if (
+            (condition === 'detached' && !matches.length) ||
+            (condition === 'hidden' && matches.every((m) => !m.state.visible))
+          )
+            return { matched: true };
+          if (command.selector) for (const match of matches) refs.delete(match.ref);
+        } catch (error) {
+          checkSession();
+          const code = (error as { code?: string }).code;
+          if (code === 'STALE_ELEMENT' && ['detached', 'hidden'].includes(command.condition))
+            return { matched: true };
+          if (
+            !['STALE_ELEMENT', 'PAGE_CHANGED', 'PAGE_LOADING', 'FRAME_UNAVAILABLE'].includes(
+              code || '',
+            )
+          )
+            throw error;
+        }
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(100, Math.max(1, until - Date.now()))),
+      );
+    }
+    fail(
+      'WAIT_TIMEOUT',
+      `Condition ${command.condition} did not match within ${command.timeoutMs}ms`,
+    );
+  }
+  if (command.op === 'back' || command.op === 'forward' || command.op === 'reload') {
+    parked = false;
+    await syncTarget();
+    checkSession();
+    const tab = await chrome.tabs.get(session.tabId);
+    checkSession();
+    if (!inScope(tab, session) || !inspectable(tab)) fail('TASK_TAB_UNAVAILABLE');
+    if (command.op === 'reload') await chrome.tabs.reload(tab.id!);
+    else {
+      const history = (await chrome.debugger.sendCommand(
+        { tabId: tab.id! },
+        'Page.getNavigationHistory',
+      )) as { currentIndex: number; entries: { id: number; url: string }[] };
+      checkSession();
+      const entry = history.entries[history.currentIndex + (command.op === 'back' ? -1 : 1)];
+      if (!entry) fail('NO_HISTORY_ENTRY');
+      if (!allowed(entry.url) || isBlockedUrl(entry.url)) fail('BLOCKED_URL');
+      await chrome.debugger.sendCommand({ tabId: tab.id! }, 'Page.navigateToHistoryEntry', {
+        entryId: entry.id,
+      });
+    }
+    checkSession();
+    invalidate();
+    return { tabId: tab.id, navigating: true };
   }
   if (command.op === 'open' || command.op === 'new-tab' || command.op === 'switch-tab') {
     checkSession();
@@ -743,7 +728,7 @@ export async function execute(command: Command, deadline: number) {
           : await chrome.tabs.get(session.tabId);
       checkSession();
       if (!tab || tab.id === undefined || !inScope(tab, session))
-        fail('TAB_NOT_GRANTED', '只能操作已明确授权的 Agent 工作标签');
+        fail('TAB_NOT_GRANTED', '只能操作当前任务的 Agent 工作标签');
       if (command.op === 'switch-tab' && !inspectable(tab)) fail('UNSUPPORTED_PAGE');
       target = command.op === 'open' ? await chrome.tabs.update(tab.id, { url: command.url }) : tab;
     }
@@ -804,28 +789,29 @@ export async function execute(command: Command, deadline: number) {
       invalidate();
       fail('PAGE_CHANGED', '页面已变化，请重新 snapshot');
     }
-    const result = await chrome.debugger.sendCommand({ tabId: lease.id }, method, params);
+    const result = await actionCdp(method, params);
     check();
     return result as CdpResults[M];
   }
-  async function call<A extends keyof DomResults>(
-    objectId: string,
-    action: A,
-    args: unknown[] = [],
-  ): Promise<DomResults[A]> {
-    const response = await cdp('Runtime.callFunctionOn', {
-      objectId,
-      functionDeclaration: domActionSource,
-      arguments: [action, ...args].map((value) => ({ value })),
-      returnByValue: true,
-    });
-    if (response.exceptionDetails)
-      fail(
-        'ELEMENT_ERROR',
-        response.exceptionDetails.exception?.description?.split('\n')[0] ||
-          'Element cannot be used',
-      );
-    return response.result.value as DomResults[A];
+  async function actionCdp(
+    method: string,
+    params: Record<string, unknown> = {},
+    sessionId?: string,
+  ): Promise<any> {
+    check();
+    const tab = await chrome.tabs.get(lease.id);
+    check();
+    if (!inScope(tab, session) || !inspectable(tab) || tab.url !== lease.url) fail('PAGE_CHANGED');
+    if (isBlockedUrl(tab.url)) fail('BLOCKED_URL');
+    if (sessionId && frameSessions().get(sessionId)?.tabId !== lease.id) fail('FRAME_UNAVAILABLE');
+    if (dialog) fail('DIALOG_OPEN', `${dialog.type}: ${dialog.message}; use dialog`);
+    const target = { tabId: lease.id, ...(sessionId ? { sessionId } : {}) };
+    const result = await boundedCdp(
+      () => chrome.debugger.sendCommand(target, method, params),
+      check,
+    );
+    check();
+    return result;
   }
   async function showCursor(
     action: string,
@@ -876,67 +862,22 @@ export async function execute(command: Command, deadline: number) {
     await showCursor(action, point, true);
     check();
   }
-  async function element(ref: string) {
-    const entry = refs.get(ref);
-    if (!entry || entry.generation !== generation)
-      fail('STALE_ELEMENT', '请重新 snapshot 获取元素引用');
-    try {
-      const resolved = await cdp('DOM.resolveNode', {
-        backendNodeId: entry.backendNodeId,
-        objectGroup: 'coco-browser',
-      });
-      await call(resolved.object.objectId, 'validate');
-      return resolved.object.objectId;
-    } catch (error) {
-      fail(
-        error instanceof Error && 'code' in error ? String(error.code) : 'STALE_ELEMENT',
-        error instanceof Error ? error.message : 'Element unavailable',
-      );
-    }
-  }
+  const actions = new PageActions({
+    send: actionCdp,
+    mouse: (params) => cdp('Input.dispatchMouseEvent', params),
+    check,
+    preview,
+    refs,
+    generation: startGeneration,
+    dragData: () => dragData,
+  });
   async function snapshot(interactiveOnly: boolean) {
-    refs.clear();
-    await cdp('Runtime.releaseObjectGroup', { objectGroup: 'coco-browser' });
-    const { nodes } = await cdp('Accessibility.getFullAXTree');
-    const serial = crypto.randomUUID().slice(0, 8);
-    const interactive = new Set([
-      'button',
-      'link',
-      'textbox',
-      'searchbox',
-      'combobox',
-      'checkbox',
-      'radio',
-      'switch',
-      'tab',
-      'menuitem',
-      'slider',
-      'spinbutton',
-    ]);
-    const lines = [
+    return actions.snapshot(interactiveOnly, [
       `URL: ${lease.url}`,
       `Title: ${lease.title}`,
       `Tab: ${lease.id}`,
-      'Scope: selected Agent work tab, top document. User focus changes do not change the task target. Cross-site navigation keeps this control session.',
-    ];
-    let count = 0;
-    for (const node of nodes) {
-      if (node.ignored) continue;
-      const role = node.role?.value || '';
-      if (interactiveOnly && !interactive.has(role)) continue;
-      if (!role || (!node.name?.value && !interactive.has(role))) continue;
-      if (++count > 600) {
-        lines.push('[truncated: 600 nodes]');
-        break;
-      }
-      const ref = `@${serial}-e${count}`;
-      if (node.backendDOMNodeId)
-        refs.set(ref, { backendNodeId: node.backendDOMNodeId, generation });
-      lines.push(
-        `${node.backendDOMNodeId ? ref : '-'} ${role} ${JSON.stringify(String(node.name?.value || '').slice(0, 400))}`,
-      );
-    }
-    return { text: lines.join('\n') };
+      'Scope: selected Agent work tab and its permitted frames. Coordinates use the top viewport in CSS pixels.',
+    ]);
   }
   async function screenshot() {
     if (cursor) await showCursor('hide');
@@ -1014,77 +955,32 @@ export async function execute(command: Command, deadline: number) {
       throw error;
     }
   }
-  if (command.op === 'scroll') {
-    const { cssLayoutViewport: v } = await cdp('Page.getLayoutMetrics');
-    return cdp('Input.dispatchMouseEvent', {
-      type: 'mouseWheel',
-      x: Math.floor(v.clientWidth / 2),
-      y: Math.floor(v.clientHeight / 2),
-      deltaX:
-        command.direction === 'right'
-          ? command.pixels
-          : command.direction === 'left'
-            ? -command.pixels
-            : 0,
-      deltaY:
-        command.direction === 'down'
-          ? command.pixels
-          : command.direction === 'up'
-            ? -command.pixels
-            : 0,
-    });
-  }
-  if (command.op === 'keypress') {
-    const keys = {
-      Enter: 13,
-      Tab: 9,
-      Escape: 27,
-      Backspace: 8,
-      ArrowUp: 38,
-      ArrowDown: 40,
-      ArrowLeft: 37,
-      ArrowRight: 39,
-    };
-    if (!keys[command.key]) fail('INVALID_KEY');
-    await cdp('Input.dispatchKeyEvent', {
-      type: 'keyDown',
-      key: command.key,
-      code: command.key,
-      windowsVirtualKeyCode: keys[command.key],
-      ...(command.key === 'Enter' ? { text: '\r' } : {}),
-    });
-    await cdp('Input.dispatchKeyEvent', {
-      type: 'keyUp',
-      key: command.key,
-      code: command.key,
-      windowsVirtualKeyCode: keys[command.key],
-    });
-    return { pressed: command.key };
-  }
-  if (command.op === 'click' || command.op === 'fill' || command.op === 'type') {
-    const objectId = await element(command.ref);
-    if (command.op === 'click') {
-      const point = await call(objectId, 'point', [true]);
-      // dispatchPointer performs the real movement and re-hit-tests before pressing.
-      await cdp('Input.dispatchMouseEvent', {
-        type: 'mousePressed',
-        ...point,
-        button: 'left',
-        clickCount: 1,
-      });
-      await cdp('Input.dispatchMouseEvent', {
-        type: 'mouseReleased',
-        ...point,
-        button: 'left',
-        clickCount: 1,
-      });
-    } else {
-      const point = await call(objectId, 'prepare-input', [command.op === 'fill']);
-      await preview('input', point);
-      await call(objectId, 'check-focus');
-      await cdp('Input.insertText', { text: command.text });
-    }
-    return { done: true };
-  }
-  fail('UNSUPPORTED_COMMAND');
+  dragData = null;
+  return actions.run(command);
+}
+
+function boundedCdp<T>(work: () => Promise<T>, check: () => void): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setInterval(() => {
+      try {
+        check();
+        if (dialog) fail('DIALOG_OPEN', `${dialog.type}: ${dialog.message}; use dialog`);
+      } catch (error) {
+        clearInterval(timer);
+        reject(error);
+      }
+    }, 50);
+    Promise.resolve()
+      .then(work)
+      .then(
+        (value) => {
+          clearInterval(timer);
+          resolve(value);
+        },
+        (error) => {
+          clearInterval(timer);
+          reject(error);
+        },
+      );
+  });
 }

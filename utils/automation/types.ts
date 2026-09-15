@@ -13,12 +13,6 @@ export type Scope = {
   tabIds: number[];
 };
 export type Cursor = { lease: GrantedTab; tabId: number; contextId: number; owner: string };
-export type DomResults = {
-  validate: null;
-  point: Point;
-  'prepare-input': Point;
-  'check-focus': null;
-};
 export type CdpResults = {
   'DOM.getNodeForLocation': { backendNodeId: number; frameId: string };
   'Runtime.callFunctionOn': {

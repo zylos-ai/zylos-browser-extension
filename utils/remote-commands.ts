@@ -4,52 +4,17 @@
 // The relay forwards `{method, params, requestId}` verbatim and knows nothing
 // about this table; anything not listed here is refused with UNKNOWN_METHOD.
 import { z } from 'zod';
-import { commandSchema, type Command } from './commands';
+import { actionParams, commandSchema, type Command } from './commands';
 import { isBlockedUrl } from './guard';
-import { attach, currentControl, currentGrant, execute } from './automation/executor';
+import { createTask, currentControl, currentGrant, execute } from './automation/executor';
 import { REMOTE_VERSION } from './remote';
 
 const url = z.string().url().max(4000);
-const ref = z.string().max(100);
-const text = z.string().max(20000);
-
-// Params schemas; each maps 1:1 onto an executor command or a local action.
+// Agent-visible actions use exactly the same schemas as the executor.
 const paramSchemas = {
+  ...actionParams,
   info: z.object({}).strict(),
   start: z.object({ url }).strict(),
-  open: z.object({ url }).strict(),
-  'new-tab': z.object({ url }).strict(),
-  'switch-tab': z.object({ tabId: z.number().int().nonnegative() }).strict(),
-  tabs: z.object({}).strict(),
-  snapshot: z.object({ interactive: z.boolean().default(false) }).strict(),
-  observe: z.object({ interactive: z.boolean().default(false) }).strict(),
-  screenshot: z.object({}).strict(),
-  click: z.object({ ref }).strict(),
-  fill: z.object({ ref, text }).strict(),
-  type: z.object({ ref, text }).strict(),
-  scroll: z
-    .object({
-      direction: z.enum(['up', 'down', 'left', 'right']),
-      pixels: z.number().int().min(1).max(2000).default(500),
-    })
-    .strict(),
-  keypress: z
-    .object({
-      key: z.enum([
-        'Enter',
-        'Tab',
-        'Escape',
-        'Backspace',
-        'ArrowUp',
-        'ArrowDown',
-        'ArrowLeft',
-        'ArrowRight',
-      ]),
-    })
-    .strict(),
-  pause: z.object({}).strict(),
-  finish: z.object({}).strict(),
-  stop: z.object({}).strict(),
   finalize: z.object({ keep: z.array(z.number().int().nonnegative()).max(8).default([]) }).strict(),
 } as const;
 
@@ -63,6 +28,15 @@ const IDEMPOTENT_METHODS = new Set<RemoteMethod>([
   'new-tab',
   'switch-tab',
   'click',
+  'hover',
+  'double-click',
+  'right-click',
+  'drag',
+  'select',
+  'check',
+  'back',
+  'forward',
+  'reload',
   'fill',
   'type',
   'scroll',
@@ -76,7 +50,20 @@ const GUARDED_METHODS = new Set<RemoteMethod>([
   'snapshot',
   'observe',
   'screenshot',
+  'find',
+  'inspect',
+  'frames',
+  'wait',
   'click',
+  'hover',
+  'double-click',
+  'right-click',
+  'drag',
+  'select',
+  'check',
+  'back',
+  'forward',
+  'reload',
   'fill',
   'type',
   'scroll',
@@ -89,6 +76,11 @@ export const REMOTE_CAPABILITIES = [
   'idempotency-v1',
   'url-guard-v1',
   'task-tab-v1',
+  'browser-actions-v2',
+  'frames-v1',
+  'popup-v1',
+  'dialog-v1',
+  'wait-v1',
 ];
 
 export class RemoteError extends Error {
@@ -100,11 +92,51 @@ export class RemoteError extends Error {
     this.details = details;
   }
 }
-const fail = (code: string, message = code, details?: unknown): never => {
+function fail(code: string, message = code, details?: unknown): never {
   throw new RemoteError(code, message, details);
-};
+}
 
 export class IdempotencyCache {
+  private queue: Promise<unknown> = Promise.resolve();
+  private epoch = 0;
+  private pending = new Map<string, { signature: string; promise: Promise<unknown> }>();
+  private signatures = new Map<string, string>();
+  cancel() {
+    this.epoch++;
+  }
+  run(req: Dispatch, work: () => Promise<unknown>): Promise<unknown> {
+    const urgent = ['stop', 'pause', 'finish', 'finalize'].includes(req.method);
+    const independent = req.method === 'info' || req.method === 'dialog';
+    if (urgent) this.cancel();
+    const epoch = this.epoch;
+    const id = req.requestId;
+    const signature = JSON.stringify([req.method, req.params]);
+    if (id) {
+      const previous = this.pending.get(id);
+      const saved = this.signatures.get(id);
+      if ((previous && previous.signature !== signature) || (saved && saved !== signature))
+        return Promise.reject(
+          new RemoteError('REQUEST_ID_CONFLICT', 'requestId belongs to another command'),
+        );
+      if (previous)
+        return previous.promise.then((value) => ({ ...(value as object), replayed: true }));
+    }
+    const execute = async () => {
+      if (!urgent && epoch !== this.epoch)
+        fail('STOPPED', 'Command was queued before control was stopped');
+      const result = await work();
+      if (id && this.map.has(id)) this.signatures.set(id, signature);
+      return result;
+    };
+    const promise = urgent || independent ? execute() : this.queue.catch(() => {}).then(execute);
+    if (!urgent && !independent) this.queue = promise.catch(() => {});
+    if (id) {
+      this.pending.set(id, { signature, promise });
+      void promise.finally(() => this.pending.delete(id)).catch(() => {});
+    }
+    return promise;
+  }
+
   private map = new Map<string, unknown>();
   constructor(private cap = 200) {}
   get(id: string) {
@@ -116,7 +148,11 @@ export class IdempotencyCache {
   }
   set(id: string, value: unknown) {
     this.map.set(id, value);
-    while (this.map.size > this.cap) this.map.delete(this.map.keys().next().value!);
+    while (this.map.size > this.cap) {
+      const id = this.map.keys().next().value!;
+      this.map.delete(id);
+      this.signatures.delete(id);
+    }
   }
   get size() {
     return this.map.size;
@@ -136,7 +172,8 @@ async function sourceTab(): Promise<{ tabId: number; windowId: number }> {
 
 async function startTask(target: string) {
   const source = await sourceTab();
-  const grant = await attach(source.tabId, 'new', {
+  const grant = await createTask({
+    sourceTabId: source.tabId,
     url: target,
     taskId: crypto.randomUUID(),
     windowId: source.windowId,
@@ -158,9 +195,12 @@ export type Dispatch = {
   keyId: string;
 };
 
-export async function dispatch(req: Dispatch, idem: IdempotencyCache): Promise<unknown> {
+export function dispatch(req: Dispatch, idem: IdempotencyCache): Promise<unknown> {
+  return idem.run(req, () => dispatchNow(req, idem));
+}
+async function dispatchNow(req: Dispatch, idem: IdempotencyCache): Promise<unknown> {
   const method = req.method as RemoteMethod;
-  const schema = paramSchemas[method];
+  const schema = Object.hasOwn(paramSchemas, method) ? paramSchemas[method] : undefined;
   if (!schema) fail('UNKNOWN_METHOD', `unknown method ${req.method}; see info.capabilities`);
 
   const parsed = schema.safeParse(req.params ?? {});
@@ -170,6 +210,10 @@ export async function dispatch(req: Dispatch, idem: IdempotencyCache): Promise<u
       parsed.error.issues.map((i) => `${i.path.join('.') || 'params'}: ${i.message}`).join('; '),
     );
   const params = parsed.data as Record<string, unknown>;
+  if (Object.hasOwn(actionParams, req.method)) {
+    const command = commandSchema.safeParse({ op: req.method, ...params });
+    if (!command.success) fail('BAD_PARAMS', command.error.issues.map((i) => i.message).join('; '));
+  }
 
   const deadline = typeof req.deadline === 'number' ? req.deadline : Date.now() + 30_000;
   if (Date.now() > deadline) fail('COMMAND_EXPIRED');

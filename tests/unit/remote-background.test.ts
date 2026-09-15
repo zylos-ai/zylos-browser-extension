@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const executor = vi.hoisted(() => ({
-  attach: vi.fn(),
+  createTask: vi.fn(),
   release: vi.fn(async () => {}),
   currentControl: vi.fn((): null | { sessionId: string; tabId: number; tabIds: number[] } => null),
   currentGrant: vi.fn(() => null),
@@ -156,7 +156,7 @@ describe('remote background', () => {
       requestId: 'r1',
     });
     await flush();
-    expect(executor.attach).toHaveBeenCalled();
+    expect(executor.createTask).toHaveBeenCalled();
     const resp = ws.frames.find((f) => f.id === 1) as {
       type: string;
       result: { started: boolean };

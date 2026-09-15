@@ -71,6 +71,7 @@ async function fixture() {
         calls.push({ method: 'tabs.update', id, ...props });
         return { ...getTab(id) };
       },
+      onCreated: event(),
       onUpdated: event(),
       onActivated: event(),
       onDetached: event(),
@@ -126,12 +127,19 @@ async function fixture() {
   const executor = await import('../../utils/automation/executor');
   executor.initializeExecutor();
   const command = (command) => executor.execute(command, Date.now() + 10000);
-  return { executor, tabs, groups, attached, calls, command };
+  const start = () =>
+    executor.createTask({
+      sourceTabId: 1,
+      windowId: 1,
+      url: 'https://example.com/task',
+      taskId: crypto.randomUUID(),
+    });
+  return { executor, tabs, groups, attached, calls, command, start };
 }
 
 test('finalize closes only task-created temporary tabs, keeps explicit results, and rejects old tasks', async () => {
   const s = await fixture();
-  await s.executor.attach(1, 'new');
+  await s.start();
   assert.deepEqual(
     s.calls.find((c) => c.method === 'tabs.create'),
     {
@@ -139,8 +147,8 @@ test('finalize closes only task-created temporary tabs, keeps explicit results, 
       windowId: 1,
       index: 1,
       openerTabId: 1,
-      url: 'about:blank',
-      active: false,
+      url: 'https://example.com/task',
+      active: true,
     },
   );
   const task = s.executor.currentControl();
@@ -155,7 +163,7 @@ test('finalize closes only task-created temporary tabs, keeps explicit results, 
   assert.ok(s.tabs.has(1) && s.tabs.has(2) && s.tabs.has(result.tabId));
   assert.equal(s.tabs.get(result.tabId).groupId, -1);
   assert.deepEqual(await s.command({ op: 'finalize', taskId: task.sessionId, keep: [] }), receipt);
-  await s.executor.attach(1, 'new');
+  await s.start();
   await assert.rejects(
     s.command({ op: 'finalize', taskId: task.sessionId, keep: [] }),
     (e) => e.code === 'STALE_TASK',
@@ -167,13 +175,13 @@ test('finalize closes only task-created temporary tabs, keeps explicit results, 
 test('handoff keeps the group; completion removes it without a terminal-status rename', async () => {
   for (const outcome of ['temporary', 'deliverable', 'stop']) {
     const s = await fixture();
-    await s.executor.attach(1, 'new');
+    await s.start();
     const task = s.executor.currentControl();
     await s.command({ op: 'pause' });
     assert.equal(s.groups.get(task.groupId).title, 'Coco Agent · 等待继续');
     assert.equal(s.tabs.get(task.tabId).groupId, task.groupId);
     assert.equal(s.attached.size, 0);
-    // The legacy reply barrier must not turn a handoff into a completed group.
+    // Finishing detaches the debugger while the paused task retains its group.
     await s.command({ op: 'finish' });
     assert.equal(s.groups.get(task.groupId).title, 'Coco Agent · 等待继续');
     if (outcome === 'stop') await s.command({ op: 'stop' });
@@ -197,7 +205,7 @@ test('handoff keeps the group; completion removes it without a terminal-status r
 
 test('failed cleanup revokes control, keeps its journal and retention decision, then retries safely', async () => {
   const s = await fixture();
-  await s.executor.attach(1, 'new');
+  await s.start();
   const task = s.executor.currentControl();
   const result = await s.command({ op: 'new-tab', url: 'https://example.com/result' });
   const remove = chrome.tabs.remove;
@@ -221,12 +229,12 @@ test('failed cleanup revokes control, keeps its journal and retention decision, 
 
 test('moved task tabs are handed to user; worker recovery closes only verified owned leftovers', async () => {
   const s = await fixture();
-  await s.executor.attach(1, 'new');
+  await s.start();
   const task = s.executor.currentControl();
   s.tabs.get(task.tabId).groupId = -1;
   await s.executor.release();
   assert.ok(s.tabs.has(task.tabId));
-  await s.executor.attach(1, 'new');
+  await s.start();
   const next = s.executor.currentControl();
   await s.executor.release(false); // Simulate lost control with a persisted task journal.
   vi.resetModules();
@@ -238,7 +246,7 @@ test('moved task tabs are handed to user; worker recovery closes only verified o
 
 test('browser-session change never deletes tabs based on old persisted numeric IDs', async () => {
   const s = await fixture();
-  await s.executor.attach(1, 'new');
+  await s.start();
   const task = s.executor.currentControl();
   await s.executor.release(false);
   await chrome.storage.session.set({ taskBrowserNonce: 'different-browser-session' });
@@ -251,7 +259,7 @@ test('browser-session change never deletes tabs based on old persisted numeric I
 
 test('recovery does not clean a newly recorded active task; finalize does not claim failed detach succeeded', async () => {
   const s = await fixture();
-  await s.executor.attach(1, 'new');
+  await s.start();
   const task = s.executor.currentControl();
   await s.command({ op: 'open', url: 'https://example.com/task' });
   const { recoverTasks } = await import('../../utils/automation/task-lifecycle');
@@ -279,36 +287,24 @@ test('cancelling while creating a new tab rolls back that tab without touching u
     await s.executor.release();
     return create(props);
   };
-  await assert.rejects(s.executor.attach(1, 'new'), (e) => e.code === 'STOPPED');
+  await assert.rejects(s.start(), (e) => e.code === 'STOPPED');
   assert.deepEqual([...s.tabs.keys()], [1, 2]);
 });
 
-test('default new work tab stays bound in the background and never navigates the user tab', async () => {
+test('work tab stays the target when user focus changes and never navigates a personal tab', async () => {
   const s = await fixture();
-  await s.executor.attach(1, 'new');
+  await s.start();
   const c = s.executor.currentControl();
   assert.equal(c.scope, 'task');
   assert.notEqual(c.tabId, 1);
-  assert.equal(s.tabs.get(c.tabId).active, false);
+  assert.equal(s.tabs.get(c.tabId).active, true);
   assert.equal(s.tabs.get(1).groupId, -1);
   assert.equal(s.groups.get(c.groupId).color, 'green');
   await s.command({ op: 'open', url: 'https://example.com/agent-work' });
   assert.equal(s.tabs.get(1).url, 'https://example.com/user-1');
   assert.equal(s.tabs.get(c.tabId).url, 'https://example.com/agent-work');
   chrome.tabs.onActivated.emit({ windowId: 1, tabId: 2 });
-  const binding = await s.executor.bindCdp({
-    leaseId: crypto.randomUUID(),
-    controlSessionId: c.sessionId,
-    deadline: Date.now() + 10000,
-  });
-  await s.executor.executeCdp({
-    ...binding,
-    type: 'cdp-command',
-    id: crypto.randomUUID(),
-    deadline: Date.now() + 10000,
-    method: 'Input.dispatchMouseEvent',
-    params: { type: 'mousePressed', x: 100, y: 80 },
-  });
+  await s.command({ op: 'click', x: 100, y: 80 });
   const inputCalls = s.calls.filter((call) => call.method.startsWith('Input.'));
   assert.ok(inputCalls.length > 1);
   assert.ok(inputCalls.every((call) => call.tabId === c.tabId));
@@ -326,20 +322,20 @@ test('default new work tab stays bound in the background and never navigates the
 
 test('group membership alone never grants access; moving the target out revokes control', async () => {
   const s = await fixture();
-  await s.executor.attach(1);
+  await s.start();
   const c = s.executor.currentControl();
   s.tabs.get(2).groupId = c.groupId;
   chrome.tabs.onUpdated.emit(2, { groupId: c.groupId }, s.tabs.get(2));
   assert.deepEqual(
     (await s.command({ op: 'tabs' })).tabs.map((t) => t.id),
-    [1],
+    [c.tabId],
   );
   await assert.rejects(
     s.command({ op: 'switch-tab', tabId: 2 }),
     (e) => e.code === 'TAB_NOT_GRANTED',
   );
-  s.tabs.get(1).groupId = -1;
-  chrome.tabs.onUpdated.emit(1, { groupId: -1 }, s.tabs.get(1));
+  s.tabs.get(c.tabId).groupId = -1;
+  chrome.tabs.onUpdated.emit(c.tabId, { groupId: -1 }, s.tabs.get(c.tabId));
   assert.equal(s.executor.currentControl(), null);
   await s.executor.release();
   assert.equal(s.attached.size, 0);
@@ -347,7 +343,7 @@ test('group membership alone never grants access; moving the target out revokes 
 
 test('finish retains only work tabs; resume does not follow focus; closing a parked target stops', async () => {
   const s = await fixture();
-  await s.executor.attach(1);
+  await s.start();
   const c = s.executor.currentControl();
   await s.command({ op: 'finish' });
   assert.equal(s.groups.get(c.groupId).title, 'Coco Agent · 等待继续');
@@ -357,10 +353,10 @@ test('finish retains only work tabs; resume does not follow focus; closing a par
   s.tabs.get(2).active = true;
   chrome.tabs.onActivated.emit({ windowId: 1, tabId: 2 });
   await s.command({ op: 'snapshot' });
-  assert.equal(s.executor.currentGrant().id, 1);
+  assert.equal(s.executor.currentGrant().id, c.tabId);
   await s.command({ op: 'finish' });
-  s.tabs.delete(1);
-  chrome.tabs.onRemoved.emit(1);
+  s.tabs.delete(c.tabIds[0]);
+  chrome.tabs.onRemoved.emit(c.tabIds[0]);
   assert.equal(s.executor.currentControl(), null);
   await s.executor.release();
   await assert.rejects(
@@ -372,20 +368,24 @@ test('finish retains only work tabs; resume does not follow focus; closing a par
 
 test('additional task tabs and logical switches do not change browser focus', async () => {
   const s = await fixture();
-  await s.executor.attach(1);
+  await s.start();
   const c = s.executor.currentControl();
   const created = await s.command({ op: 'new-tab', url: 'https://example.com/work-2' });
   assert.equal(s.tabs.get(created.tabId).active, false);
   assert.equal(s.tabs.get(created.tabId).groupId, c.groupId);
   assert.equal(s.executor.currentGrant().id, created.tabId);
-  await s.command({ op: 'switch-tab', tabId: 1 });
-  assert.equal(s.executor.currentGrant().id, 1);
+  await s.command({ op: 'switch-tab', tabId: c.tabId });
+  assert.equal(s.executor.currentGrant().id, c.tabId);
   assert.equal(
     s.calls.some((c) => c.method === 'tabs.update' && c.active),
     false,
   );
   await s.executor.revealTask();
-  assert.ok(s.calls.some((c) => c.method === 'tabs.update' && c.id === 1 && c.active));
+  assert.ok(
+    s.calls.some(
+      (c) => c.method === 'tabs.update' && c.id === s.executor.currentControl().tabId && c.active,
+    ),
+  );
   await s.executor.release();
   assert.equal(s.groups.has(c.groupId), false, 'The empty task group disappears');
   assert.equal(s.tabs.has(created.tabId), false, 'Stop closes task-created temporary pages');
@@ -406,7 +406,7 @@ test('stop while a new work tab is being created cannot resurrect consent', asyn
     await continuation;
     return create(props);
   };
-  const pending = s.executor.attach(1, 'new');
+  const pending = s.start();
   const rejected = assert.rejects(pending, (e) => e.code === 'STOPPED');
   await started;
   await s.executor.release();
@@ -418,7 +418,7 @@ test('stop while a new work tab is being created cannot resurrect consent', asyn
 
 test('additional work tabs are bounded; removing a non-target never adopts another tab', async () => {
   const s = await fixture();
-  await s.executor.attach(1);
+  await s.start();
   for (let i = 0; i < 7; i++)
     await s.command({ op: 'new-tab', url: `https://example.com/work-${i}` });
   const c = s.executor.currentControl();
@@ -426,18 +426,23 @@ test('additional work tabs are bounded; removing a non-target never adopts anoth
     s.command({ op: 'new-tab', url: 'https://example.com/too-many' }),
     (e) => e.code === 'TASK_TAB_LIMIT',
   );
-  s.tabs.delete(1);
-  chrome.tabs.onRemoved.emit(1);
+  s.tabs.delete(c.tabIds[0]);
+  chrome.tabs.onRemoved.emit(c.tabIds[0]);
   assert.equal(s.executor.currentControl().tabId, c.tabId);
-  assert.equal(s.executor.currentControl().tabIds.includes(1), false);
+  assert.equal(s.executor.currentControl().tabIds.includes(c.tabIds[0]), false);
   assert.equal(s.executor.currentControl().tabIds.includes(2), false);
   await s.executor.release();
 });
 
-test('平台首个 open 在来源窗口旁创建真实 URL，任务 ID 不重新生成', async () => {
+test('首个 open 在来源窗口旁创建真实 URL，任务 ID 不重新生成', async () => {
   const s = await fixture();
   const taskId = '11111111-1111-4111-8111-111111111111';
-  await s.executor.attach(1, 'new', { url: 'https://example.com/start', taskId, windowId: 1 });
+  await s.executor.createTask({
+    sourceTabId: 1,
+    url: 'https://example.com/start',
+    taskId,
+    windowId: 1,
+  });
   assert.deepEqual(
     s.calls.find((c) => c.method === 'tabs.create'),
     {
@@ -457,7 +462,8 @@ test('平台首个 open 在来源窗口旁创建真实 URL，任务 ID 不重新
 test('来源窗口不符时首个 open 不回退当前窗口', async () => {
   const s = await fixture();
   await assert.rejects(
-    s.executor.attach(1, 'new', {
+    s.executor.createTask({
+      sourceTabId: 1,
       url: 'https://example.com/start',
       taskId: crypto.randomUUID(),
       windowId: 8,

@@ -6,7 +6,7 @@ import { z } from 'zod';
 
 export const REMOTE_SUBPROTOCOL = 'zylos-browser-remote.v2';
 export const REMOTE_KEY_PROTO_PREFIX = 'key.';
-export const REMOTE_VERSION = '1.0.0';
+export const REMOTE_VERSION = '1.2.0';
 export const MAX_CHAT_TEXT = 8000;
 export const CHAT_LOG_CAP = 200;
 
@@ -67,7 +67,7 @@ export const initialRemoteState: RemoteState = {
   chat: [],
 };
 
-// Panel -> background. Only the bundled popup/sidepanel may send these.
+// Panel -> background. Only the bundled sidepanel may send these.
 export const remoteRequestSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('remote-state') }).strict(),
   z.object({ type: z.literal('remote-save'), relayUrl: z.string(), key: z.string() }).strict(),

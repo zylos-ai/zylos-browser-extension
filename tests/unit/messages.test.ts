@@ -7,12 +7,12 @@ test('只有本插件打包的 UI 可以调用内部接口', () => {
       getURL: (p: string) => 'chrome-extension://' + 'a'.repeat(32) + '/' + p,
     },
   });
-  const sender = { id: chrome.runtime.id, url: chrome.runtime.getURL('popup.html') };
+  const sender = { id: chrome.runtime.id, url: chrome.runtime.getURL('sidepanel.html') };
   expect(isPanelSender(sender)).toBe(true);
-  expect(isPanelSender({ ...sender, url: chrome.runtime.getURL('sidepanel.html') })).toBe(true);
   for (const url of [
     'https://evil.test',
-    chrome.runtime.getURL('popup.html?grant=1'),
+    chrome.runtime.getURL('popup.html'),
+    chrome.runtime.getURL('sidepanel.html?grant=1'),
     chrome.runtime.getURL('other.html'),
   ])
     expect(isPanelSender({ ...sender, url })).toBe(false);

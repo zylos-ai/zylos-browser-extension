@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const executor = vi.hoisted(() => ({
-  attach: vi.fn(),
+  createTask: vi.fn(),
   execute: vi.fn(),
   currentControl: vi.fn((): null | { sessionId: string; tabId: number; tabIds: number[] } => null),
   currentGrant: vi.fn((): null | { id: number; url: string } => null),
@@ -35,7 +35,7 @@ beforeEach(() => {
   executor.currentControl.mockReturnValue(null);
   executor.currentGrant.mockReturnValue(null);
   executor.execute.mockImplementation(async (c: { op: string }) => ({ ran: c.op }));
-  executor.attach.mockImplementation(async () => {
+  executor.createTask.mockImplementation(async () => {
     executor.currentControl.mockReturnValue({
       sessionId: '22222222-2222-4222-8222-222222222222',
       tabId: 7,
@@ -75,7 +75,8 @@ describe('remote dispatch', () => {
     };
     expect(first.started).toBe(true);
     expect(first.tabId).toBe(7);
-    expect(executor.attach).toHaveBeenCalledWith(3, 'new', {
+    expect(executor.createTask).toHaveBeenCalledWith({
+      sourceTabId: 3,
       url: 'https://example.com/',
       taskId: '11111111-1111-4111-8111-111111111111',
       windowId: 1,
@@ -149,5 +150,84 @@ describe('remote dispatch', () => {
 
   it('honours the relay deadline', async () => {
     await rejects(call('info', {}, { deadline: Date.now() - 1 }), 'COMMAND_EXPIRED');
+  });
+});
+
+describe('browser actions v2', () => {
+  it('validates every new action before dispatch, retaining the thin relay contract', async () => {
+    await call('open', { url: 'https://example.com/' });
+    for (const [method, params] of [
+      ['hover', { x: 10, y: 20 }],
+      ['double-click', { ref: '@a-e1' }],
+      ['right-click', { ref: '@a-e1' }],
+      ['drag', { from: { ref: '@a-e1' }, to: { x: 90, y: 100 } }],
+      ['keypress', { key: 'a', modifiers: ['Control'] }],
+      ['select', { ref: '@a-e1', values: ['b'] }],
+      ['check', { ref: '@a-e1', checked: false }],
+      ['scroll', { ref: '@a-e1', direction: 'down' }],
+      ['find', { selector: '#input', frameId: 'child' }],
+      ['wait', { condition: 'clickable', selector: '#ready' }],
+      ['dialog', { action: 'accept', promptText: 'hello' }],
+      ['back', {}],
+      ['forward', {}],
+      ['reload', {}],
+      ['frames', {}],
+    ] as const)
+      await call(method, params);
+    expect(executor.execute).toHaveBeenCalledTimes(15);
+    for (const [method, params] of [
+      ['click', { x: 10 }],
+      ['hover', {}],
+      ['click', { ref: 'x', x: 1, y: 2 }],
+      ['drag', { from: { ref: 'x' }, to: {} }],
+      ['keypress', { key: 'a', modifiers: ['Unknown'] }],
+      ['wait', { condition: 'text' }],
+      ['wait', { condition: 'visible' }],
+      ['wait', { condition: 'url' }],
+      ['scroll', { direction: 'down', y: 3 }],
+    ] as const)
+      await rejects(call(method, params), 'BAD_PARAMS');
+    expect(executor.execute).toHaveBeenCalledTimes(15);
+  });
+  it('serializes actions, coalesces in-flight retries, rejects changed request IDs', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    executor.execute.mockImplementationOnce(async () => {
+      await gate;
+      return { clicked: true };
+    });
+    const a = call('click', { ref: 'a' }, { requestId: 'same' });
+    const retry = call('click', { ref: 'a' }, { requestId: 'same' });
+    const next = call('click', { ref: 'b' });
+    await vi.waitFor(() => expect(executor.execute).toHaveBeenCalledTimes(1));
+    await rejects(call('click', { ref: 'other' }, { requestId: 'same' }), 'REQUEST_ID_CONFLICT');
+    release();
+    expect(await a).toEqual({ clicked: true });
+    expect(await retry).toEqual({ clicked: true, replayed: true });
+    await next;
+    expect(executor.execute).toHaveBeenCalledTimes(2);
+  });
+  it('stop and dialog handling bypass a waiting command, and stop cancels queued actions', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    executor.execute.mockImplementationOnce(async () => {
+      await gate;
+      return {};
+    });
+    const active = call('wait', { condition: 'loaded' });
+    const queued = call('click', { ref: 'a' });
+    const rejected = rejects(queued, 'STOPPED');
+    await vi.waitFor(() => expect(executor.execute).toHaveBeenCalledTimes(1));
+    await call('dialog', { action: 'dismiss' });
+    await call('stop');
+    expect(executor.execute).toHaveBeenCalledTimes(3);
+    release();
+    await active;
+    await rejected;
+    expect(executor.execute).toHaveBeenCalledTimes(3);
   });
 });

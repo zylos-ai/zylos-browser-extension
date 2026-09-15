@@ -87,31 +87,9 @@ test('throttled animations are bounded and superseded moves cannot finish newer 
   await vi.advanceTimersByTimeAsync(400);
   await expect(current).resolves.toEqual({ arrived: false });
 });
-test('MCP first appearance animates from a UI anchor and heartbeat never creates a cursor', async () => {
-  render({ action: 'heartbeat' });
-  expect(document.querySelector('#coco-agent-cursor')).toBeNull();
-  const arrival = render({
-    action: 'input',
-    x: 100,
-    y: 100,
-    waitForArrival: true,
-    animateFromAnchor: true,
-  });
-  expect(document.querySelector<HTMLElement>('#coco-agent-cursor')?.dataset.movement).toBe(
-    'moving',
-  );
-  render({ action: 'heartbeat' });
-  expect(document.querySelector<HTMLElement>('#coco-agent-cursor')?.dataset.movement).toBe(
-    'moving',
-  );
-  animations[0]!.finish();
-  await expect(arrival).resolves.toEqual({ arrived: true });
-});
-test('heartbeat retains a hidden cursor without revealing it; loss of heartbeat self-cleans', async () => {
+test('hidden cursor restores before expiry and self-cleans after inactivity', async () => {
   await render({ action: 'input', x: 100, y: 100 });
   render({ action: 'hide' });
-  await vi.advanceTimersByTimeAsync(2000);
-  render({ action: 'heartbeat' });
   await vi.advanceTimersByTimeAsync(2000);
   expect(document.querySelector<HTMLElement>('#coco-agent-cursor')?.style.visibility).toBe(
     'hidden',
@@ -122,6 +100,6 @@ test('heartbeat retains a hidden cursor without revealing it; loss of heartbeat 
   );
   await vi.advanceTimersByTimeAsync(1001);
   expect(document.querySelector('#coco-agent-cursor')).toBeNull();
-  render({ action: 'heartbeat' });
+  render({ action: 'restore' });
   expect(document.querySelector('#coco-agent-cursor')).toBeNull();
 });

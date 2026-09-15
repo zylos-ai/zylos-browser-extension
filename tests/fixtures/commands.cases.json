@@ -1,27 +1,62 @@
 {
-  "protocol": 1,
   "valid": [
-    { "input": { "op": "pause" }, "expected": { "op": "pause" } },
     {
-      "input": { "op": "finalize", "taskId": "12345678-1234-4123-8123-123456789abc" },
-      "expected": { "op": "finalize", "taskId": "12345678-1234-4123-8123-123456789abc", "keep": [] }
+      "input": {
+        "op": "pause"
+      },
+      "expected": {
+        "op": "pause"
+      }
     },
     {
-      "input": { "op": "finalize", "taskId": "12345678-1234-4123-8123-123456789abc", "keep": [3] },
+      "input": {
+        "op": "finalize",
+        "taskId": "12345678-1234-4123-8123-123456789abc"
+      },
+      "expected": {
+        "op": "finalize",
+        "taskId": "12345678-1234-4123-8123-123456789abc",
+        "keep": []
+      }
+    },
+    {
+      "input": {
+        "op": "finalize",
+        "taskId": "12345678-1234-4123-8123-123456789abc",
+        "keep": [3]
+      },
       "expected": {
         "op": "finalize",
         "taskId": "12345678-1234-4123-8123-123456789abc",
         "keep": [3]
       }
     },
-    { "input": { "op": "finish" }, "expected": { "op": "finish" } },
     {
-      "input": { "op": "observe" },
-      "expected": { "op": "observe", "interactive": false }
+      "input": {
+        "op": "finish"
+      },
+      "expected": {
+        "op": "finish"
+      }
     },
     {
-      "input": { "op": "observe", "interactive": true },
-      "expected": { "op": "observe", "interactive": true }
+      "input": {
+        "op": "observe"
+      },
+      "expected": {
+        "op": "observe",
+        "interactive": false
+      }
+    },
+    {
+      "input": {
+        "op": "observe",
+        "interactive": true
+      },
+      "expected": {
+        "op": "observe",
+        "interactive": true
+      }
     },
     {
       "input": {
@@ -153,13 +188,34 @@
     }
   ],
   "invalid": [
-    { "op": "finalize" },
-    { "op": "finalize", "taskId": "old-task" },
-    { "op": "finalize", "taskId": "12345678-1234-4123-8123-123456789abc", "keep": [-1] },
-    { "op": "pause", "close": true },
-    { "op": "finish", "tabId": 1 },
-    { "op": "observe", "interactive": "true" },
-    { "op": "observe", "url": "https://unrelated.example" },
+    {
+      "op": "finalize"
+    },
+    {
+      "op": "finalize",
+      "taskId": "old-task"
+    },
+    {
+      "op": "finalize",
+      "taskId": "12345678-1234-4123-8123-123456789abc",
+      "keep": [-1]
+    },
+    {
+      "op": "pause",
+      "close": true
+    },
+    {
+      "op": "finish",
+      "tabId": 1
+    },
+    {
+      "op": "observe",
+      "interactive": "true"
+    },
+    {
+      "op": "observe",
+      "url": "https://unrelated.example"
+    },
     {},
     {
       "op": "evaluate",

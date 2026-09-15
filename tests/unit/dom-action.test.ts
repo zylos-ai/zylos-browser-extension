@@ -40,3 +40,58 @@ test('visible button preparation avoids forced centering and still rejects an ob
   });
   expect(() => action.call(button, 'point', false)).toThrow('covered');
 });
+
+test('shadow-root focus and input work in the element root', () => {
+  const host = document.createElement('div');
+  document.body.append(host);
+  const shadow = host.attachShadow({ mode: 'open' });
+  const input = document.createElement('input');
+  shadow.append(input);
+  input.scrollIntoView = vi.fn();
+  action.call(input, 'prepare-input', true);
+  expect(shadow.activeElement).toBe(input);
+  expect(() => action.call(input, 'check-focus')).not.toThrow();
+});
+
+test('native select dispatches input/change and refuses missing or disabled options', () => {
+  const select = document.createElement('select');
+  select.innerHTML =
+    '<option value="a">A</option><option value="b">B</option><optgroup disabled><option value="c">C</option></optgroup>';
+  document.body.append(select);
+  const events: string[] = [];
+  select.addEventListener('input', () => events.push('input'));
+  select.addEventListener('change', () => events.push('change'));
+  const run = action as unknown as (this: HTMLElement, op: string, arg?: unknown) => any;
+  run.call(select, 'select', ['b']);
+  expect(select.value).toBe('b');
+  expect(events).toEqual(['input', 'change']);
+  expect(() => run.call(select, 'select', ['c'])).toThrow('unavailable');
+  expect(() => run.call(select, 'select', ['missing'])).toThrow('unavailable');
+  expect(select.value).toBe('b');
+});
+
+test('inspect returns control state and redacts secrets; writing password or OTP is refused', () => {
+  for (const html of [
+    '<input type="password" value="secret">',
+    '<input autocomplete="one-time-code" value="123456">',
+  ]) {
+    document.body.innerHTML = html;
+    const input = document.querySelector('input')!;
+    const state = action.call(input, 'inspect') as {
+      value: string;
+      sensitive: boolean;
+      editable: boolean;
+    };
+    expect(state.value).toBe('[redacted]');
+    expect(state.sensitive).toBe(true);
+    expect(state.editable).toBe(false);
+    expect(() => action.call(input, 'prepare-input', true)).toThrow('handled by the user');
+  }
+  document.body.innerHTML = '<input type="checkbox" checked disabled>';
+  const state = action.call(document.querySelector('input')!, 'inspect') as {
+    checked: boolean;
+    disabled: boolean;
+  };
+  expect(state.checked).toBe(true);
+  expect(state.disabled).toBe(true);
+});

@@ -21,10 +21,6 @@
 body {
   margin: 0;
 }
-html[data-surface='popup'] {
-  width: 390px;
-  height: 600px;
-}
 .app {
   height: 100dvh;
   min-height: 360px;
@@ -86,7 +82,6 @@ button:disabled {
   cursor: default;
 }
 button:focus-visible,
-summary:focus-visible,
 input:focus,
 textarea:focus {
   outline: 2px solid var(--color-accent);
@@ -126,24 +121,12 @@ p {
 #error:empty {
   display: none;
 }
-.offline-notice {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-}
-.offline-notice button {
-  flex-shrink: 0;
-}
 #settings {
   padding: 16px;
   border-bottom: 1px solid var(--color-border);
   max-height: 60%;
   overflow-y: auto;
   flex-shrink: 0;
-}
-#pairing h2 {
-  font-size: 16px;
 }
 label {
   display: block;
@@ -160,13 +143,6 @@ textarea {
   background: #fafbf9;
   color: var(--color-text);
   margin-top: 6px;
-}
-summary {
-  font-size: 12px;
-  cursor: pointer;
-  padding: 8px 0;
-  min-height: 36px;
-  color: var(--color-muted);
 }
 main {
   flex: 1;
@@ -244,23 +220,6 @@ main {
   font-size: 12px;
   flex-shrink: 0;
 }
-.authorization-card {
-  background: #f7faf6;
-  border: 1px solid #a7bca9;
-  border-radius: var(--radius-card);
-  padding: 14px;
-  margin: 8px 0;
-  font-size: 13px;
-  overflow-wrap: anywhere;
-}
-.authorization-card p {
-  margin: 8px 0;
-}
-.authorization-goal {
-  max-height: 90px;
-  overflow-y: auto;
-  white-space: pre-wrap;
-}
 .row {
   display: flex;
   flex-wrap: wrap;
@@ -271,9 +230,6 @@ main {
   background: var(--color-surface);
   color: var(--color-text);
   border-color: var(--color-border);
-}
-.authorization-error {
-  color: var(--color-error);
 }
 @media (max-width: 360px) {
   header {
