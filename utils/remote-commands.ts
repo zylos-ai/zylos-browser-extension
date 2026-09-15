@@ -104,7 +104,7 @@ export class IdempotencyCache {
   cancel() {
     this.epoch++;
   }
-  run(req: Dispatch, work: () => Promise<unknown>): Promise<unknown> {
+  run(req: Dispatch, work: (assertActive: () => void) => Promise<unknown>): Promise<unknown> {
     const urgent = ['stop', 'pause', 'finish', 'finalize'].includes(req.method);
     const independent = req.method === 'info' || req.method === 'dialog';
     if (urgent) this.cancel();
@@ -121,10 +121,13 @@ export class IdempotencyCache {
       if (previous)
         return previous.promise.then((value) => ({ ...(value as object), replayed: true }));
     }
-    const execute = async () => {
+    const assertActive = () => {
       if (!urgent && epoch !== this.epoch)
         fail('STOPPED', 'Command was queued before control was stopped');
-      const result = await work();
+    };
+    const execute = async () => {
+      assertActive();
+      const result = await work(assertActive);
       if (id && this.map.has(id)) this.signatures.set(id, signature);
       return result;
     };
@@ -170,8 +173,9 @@ async function sourceTab(): Promise<{ tabId: number; windowId: number }> {
   return { tabId: tab.id, windowId };
 }
 
-async function startTask(target: string) {
+async function startTask(target: string, assertActive: () => void) {
   const source = await sourceTab();
+  assertActive();
   const grant = await createTask({
     sourceTabId: source.tabId,
     url: target,
@@ -196,9 +200,13 @@ export type Dispatch = {
 };
 
 export function dispatch(req: Dispatch, idem: IdempotencyCache): Promise<unknown> {
-  return idem.run(req, () => dispatchNow(req, idem));
+  return idem.run(req, (assertActive) => dispatchNow(req, idem, assertActive));
 }
-async function dispatchNow(req: Dispatch, idem: IdempotencyCache): Promise<unknown> {
+async function dispatchNow(
+  req: Dispatch,
+  idem: IdempotencyCache,
+  assertActive: () => void,
+): Promise<unknown> {
   const method = req.method as RemoteMethod;
   const schema = Object.hasOwn(paramSchemas, method) ? paramSchemas[method] : undefined;
   if (!schema) fail('UNKNOWN_METHOD', `unknown method ${req.method}; see info.capabilities`);
@@ -255,12 +263,12 @@ async function dispatchNow(req: Dispatch, idem: IdempotencyCache): Promise<unkno
       break;
     case 'start':
       if (currentControl()) fail('TASK_ALREADY_STARTED', '已有工作标签；用 open 导航，或先 stop');
-      result = await startTask(params.url as string);
+      result = await startTask(params.url as string, assertActive);
       break;
     case 'open':
       result = currentControl()
         ? await execute(commandSchema.parse({ op: 'open', url: params.url }), deadline)
-        : await startTask(params.url as string);
+        : await startTask(params.url as string, assertActive);
       break;
     case 'finalize': {
       const control = currentControl();

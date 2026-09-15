@@ -33,6 +33,9 @@ export default {
   browserFinished: 'Browser actions finished · Tabs kept',
   replyWaiting: 'Message sent. Waiting for the Agent to reply…',
   replyQueued: 'Message queued. Waiting for the Agent to reply…',
+  replyProgress: 'Progress received. Waiting for the final reply…',
+  taskCleanupFailed:
+    'Final reply received, but browser cleanup is incomplete. Reload the extension and check your tabs.',
   replyDelayed:
     'No reply for over 2 minutes. Check the Agent through your original chat channel. Your message will not be resent automatically.',
   replyDisconnected:

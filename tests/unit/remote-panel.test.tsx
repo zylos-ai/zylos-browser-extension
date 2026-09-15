@@ -165,7 +165,16 @@ test('runtime updates render real tasks, stop/reveal remain wired, and disconnec
   expect(send).toHaveBeenLastCalledWith({ type: 'remote-reveal' });
   await click('#stop-task');
   expect(send).toHaveBeenLastCalledWith({ type: 'remote-stop' });
-  state = { ...state, connected: false, task: null };
+  state = {
+    ...state,
+    task: null,
+    chat: [{ role: 'assistant', text: '播放已开始', ts: Date.now() }],
+  };
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(container.querySelector('.task-card')).toBeNull();
+  expect(container.querySelector('.reply-status')).toBeNull();
+  expect(container.querySelector('.message-text')?.textContent).toBe('播放已开始');
+  state = { ...state, connected: false };
   await act(async () => {
     listener({ type: 'remote-updated', state });
   });
@@ -185,7 +194,14 @@ test('waiting for a reply is separate from browser work and becomes a delay noti
   });
   expect(container.querySelector('.reply-status')?.textContent).toContain('超过 2 分钟');
   expect(send.mock.calls.length).toBe(sent);
-  state.chat.push({ role: 'assistant', text: '收到，正在查询', ts: Date.now() });
+  state.chat.push({ role: 'assistant', text: '收到，正在查询', ts: Date.now(), final: false });
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(container.querySelector('.reply-status')?.textContent).toContain('等待最终回复');
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(120_001);
+  });
+  expect(container.querySelector('.reply-status')?.textContent).toContain('超过 2 分钟');
+  state.chat.push({ role: 'assistant', text: '查询完成', ts: Date.now() });
   await act(async () => listener({ type: 'remote-updated', state }));
   expect(container.querySelector('.reply-status')).toBeNull();
 });

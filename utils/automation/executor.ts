@@ -139,12 +139,26 @@ export async function release(cleanup = true, strict = false) {
   operationRevision++;
   invalidate();
   publish();
-  await serial(() => detachCurrent(strict));
-  // Closing temporary tabs / ungrouping retained pages removes an empty group.
-  // Do not create a terminal-status group or rename user-owned remaining tabs.
-  if (previous && cleanup) await cleanupTask(previous.sessionId).catch(() => {});
-  await chrome.action.setBadgeText({ text: '' });
-  publish();
+  try {
+    await serial(() => detachCurrent(strict));
+    // Closing temporary tabs / ungrouping retained pages removes an empty group.
+    if (previous && cleanup) await cleanupTask(previous.sessionId).catch(() => {});
+  } finally {
+    if (!control) await chrome.action.setBadgeText({ text: '' });
+    publish();
+  }
+}
+
+/** A final answer hands the open pages back to the owner and ends browser control. */
+export async function completeTask() {
+  const previous = currentControl();
+  // Revoke immediately, including a task that is still being created.
+  const releasing = release(false, true);
+  // Persist retained tabs even if debugger detachment fails, so recovery cannot close them.
+  await Promise.all([
+    releasing,
+    previous ? cleanupTask(previous.sessionId, previous.tabIds) : Promise.resolve(),
+  ]);
 }
 // The Remote dispatcher supplies a verified source window; every task gets a new tab.
 export async function createTask(initial: {

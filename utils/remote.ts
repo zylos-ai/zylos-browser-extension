@@ -32,6 +32,7 @@ export const chatEntrySchema = z.object({
   ts: z.number().int(),
   delivery: z.enum(['sent', 'queued', 'failed', 'unknown']).optional(),
   deliveryError: z.string().optional(),
+  final: z.boolean().optional(),
 });
 export type ChatEntry = z.infer<typeof chatEntrySchema>;
 
@@ -100,6 +101,7 @@ export const relayFrameSchema = z.discriminatedUnion('type', [
     type: z.literal('chat'),
     role: z.enum(['assistant', 'system']).default('assistant'),
     text: z.string().max(MAX_CHAT_TEXT),
+    final: z.boolean().default(true),
     ts: z.number().int().optional(),
   }),
   z.object({

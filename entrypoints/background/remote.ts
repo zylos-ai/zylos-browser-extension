@@ -5,6 +5,7 @@ import { LANGUAGE_STORAGE_KEY, setWorkerLanguage } from '../../utils/i18n';
 // re-validated, URLs are re-screened, and the debugger is only ever attached to
 // tabs this extension created.
 import {
+  completeTask,
   currentControl,
   currentGrant,
   initializeExecutor,
@@ -227,9 +228,19 @@ export function startRemoteBackground() {
       case 'ping':
         send({ type: 'pong', ts: m.ts ?? Date.now() });
         return;
-      case 'chat':
-        await appendChat({ role: m.role, text: m.text, ts: m.ts ?? Date.now() });
+      case 'chat': {
+        let completion: Promise<void> | undefined;
+        if (m.role === 'assistant' && m.final) {
+          idem.cancel();
+          completion = completeTask().catch(() => {
+            state.error = 'ui.error.taskCleanupFailed';
+            publish();
+          });
+        }
+        await appendChat({ role: m.role, text: m.text, ts: m.ts ?? Date.now(), final: m.final });
+        await completion;
         return;
+      }
       case 'chat-status':
         await updateDelivery(m);
         return;

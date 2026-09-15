@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const executor = vi.hoisted(() => ({
   createTask: vi.fn(),
   release: vi.fn(async () => {}),
+  completeTask: vi.fn(async () => {}),
   currentControl: vi.fn(
     (): null | {
       sessionId: string;
@@ -85,6 +86,10 @@ beforeEach(() => {
   };
   executor.currentControl.mockReturnValue(null);
   executor.currentGrant.mockReturnValue(null);
+  executor.completeTask.mockImplementation(async () => {
+    executor.currentControl.mockReturnValue(null);
+    executor.currentGrant.mockReturnValue(null);
+  });
   executor.execute.mockImplementation(async (c: { op: string }) => ({ ran: c.op }));
   vi.stubGlobal('WebSocket', Socket);
   vi.stubGlobal('crypto', {
@@ -134,7 +139,7 @@ async function bootConnected() {
 }
 
 describe('remote background', () => {
-  it('shows Working only while a browser command runs and preserves the title after finish', async () => {
+  it('shows command activity and removes the task when the final answer arrives', async () => {
     const ws = await bootConnected();
     const task = { sessionId: 'task', tabId: 3, tabIds: [3], phase: 'ready' as const };
     executor.currentControl.mockReturnValue(task);
@@ -160,12 +165,76 @@ describe('remote background', () => {
     });
     ws.receive({ type: 'req', id: 2, method: 'finish', params: {} });
     await flush();
-    ws.receive({ type: 'chat', text: 'Done' });
-    await flush();
     expect((await ask({ type: 'remote-state' })).value?.task).toMatchObject({
       phase: 'finished',
       title: 'Video',
     });
+    ws.receive({ type: 'chat', text: 'Done' });
+    await flush();
+    expect(executor.completeTask).toHaveBeenCalledOnce();
+    expect((await ask({ type: 'remote-state' })).value?.task).toBeNull();
+  });
+
+  it('keeps explicit progress and system messages active; a final reply cancels queued commands', async () => {
+    const ws = await bootConnected();
+    executor.currentControl.mockReturnValue({
+      sessionId: 'task',
+      tabId: 3,
+      tabIds: [3],
+      phase: 'ready',
+    });
+    ws.receive({ type: 'chat', text: 'Searching', final: false });
+    ws.receive({ type: 'chat', role: 'system', text: 'Notice' });
+    await flush();
+    expect(executor.completeTask).not.toHaveBeenCalled();
+    expect((storage.remoteChatLog as unknown[])[0]).toMatchObject({ final: false });
+    let resolve!: (value: { ran: string }) => void;
+    executor.execute.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    );
+    ws.receive({ type: 'req', id: 1, method: 'click', params: { x: 10, y: 10 } });
+    await flush();
+    ws.receive({ type: 'req', id: 2, method: 'click', params: { x: 20, y: 20 } });
+    ws.receive({ type: 'chat', text: 'Done', final: true });
+    await flush();
+    expect((await ask({ type: 'remote-state' })).value?.task).toBeNull();
+    resolve({ ran: 'click' });
+    await flush();
+    expect(executor.execute).toHaveBeenCalledTimes(1);
+    expect(ws.last('error')).toMatchObject({ id: 2, code: 'STOPPED' });
+    expect((await ask({ type: 'remote-state' })).value?.task).toBeNull();
+  });
+
+  it('a final reply prevents a pending source lookup from creating a new task', async () => {
+    const ws = await bootConnected();
+    let resolve!: (tabs: unknown[]) => void;
+    vi.mocked(chrome.tabs.query).mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r as never;
+        }),
+    );
+    ws.receive({ type: 'req', id: 1, method: 'open', params: { url: 'https://example.com' } });
+    await flush();
+    ws.receive({ type: 'chat', text: 'Done' });
+    await flush();
+    resolve([{ id: 3, windowId: 1 }]);
+    await flush();
+    expect(ws.last('error')).toMatchObject({ id: 1, code: 'STOPPED' });
+    expect(executor.createTask).not.toHaveBeenCalled();
+  });
+
+  it('still displays the final answer if browser cleanup fails', async () => {
+    const ws = await bootConnected();
+    executor.completeTask.mockRejectedValueOnce(new Error('detach failed'));
+    ws.receive({ type: 'chat', text: 'Result' });
+    await flush();
+    const state = (await ask({ type: 'remote-state' })).value!;
+    expect(state.error).toBe('ui.error.taskCleanupFailed');
+    expect(state.chat).toEqual([expect.objectContaining({ text: 'Result', final: true })]);
   });
 
   it('records queue receipts and failures on the matching message, including persisted delivery errors', async () => {

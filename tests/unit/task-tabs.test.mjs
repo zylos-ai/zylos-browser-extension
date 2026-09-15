@@ -137,6 +137,79 @@ async function fixture() {
   return { executor, tabs, groups, attached, calls, command, start };
 }
 
+test('a final answer releases control and retains all result pages across recovery and a new task', async () => {
+  const s = await fixture();
+  await s.start();
+  await s.command({ op: 'new-tab', url: 'https://example.com/video' });
+  const previous = s.executor.currentControl();
+  const clearBadge = vi.spyOn(chrome.action, 'setBadgeText');
+  // No finish/finalize command is needed before the answer.
+  const completing = s.executor.completeTask();
+  assert.equal(s.executor.currentControl(), null);
+  await completing;
+  assert.equal(s.attached.size, 0);
+  assert.equal(s.groups.size, 0);
+  assert.ok(clearBadge.mock.calls.some(([value]) => value.text === ''));
+  const { recoverTasks } = await import('../../utils/automation/task-lifecycle');
+  await recoverTasks();
+  await s.start();
+  assert.notEqual(s.executor.currentControl().sessionId, previous.sessionId);
+  for (const id of previous.tabIds) assert.equal(s.tabs.get(id)?.groupId, -1);
+  assert.ok(s.tabs.has(1) && s.tabs.has(2));
+  await s.executor.release();
+  for (const id of previous.tabIds) assert.ok(s.tabs.has(id));
+});
+
+test('final reply revokes an in-flight task creation before it can restore control', async () => {
+  const s = await fixture();
+  const create = chrome.tabs.create;
+  let unblock;
+  let entered;
+  const pending = new Promise((resolve) => {
+    entered = resolve;
+  });
+  chrome.tabs.create = async (props) => {
+    const tab = await create(props);
+    entered();
+    await new Promise((resolve) => {
+      unblock = resolve;
+    });
+    return tab;
+  };
+  const started = s.start();
+  const rejected = assert.rejects(started, (e) => e.code === 'STOPPED');
+  await pending;
+  await s.executor.completeTask();
+  unblock();
+  await rejected;
+  assert.equal(s.executor.currentControl(), null);
+  assert.equal(s.attached.size, 0);
+  assert.deepEqual([...s.tabs.keys()], [1, 2]);
+});
+
+test('a cleanup retry preserves result tabs even when detachment or ungrouping fails', async () => {
+  const s = await fixture();
+  await s.start();
+  const task = s.executor.currentControl();
+  const ungroup = chrome.tabs.ungroup;
+  chrome.tabs.ungroup = async () => {
+    throw new Error('ungroup failed');
+  };
+  const detach = chrome.debugger.detach;
+  chrome.debugger.detach = async () => {
+    throw new Error('detach failed');
+  };
+  await assert.rejects(s.executor.completeTask());
+  assert.equal(s.executor.currentControl(), null);
+  chrome.tabs.ungroup = ungroup;
+  chrome.debugger.detach = detach;
+  await s.executor.completeTask();
+  const { recoverTasks } = await import('../../utils/automation/task-lifecycle');
+  await recoverTasks();
+  assert.equal(s.tabs.get(task.tabId)?.groupId, -1);
+  assert.equal(s.attached.size, 0);
+});
+
 test('finalize closes only task-created temporary tabs, keeps explicit results, and rejects old tasks', async () => {
   const s = await fixture();
   await s.start();

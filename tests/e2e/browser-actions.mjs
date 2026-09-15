@@ -352,7 +352,7 @@ try {
       )
     ).result.value;
   await check(
-    'sidebar shows actual command activity and stays finished after an assistant reply',
+    'sidebar shows actual command activity and explicit progress preserves the task',
     async () => {
       await eventually(async () => (await panelPhase()) === 'ready');
       const waiting = rpc('wait', {
@@ -368,7 +368,7 @@ try {
       const reply = await fetch(rpcUrl + '/chat', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ text: 'Browser fixture finished' }),
+        body: JSON.stringify({ text: 'Browser fixture progress', final: false }),
       });
       assert.equal((await reply.json()).ok, true);
       assert.equal((await rpc('info')).control.phase, 'finished');
@@ -590,7 +590,57 @@ try {
     assert.equal((await queued).code, 'STOPPED');
     assert.ok((await rpc('tabs')).tabs.length > 0);
   });
-  await rpc('finalize');
+  await check(
+    'final answer removes the card, cancels old commands and hands back open pages',
+    async () => {
+      await rpc('snapshot');
+      const owned = (await rpc('tabs')).tabs.map((tab) => tab.id);
+      const waiting = rpc('wait', {
+        condition: 'visible',
+        selector: '#never',
+        timeoutMs: 10000,
+      }).catch((e) => e);
+      await eventually(async () => (await panelPhase()) === 'running');
+      const queued = rpc('click', { x: 10, y: 10 }).catch((e) => e);
+      await sleep(100);
+      const reply = await fetch(rpcUrl + '/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text: 'Final answer; keep the result pages' }),
+      });
+      assert.equal((await reply.json()).ok, true);
+      await eventually(async () => (await rpc('info')).control === null);
+      await eventually(async () => (await panelPhase()) === undefined);
+      assert.equal((await waiting).code, 'STOPPED');
+      assert.equal((await queued).code, 'STOPPED');
+      await eventually(async () => {
+        const browser = (
+          await cdp(
+            'Runtime.evaluate',
+            {
+              expression: `(async () => ({
+          tabs: await chrome.tabs.query({}),
+          targets: await chrome.debugger.getTargets(),
+          badge: await chrome.action.getBadgeText({}),
+          reply: document.querySelector('#history').textContent.includes('Final answer; keep the result pages'),
+          waiting: !!document.querySelector('.reply-status')
+        }))()`,
+              awaitPromise: true,
+              returnByValue: true,
+            },
+            sessionId,
+          )
+        ).result.value;
+        return (
+          browser.reply &&
+          !browser.waiting &&
+          browser.badge === '' &&
+          owned.every((id) => browser.tabs.some((tab) => tab.id === id && tab.groupId === -1)) &&
+          !browser.targets.some((target) => owned.includes(target.tabId) && target.attached)
+        );
+      });
+    },
+  );
   await check('sidebar stop button revokes control and cleans task tabs', async () => {
     await rpc('open', { url });
     await rpc('wait', { condition: 'loaded' });

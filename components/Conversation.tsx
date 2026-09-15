@@ -26,19 +26,30 @@ export function Conversation({
   const [unread, setUnread] = useState(false);
   const { chat, task } = state;
   const latest = chat.at(-1);
+  const turn = [...chat]
+    .reverse()
+    .find(
+      (message) =>
+        message.role === 'user' || (message.role === 'assistant' && message.final !== false),
+    );
+  const progress = [...chat]
+    .reverse()
+    .find((message) => message.role === 'assistant' && message.final === false);
+  const hasProgress = !!progress && !!turn && chat.indexOf(progress) > chat.indexOf(turn);
+  const activityTs = hasProgress ? progress!.ts : (turn?.ts ?? 0);
   const [now, setNow] = useState(Date.now);
   const awaiting =
-    latest?.role === 'user' && latest.delivery !== 'failed' && latest.delivery !== 'unknown';
-  const delayed = awaiting && now - latest.ts >= REPLY_NOTICE_MS;
+    turn?.role === 'user' && turn.delivery !== 'failed' && turn.delivery !== 'unknown';
+  const delayed = awaiting && now - activityTs >= REPLY_NOTICE_MS;
   useEffect(() => {
     setNow(Date.now());
     if (!awaiting) return;
     const timer = setTimeout(
       () => setNow(Date.now()),
-      Math.max(0, latest.ts + REPLY_NOTICE_MS - Date.now()),
+      Math.max(0, activityTs + REPLY_NOTICE_MS - Date.now()),
     );
     return () => clearTimeout(timer);
-  }, [awaiting, latest?.ts]);
+  }, [awaiting, activityTs]);
 
   function scrollToLatest() {
     const el = historyRef.current;
@@ -53,6 +64,7 @@ export function Conversation({
     latest?.ts,
     latest?.text,
     latest?.deliveryError,
+    latest?.final,
     chat.length,
     task?.sessionId,
     task?.phase,
@@ -178,9 +190,11 @@ export function Conversation({
               ? t('replyDisconnected')
               : delayed
                 ? t('replyDelayed')
-                : latest.delivery === 'queued'
-                  ? t('replyQueued')
-                  : t('replyWaiting')}
+                : hasProgress
+                  ? t('replyProgress')
+                  : turn?.delivery === 'queued'
+                    ? t('replyQueued')
+                    : t('replyWaiting')}
           </p>
         )}
       </div>
