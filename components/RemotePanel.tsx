@@ -93,7 +93,7 @@ export function RemotePanel() {
             {pill}
           </span>
           <button
-            className="link"
+            className="text-button"
             onClick={() => setSettingsOpen((v) => !v)}
             aria-expanded={settingsOpen}
           >
@@ -149,7 +149,10 @@ export function RemotePanel() {
               </button>
             )}
             {state.chat.length > 0 && (
-              <button className="link" onClick={() => void request({ type: 'remote-chat-clear' })}>
+              <button
+                className="text-button"
+                onClick={() => void request({ type: 'remote-chat-clear' })}
+              >
                 清空对话
               </button>
             )}
@@ -171,10 +174,13 @@ export function RemotePanel() {
             {state.task.title ? ` · ${state.task.title.slice(0, 40)}` : ''}
           </span>
           <span>
-            <button className="link" onClick={() => void request({ type: 'remote-reveal' })}>
+            <button className="text-button" onClick={() => void request({ type: 'remote-reveal' })}>
               查看
             </button>
-            <button className="link danger" onClick={() => void request({ type: 'remote-stop' })}>
+            <button
+              className="text-button danger"
+              onClick={() => void request({ type: 'remote-stop' })}
+            >
               停止
             </button>
           </span>

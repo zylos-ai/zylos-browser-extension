@@ -1,255 +1,268 @@
-:root {
-  font:
-    14px/1.6 -apple-system,
-    BlinkMacSystemFont,
-    'Segoe UI',
-    sans-serif;
-  color-scheme: light;
-  --color-accent: #326c53;
-  --color-surface: #fff;
-  --color-text: #253830;
-  --color-muted: #58675c;
-  --color-border: #e3e8e2;
-  --color-error: #9b352d;
-  --radius-card: 14px;
-  color: var(--color-text);
-  background: var(--color-surface);
+@import 'tailwindcss' source(none);
+@import './design-tokens.css';
+
+/* 只扫描界面源码，避免测试夹具或浏览器执行脚本意外生成工具类。 */
+@source '../components';
+@source '../entrypoints/sidepanel';
+
+@plugin 'daisyui' {
+  themes: false;
+  logs: false;
 }
-* {
-  box-sizing: border-box;
+
+/* Chrome 为扩展页面注入无 layer 的 body { font-size: 75% }。
+ * 页面字体需在同一层级显式覆盖；仅限定 body，不抢占组件和工具类的样式。 */
+html[data-theme='zylos'] > body {
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  line-height: var(--text-body--line-height);
 }
-body {
-  margin: 0;
-}
-.app {
-  height: 100dvh;
-  min-height: 360px;
-  max-width: 720px;
-  margin: auto;
-  display: flex;
-  flex-direction: column;
-}
-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--color-border);
-  flex-shrink: 0;
-}
-.brand {
-  font-size: 24px;
-  font-weight: 750;
-  letter-spacing: -1px;
-  margin: 0;
-}
-.header-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.pill {
-  font-size: 12px;
-  color: var(--color-muted);
-  white-space: nowrap;
-}
-.connected .pill {
-  color: var(--color-accent);
-}
-button,
-input,
-textarea {
-  font: inherit;
-}
-button {
-  min-height: 44px;
-  padding: 8px 14px;
-  border: 1px solid transparent;
-  border-radius: 9px;
-  cursor: pointer;
-  background: var(--color-accent);
-  color: #fff;
-  transition:
-    background-color 150ms,
-    opacity 150ms;
-}
-button:hover:not(:disabled) {
-  filter: brightness(0.94);
-}
-button:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-button:focus-visible,
-input:focus,
-textarea:focus {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
-}
-.link {
-  background: transparent;
-  color: var(--color-muted);
-  padding: 8px;
-  font-size: 12px;
-}
-.danger {
-  color: var(--color-error);
-}
-h2 {
-  font-size: 19px;
-  line-height: 1.4;
-  margin: 0 0 8px;
-}
-p {
-  color: var(--color-muted);
-}
-.hint {
-  font-size: 12px;
-  margin: 8px 0;
-}
-.connection-feedback {
-  flex-shrink: 0;
-  padding: 0 16px;
-}
-#error {
-  font-size: 12px;
-  color: var(--color-error);
-  margin: 8px 0;
-  overflow-wrap: anywhere;
-}
-#error:empty {
-  display: none;
-}
-#settings {
-  padding: 16px;
-  border-bottom: 1px solid var(--color-border);
-  max-height: 60%;
-  overflow-y: auto;
-  flex-shrink: 0;
-}
-label {
-  display: block;
-  font-size: 12px;
-  margin: 12px 0;
-}
-input,
-textarea {
-  width: 100%;
-  display: block;
-  border: 1px solid var(--color-border);
-  border-radius: 9px;
-  padding: 10px;
-  background: #fafbf9;
-  color: var(--color-text);
-  margin-top: 6px;
-}
-main {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-}
-.chat-panel {
-  width: 100%;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-#history {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 16px;
-  scrollbar-width: thin;
-}
-.empty-chat {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
-  min-height: 100%;
-  padding: 24px 8px;
-}
-.empty-chat p {
-  margin: 0;
-  font-size: 13px;
-}
-.message {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  padding: 12px 14px;
-  margin-bottom: 16px;
-  border-radius: var(--radius-card);
-}
-.message.user {
-  background: #eff3ed;
-  margin-left: 24px;
-}
-.message.assistant {
-  padding-left: 0;
-  padding-right: 0;
-}
-.message small {
-  display: block;
-  font-size: 12px;
-  color: var(--color-muted);
-  margin-bottom: 4px;
-}
-#chat-form {
-  padding: 8px 16px 16px;
-  flex-shrink: 0;
-}
-#message {
-  resize: none;
-  min-height: 82px;
-  max-height: 150px;
-  margin: 0;
-  background: #f7f9f5;
-}
-#send {
-  display: block;
-  margin: 8px 0 0 auto;
-}
-.task-actions {
-  padding: 0 16px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 12px;
-  flex-shrink: 0;
-}
-.row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 12px;
-}
-.secondary {
-  background: var(--color-surface);
-  color: var(--color-text);
-  border-color: var(--color-border);
-}
-@media (max-width: 360px) {
+
+/* 基础样式位于 base 层，DaisyUI 组件与 Tailwind 工具类可以正常覆盖。 */
+@layer base {
+  :root {
+    font-family: var(--font-sans);
+    color: var(--color-base-content);
+    background: var(--color-base-100);
+  }
+  * {
+    box-sizing: border-box;
+  }
+  body {
+    margin: 0;
+  }
+  .app {
+    height: 100dvh;
+    min-height: 360px;
+    max-width: 720px;
+    margin: auto;
+    display: flex;
+    flex-direction: column;
+  }
   header {
-    padding: 8px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+  }
+  .brand {
+    font-size: var(--text-title);
+    line-height: var(--text-title--line-height);
+    font-weight: var(--text-title--font-weight);
+    letter-spacing: -1px;
+    margin: 0;
   }
   .header-actions {
-    gap: 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
-  #history,
+  .pill {
+    font-size: var(--text-caption);
+    color: var(--color-muted);
+    white-space: nowrap;
+  }
+  .connected .pill {
+    color: var(--color-success);
+  }
+  button,
+  input,
+  textarea {
+    font: inherit;
+  }
+  button {
+    min-height: var(--zylos-primary-control-size);
+    padding: var(--zylos-space-8) var(--zylos-space-12);
+    border: 1px solid transparent;
+    border-radius: var(--radius-control);
+    cursor: pointer;
+    background: var(--color-primary);
+    color: var(--color-primary-content);
+    transition:
+      background-color var(--zylos-motion-fast),
+      opacity var(--zylos-motion-fast);
+  }
+  button:hover:not(:disabled) {
+    filter: brightness(0.94);
+  }
+  button:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+  button:focus-visible,
+  input:focus,
+  textarea:focus {
+    outline: var(--zylos-focus-width) solid var(--color-primary);
+    outline-offset: var(--zylos-focus-offset);
+  }
+  .text-button {
+    background: transparent;
+    color: var(--color-muted);
+    padding: 8px;
+    font-size: var(--text-caption);
+  }
+  .danger {
+    color: var(--color-error);
+  }
+  h2 {
+    font-size: var(--text-section);
+    line-height: var(--text-section--line-height);
+    font-weight: var(--text-section--font-weight);
+    margin: 0 0 8px;
+  }
+  p {
+    color: var(--color-muted);
+  }
+  .hint {
+    font-size: var(--text-caption);
+    margin: 8px 0;
+  }
+  .connection-feedback {
+    flex-shrink: 0;
+    padding: 0 16px;
+  }
+  #error {
+    font-size: var(--text-caption);
+    color: var(--color-error);
+    margin: 8px 0;
+    overflow-wrap: anywhere;
+  }
+  #error:empty {
+    display: none;
+  }
   #settings {
-    padding: 12px;
+    padding: 16px;
+    border-bottom: 1px solid var(--color-border);
+    max-height: 60%;
+    overflow-y: auto;
+    flex-shrink: 0;
+  }
+  label {
+    display: block;
+    font-size: var(--text-label);
+    margin: 12px 0;
+  }
+  input,
+  textarea {
+    width: 100%;
+    display: block;
+    border: 1px solid var(--color-control-border);
+    border-radius: var(--radius-control);
+    padding: 10px;
+    background: var(--color-base-100);
+    color: var(--color-base-content);
+    margin-top: 6px;
+  }
+  main {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+  }
+  .chat-panel {
+    width: 100%;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  #history {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 16px;
+    scrollbar-width: thin;
+  }
+  .empty-chat {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    text-align: center;
+    min-height: 100%;
+    padding: 24px 8px;
+  }
+  .empty-chat p {
+    margin: 0;
+    font-size: var(--text-label);
+  }
+  .message {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    padding: 12px 14px;
+    margin-bottom: 16px;
+    border-radius: var(--radius-message);
+  }
+  .message.user {
+    background: var(--color-primary-soft);
+    margin-left: 24px;
+  }
+  .message.assistant {
+    padding-left: 0;
+    padding-right: 0;
+  }
+  .message small {
+    display: block;
+    font-size: var(--text-caption);
+    color: var(--color-muted);
+    margin-bottom: 4px;
   }
   #chat-form {
-    padding: 8px 12px 12px;
+    padding: 8px 16px 16px;
+    flex-shrink: 0;
   }
-}
-@media (prefers-reduced-motion: reduce) {
-  * {
-    scroll-behavior: auto !important;
-    animation: none !important;
-    transition: none !important;
+  #message {
+    resize: none;
+    min-height: 82px;
+    max-height: 150px;
+    margin: 0;
+    background: var(--color-base-200);
+  }
+  #send {
+    display: block;
+    margin: 8px 0 0 auto;
+  }
+  .task-actions {
+    padding: 0 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: var(--text-caption);
+    flex-shrink: 0;
+  }
+  .row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .secondary {
+    background: var(--color-base-100);
+    color: var(--color-base-content);
+    border-color: var(--color-control-border);
+  }
+  @media (max-width: 360px) {
+    header {
+      padding: 8px 12px;
+    }
+    .header-actions {
+      gap: 4px;
+    }
+    #history,
+    #settings {
+      padding: 12px;
+    }
+    #chat-form {
+      padding: 8px 12px 12px;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      scroll-behavior: auto !important;
+      animation: none !important;
+      transition: none !important;
+    }
   }
 }

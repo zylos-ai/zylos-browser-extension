@@ -51,7 +51,8 @@ zylos-browser-extension/
 │   ├── RemotePanel.tsx             聊天、连接设置、查看任务和停止按钮
 │   └── ErrorBoundary.tsx           界面出错时显示兜底信息
 ├── assets/
-│   └── styles.css                  侧边栏样式
+│   ├── design-tokens.css           品牌色、字体、间距、布局规范与 DaisyUI 主题
+│   └── styles.css                  Tailwind / DaisyUI 入口与侧边栏基础样式
 ├── utils/
 │   ├── remote.ts                   连接配置、消息格式、界面状态和存储键名
 │   ├── remote-commands.ts          Agent 方法列表、排队、停止打断和去重
@@ -78,7 +79,7 @@ zylos-browser-extension/
 │   └── e2e/browser-actions.mjs     真实 Chrome + Relay 的端到端测试
 ├── docs/
 │   └── BROWSER-ACTIONS.md          动作参数、实现步骤和验证记录
-├── wxt.config.ts                  插件名称、权限、Chrome 最低版本等配置
+├── wxt.config.ts                  插件配置及 Tailwind 的 Vite 插件
 ├── package.json                   依赖、版本与 npm 命令
 ├── package-lock.json              依赖锁文件
 ├── tsconfig.json                  TypeScript 配置
@@ -199,7 +200,8 @@ Shadow DOM 是网页组件内部的 DOM 子树；CSS 查询会遍历 open Shadow
 | 想修改的内容                         | 优先查看                                                     |
 | ------------------------------------ | ------------------------------------------------------------ |
 | 聊天气泡、设置、按钮和状态文案       | `components/RemotePanel.tsx`                                 |
-| 侧边栏颜色、尺寸、间距               | `assets/styles.css`                                          |
+| 品牌色、字体、间距和布局变量         | `assets/design-tokens.css`                                   |
+| 侧边栏样式、Tailwind 扫描范围        | `assets/styles.css`                                          |
 | 保存配置、聊天收发、连接和重连       | `entrypoints/background/remote.ts`、`utils/remote.ts`        |
 | 动作名称、参数、能力、排队与去重     | `utils/commands.ts`、`utils/remote-commands.ts`              |
 | 鼠标、键盘、表单、元素状态、容器滚动 | `utils/automation/page-actions.ts`、`injected/dom-action.js` |
@@ -215,6 +217,46 @@ Relay 的 `/rpc` 通用转发已有的方法名与参数，新增动作通常无
 
 第一次读代码推荐顺序：`sidepanel/main.tsx` → `RemotePanel.tsx` → 后台 `remote.ts` →
 `remote-commands.ts` → `executor.ts` → `page-actions.ts`。
+
+### 界面设计变量与 DaisyUI
+
+[design-tokens.css](assets/design-tokens.css) 是设计变量规范文件，对应
+[Figma 视觉规范](https://www.figma.com/design/qEYh0ltFkLaL0Wj7rW5Qll/zylos-extension?node-id=4-68)。
+文件按原始色板、间距、圆角、布局、字体和 DaisyUI 主题分段，并有中文注释：
+
+- 品牌主色 `#AC01C2`；正文 `#211A25`；辅助文字 `#706776`。
+- 中英文统一使用浏览器 / 系统默认界面字体（`system-ui, sans-serif`），正文 14/22，辅助文字 12/18。
+- 4px 间距体系；控件 / 卡片 / 消息圆角分别为 8 / 12 / 16px。
+- 布局目标：侧栏基准 380px、范围 320–480px、页头 64px、左右留白 16px。
+
+已接入 **Tailwind CSS 4 + `@tailwindcss/vite` + DaisyUI 5**，随插件构建打包。
+侧边栏的 `data-theme="zylos"` 使用本文件的浅色主题；不启用内置主题或自动深色模式。
+Tailwind 只扫描 `components/` 和 `entrypoints/sidepanel/`，不会把浏览器执行脚本或测试内容当作界面工具类。
+
+普通 CSS 可以直接引用变量：
+
+```css
+.task-card {
+  padding: var(--zylos-space-16);
+  border-radius: var(--radius-card);
+  background: var(--color-primary-soft);
+  color: var(--color-base-content);
+}
+```
+
+React 可以直接使用 DaisyUI 和 Tailwind 类名，无需额外的 React 包装库：
+
+```tsx
+<button className="btn btn-primary min-h-11 text-label">发送</button>
+<div className="rounded-card bg-primary-soft p-4 text-body">任务内容</div>
+```
+
+当前基础样式已引用品牌变量，完整页面布局仍按后续 Figma 实现推进。
+现有文本按钮用 `.text-button`，避免与 DaisyUI 自带的 `.link` 样式冲突。
+字体由浏览器根据操作系统选择，不打包或远程加载字体文件。
+Figma 中的字体仅作排版示意，实际字形以用户系统为准。
+配置参考：[DaisyUI 自定义主题](https://daisyui.com/docs/themes/)、
+[Tailwind Vite 接入](https://tailwindcss.com/docs/installation/using-vite)。
 
 ## 7. 本地启动与构建
 

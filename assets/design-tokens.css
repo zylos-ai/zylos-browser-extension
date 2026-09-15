@@ -1,0 +1,171 @@
+/*
+ * Zylos Sidebar · 设计变量规范 v1 · 2026-09-15
+ * Figma：https://www.figma.com/design/qEYh0ltFkLaL0Wj7rW5Qll/zylos-extension?node-id=4-68
+ *
+ * 本文件是界面变量的唯一来源：原始值 → 语义颜色 → 字体 / 间距 / 布局。
+ * 主色 #AC01C2 取自 Logo；其余为已确认设计稿中的衍生色与排版规范。
+ * 普通 CSS 使用 var(...)；Tailwind 使用对应工具类；DaisyUI 使用 zylos 主题。
+ * 修改品牌或尺寸时优先修改这里，不在组件里另写一套色值或比例。
+ */
+
+@layer base {
+  :root {
+    /* 01 / 原始色板。名称与 Figma Primitives 的 WEB code syntax 一致。 */
+    --zylos-purple-500: #ac01c2;
+    --zylos-purple-600: #8d00a0;
+    --zylos-purple-50: #fbeefd;
+    --zylos-purple-200: #efcef3;
+    --zylos-neutral-0: #ffffff;
+    --zylos-neutral-50: #f7f7fa;
+    --zylos-neutral-100: #f1f1f5;
+    --zylos-neutral-200: #e5e4eb;
+    --zylos-neutral-500: #706776;
+    --zylos-neutral-900: #211a25;
+    --zylos-control-outline: #8c8492;
+    --zylos-green-600: #16734b;
+    --zylos-green-50: #effaf4;
+    --zylos-red-600: #b42335;
+    --zylos-red-50: #fff1f2;
+    --zylos-amber-600: #956000;
+    --zylos-amber-50: #fff8e8;
+
+    /* 02 / 4px 间距体系。4=紧邻，8=控件内部，16=侧栏留白，24=消息间距。 */
+    --zylos-space-0: 0px;
+    --zylos-space-4: 4px;
+    --zylos-space-8: 8px;
+    --zylos-space-12: 12px;
+    --zylos-space-16: 16px;
+    --zylos-space-20: 20px;
+    --zylos-space-24: 24px;
+    --zylos-space-32: 32px;
+    --zylos-space-40: 40px;
+    --zylos-space-48: 48px;
+    --zylos-space-64: 64px;
+
+    /* 03 / 圆角：控件 8，卡片 12，消息 16，状态胶囊 999。 */
+    --zylos-radius-8: 8px;
+    --zylos-radius-12: 12px;
+    --zylos-radius-16: 16px;
+    --zylos-radius-999: 999px;
+
+    /* 04 / Sidebar 布局目标。应用这些变量时仍需为小窗口保留滚动空间。 */
+    --zylos-sidebar-width-min: 320px;
+    --zylos-sidebar-width-default: 380px;
+    --zylos-sidebar-width-max: 480px;
+    --zylos-sidebar-gutter: var(--zylos-space-16);
+    --zylos-header-height: var(--zylos-space-64);
+    --zylos-message-gap: var(--zylos-space-24);
+    --zylos-user-message-max-width: 88%;
+    --zylos-composer-height-min: 112px;
+    --zylos-composer-height-max: 176px;
+    --zylos-control-size: var(--zylos-space-40);
+    --zylos-primary-control-size: 44px;
+
+    /* Logo 原比例；字标至少 100px 宽；周围留白至少 8px。 */
+    --zylos-logo-width-min: 100px;
+    --zylos-logo-clear-space: var(--zylos-space-8);
+
+    /* 可访问性与动效。页面应尊重 prefers-reduced-motion。 */
+    --zylos-border-width: 1px;
+    --zylos-focus-width: 2px;
+    --zylos-focus-offset: 2px;
+    --zylos-motion-fast: 150ms;
+  }
+}
+
+/*
+ * 05 / Tailwind 主题扩展。
+ * static 保证规范中的变量即使暂未被组件引用，也存在于构建后的 CSS 中。
+ * 中英文统一使用浏览器提供的系统默认界面字体，不打包或远程加载字体。
+ * 例如：font-sans text-body、text-caption text-muted、p-4 gap-6、rounded-card。
+ */
+@theme static {
+  --font-sans: system-ui, sans-serif;
+
+  --text-display: 36px;
+  --text-display--line-height: 48px;
+  --text-display--font-weight: 700;
+  --text-title: 24px;
+  --text-title--line-height: 34px;
+  --text-title--font-weight: 700;
+  --text-section: 18px;
+  --text-section--line-height: 28px;
+  --text-section--font-weight: 500;
+  --text-body: 14px;
+  --text-body--line-height: 22px;
+  --text-body--font-weight: 400;
+  --text-label: 13px;
+  --text-label--line-height: 20px;
+  --text-label--font-weight: 500;
+  --text-caption: 12px;
+  --text-caption--line-height: 18px;
+  --text-caption--font-weight: 400;
+  --text-latin: 12px;
+  --text-latin--line-height: 18px;
+  --text-latin--font-weight: 500;
+  --text-latin-display: 36px;
+  --text-latin-display--line-height: 44px;
+  --text-latin-display--font-weight: 600;
+
+  --spacing: var(--zylos-space-4);
+  --radius-control: var(--zylos-radius-8);
+  --radius-card: var(--zylos-radius-12);
+  --radius-message: var(--zylos-radius-16);
+  --radius-pill: var(--zylos-radius-999);
+  --shadow-panel: 0 8px 32px rgb(33 26 37 / 8%);
+
+  /* Figma Light 中的扩展语义颜色；其余映射在下方 DaisyUI 主题中。 */
+  --color-primary-hover: var(--zylos-purple-600);
+  --color-primary-soft: var(--zylos-purple-50);
+  --color-primary-border: var(--zylos-purple-200);
+  --color-muted: var(--zylos-neutral-500);
+  --color-border: var(--zylos-neutral-200);
+  --color-control-border: var(--zylos-control-outline);
+  --color-success-soft: var(--zylos-green-50);
+  --color-error-soft: var(--zylos-red-50);
+  --color-warning-soft: var(--zylos-amber-50);
+}
+
+/*
+ * 06 / DaisyUI 唯一主题：zylos（浅色）。
+ * 背景 base-100/200/300 = 白底 / 画布 / 弱背景，base-content = 正文。
+ * primary = 品牌行动；success / warning / error = 状态，须同时提供文字。
+ * secondary / accent / info 复用既有色板，补全 DaisyUI 的标准语义槽。
+ * 官方配置：https://daisyui.com/docs/themes/#how-to-add-a-new-custom-theme
+ */
+@plugin 'daisyui/theme' {
+  name: 'zylos';
+  default: true;
+  prefersdark: false;
+  color-scheme: light;
+
+  --color-base-100: var(--zylos-neutral-0);
+  --color-base-200: var(--zylos-neutral-50);
+  --color-base-300: var(--zylos-neutral-100);
+  --color-base-content: var(--zylos-neutral-900);
+  --color-primary: var(--zylos-purple-500);
+  --color-primary-content: var(--zylos-neutral-0);
+  --color-secondary: var(--zylos-purple-600);
+  --color-secondary-content: var(--zylos-neutral-0);
+  --color-accent: var(--zylos-purple-500);
+  --color-accent-content: var(--zylos-neutral-0);
+  --color-neutral: var(--zylos-neutral-900);
+  --color-neutral-content: var(--zylos-neutral-0);
+  --color-info: var(--zylos-purple-500);
+  --color-info-content: var(--zylos-neutral-0);
+  --color-success: var(--zylos-green-600);
+  --color-success-content: var(--zylos-neutral-0);
+  --color-warning: var(--zylos-amber-600);
+  --color-warning-content: var(--zylos-neutral-0);
+  --color-error: var(--zylos-red-600);
+  --color-error-content: var(--zylos-neutral-0);
+
+  --radius-selector: var(--zylos-radius-8);
+  --radius-field: var(--zylos-radius-8);
+  --radius-box: var(--zylos-radius-12);
+  --size-selector: var(--zylos-space-4);
+  --size-field: var(--zylos-space-4);
+  --border: var(--zylos-border-width);
+  --depth: 0;
+  --noise: 0;
+}
