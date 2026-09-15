@@ -7,6 +7,69 @@ Agent 通过插件在专用工作标签中操作网页。点击 Chrome 工具栏
 Agent 决定做什么，Relay 传递消息，插件把动作变成 Chrome 操作。
 本文按当前 0.12.0 的代码组织，适合第一次阅读项目时使用。
 
+## 连接线上的 Agent
+
+如果你的 Zylos Agent 已在线上运行，并且已有独立的 HTTPS 地址，
+你电脑上只需要安装这个 Chrome 插件；Browser Remote、Core 和 Agent 运行在对应的服务器上。
+
+### 1. 让 Agent 准备连接信息
+
+在你原来与 Agent 对话的入口，把
+[Browser Remote 安装说明](https://github.com/zylos-ai/zylos-browser-remote#让线上-agent-安装并返回连接信息)
+发给它，并说明：
+
+```text
+请按 Browser Remote README 安装和配置浏览器通信组件，使用你现有的公网 HTTPS 地址。
+完成服务启动和路由检查后，通过当前对话把完整的 WebSocket 地址和 Key 发给我。
+安装后读取组件 SKILL.md，了解插件聊天回复方式和浏览器操作命令。
+```
+
+例如 Agent 的 HTTPS 地址为 `https://alice.example.com`，它应返回：
+
+```text
+地址：wss://alice.example.com/browser-remote/ext
+Key：<Agent 生成的完整连接密钥>
+```
+
+地址决定连接哪台 Agent，Key 用于验证这次浏览器连接。
+地址复用 Agent 已有的域名，但 Agent 仍需配置 `/browser-remote/` 的转发路由。
+当前这些步骤由 Agent 按文档执行，尚未整合为一键配对命令。
+
+### 2. 安装插件并填写配置
+
+当前源码的加载方式如下，要求 Chrome 125+；从源码构建还需要 Node.js 22+：
+
+1. 在本仓库运行 `npm ci` 和 `npm run build`。
+2. 打开 `chrome://extensions`，开启开发者模式，点击“加载已解压的扩展程序”。
+3. 选择本仓库的 `.output/chrome-mv3` 目录；已加载过则点击扩展条目的重新加载按钮。
+4. 点击工具栏里的 Zylos 章鱼图标，打开侧边栏，再进入设置。
+5. 将 Agent 给出的地址填入“服务地址（Relay URL）”，完整 Key 填入密钥字段，点击“保存并连接”。
+
+Finder 默认隐藏 `.output`；按 `Command + Shift + .` 显示隐藏目录，
+或在目录选择框按 `Command + Shift + G` 输入完整路径。
+
+连接信息会保存在当前 Chrome profile 的插件本地存储中。保持插件启用，关闭后再打开侧栏无需重新填写。
+当前需要分别填写地址和 Key，不支持把两者合并成一段连接码。
+Agent 输出的短 `keyId` 是内部会话标识，不能代替完整 Key。
+
+### 3. 确认连接可用
+
+侧栏显示已连接后，先发送一条聊天消息，确认 Agent 能回复；
+再发送一个浏览器任务，例如“打开 example.com”，确认出现名为 `zylos` 的工作标签组。
+Agent 可以从服务器侧运行 `scripts/browser.js status` 和 `info` 核对连接与插件能力。
+
+线上连接使用 `wss://<你的 Agent 域名>/browser-remote/ext`，公网入口通常是 443。
+`3802` 和 `3803` 是 Agent 机器内部的 Relay 端口，用户不需要填写它们。
+`ws://127.0.0.1:3802/ext` 仅用于 Relay 与 Chrome 运行在同一台电脑的本地联调。
+线上使用不需要在用户电脑运行 `Browser-dev.sh`。
+
+| 现象                             | 检查方向                                                                                                    |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| 无法连接                         | 确认是完整 `wss://` 地址、路径为 `/browser-remote/ext`、填写了完整 Key；由 Agent 检查证书、代理路由和 Relay |
+| 已连接，但聊天无回复             | 由 Agent 检查 C4、Agent 运行状态和 `browser-remote` 的回复脚本                                              |
+| 聊天正常，但无法操作网页         | 由 Agent 检查 `info` 和动作返回的错误，按组件 `SKILL.md` 调用浏览器命令                                     |
+| 多个 Chrome profile 互相断开连接 | 每个 profile 使用独立 Key；同一个 Key 的新连接会替换旧连接                                                  |
+
 ## 1. 本仓库与其他项目的分工
 
 | 项目                          | 运行在哪里                  | 职责                                                                 |
@@ -32,7 +95,7 @@ flowchart LR
   CLI <-->|"HTTP · 3803 /rpc"| Relay
 ```
 
-**3802 和 3803 都由 Relay 监听。** 插件主动连接 `ws://127.0.0.1:3802/ext`；
+上图展示本地联调的端口。**3802 和 3803 都由 Relay 监听。** 插件主动连接 `ws://127.0.0.1:3802/ext`；
 Agent 的命令入口访问 `http://127.0.0.1:3803/rpc`。
 聊天与工具请求共用插件到 Relay 的 WebSocket，根据消息的 `type` 分流。
 
@@ -320,7 +383,7 @@ Chrome 工具栏与扩展管理页的图标来自 [Figma 图标原稿](https://w
 
 1. Chrome 打开 `chrome://extensions`，开启开发者模式。
 2. 加载本仓库的 `.output/chrome-mv3`；已加载过则点击扩展条目的刷新按钮。
-3. 点击工具栏的 Coco 图标打开侧边栏。
+3. 点击工具栏的 Zylos 章鱼图标打开侧边栏。
 4. 在设置中填写 `ws://127.0.0.1:3802/ext` 和脚本显示的完整 key，点击“保存并连接”。
 
 `Browser-dev.sh --check` 只检查状态，`--no-build` 复用已有构建。代码修改后需要重新构建并刷新扩展。
