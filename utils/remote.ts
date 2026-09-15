@@ -9,6 +9,7 @@ export const REMOTE_KEY_PROTO_PREFIX = 'key.';
 export const REMOTE_VERSION = '1.2.0';
 export const MAX_CHAT_TEXT = 8000;
 export const CHAT_LOG_CAP = 200;
+export const REPLY_NOTICE_MS = 120_000;
 
 // '' means "not configured yet"; anything else must be well-formed.
 export const remoteConfigSchema = z.object({
@@ -25,9 +26,12 @@ export const REMOTE_CONFIG_KEY = 'remoteConfig';
 export const REMOTE_CHAT_LOG_KEY = 'remoteChatLog';
 
 export const chatEntrySchema = z.object({
+  id: z.string().max(128).optional(),
   role: z.enum(['user', 'assistant', 'system']),
   text: z.string().max(MAX_CHAT_TEXT),
   ts: z.number().int(),
+  delivery: z.enum(['sent', 'queued', 'failed', 'unknown']).optional(),
+  deliveryError: z.string().optional(),
 });
 export type ChatEntry = z.infer<typeof chatEntrySchema>;
 
@@ -43,6 +47,7 @@ export const remoteStateSchema = z.object({
   task: z
     .object({
       sessionId: z.string(),
+      phase: z.enum(['running', 'ready', 'paused', 'finished']),
       tabId: z.number().int(),
       tabCount: z.number().int(),
       url: z.string(),
@@ -100,6 +105,8 @@ export const relayFrameSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('chat-status'),
     state: z.string(),
+    chatId: z.string().max(128).optional(),
+    code: z.string().optional(),
     error: z.string().optional(),
     ts: z.number().optional(),
   }),

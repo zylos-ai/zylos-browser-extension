@@ -6,6 +6,7 @@ export type Point = {
 export type GrantedTab = { id: number; windowId: number; url: string; title: string };
 export type Scope = {
   scope: 'task';
+  phase: 'ready' | 'paused' | 'finished';
   windowId: number;
   sessionId: string;
   groupId: number;

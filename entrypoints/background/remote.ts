@@ -54,7 +54,7 @@ export function startRemoteBackground() {
   let backoff = BACKOFF_MIN_MS;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   const idem = new IdempotencyCache();
-  const inflight = new Set<number>();
+  const inflight = new Map<number, { method: string }>();
 
   const publish = () => {
     void chrome.runtime.sendMessage({ type: 'remote-updated', state: snapshot() }).catch(() => {});
@@ -62,13 +62,21 @@ export function startRemoteBackground() {
   function snapshot(): RemoteState {
     const control = currentControl();
     const grant = currentGrant();
+    const previous =
+      state.task?.sessionId === control?.sessionId && state.task?.tabId === control?.tabId
+        ? state.task
+        : null;
+    const running = [...inflight.values()].some(
+      ({ method }) => !['info', 'tabs', 'pause', 'finish', 'stop', 'finalize'].includes(method),
+    );
     state.task = control
       ? {
           sessionId: control.sessionId,
+          phase: control.phase === 'ready' && running ? 'running' : control.phase,
           tabId: control.tabId,
           tabCount: control.tabIds.length,
-          url: grant?.url ?? '',
-          title: grant?.title ?? '',
+          url: grant?.url ?? previous?.url ?? '',
+          title: grant?.title ?? previous?.title ?? '',
         }
       : null;
     state.configured = !!(config.relayUrl && config.key);
@@ -83,6 +91,35 @@ export function startRemoteBackground() {
   async function appendChat(entry: ChatEntry) {
     state.chat.push(entry);
     if (state.chat.length > CHAT_LOG_CAP) state.chat.splice(0, state.chat.length - CHAT_LOG_CAP);
+    await chrome.storage.local.set({ [REMOTE_CHAT_LOG_KEY]: state.chat });
+    publish();
+  }
+
+  async function updateDelivery(m: {
+    state: string;
+    chatId?: string;
+    code?: string;
+    error?: string;
+  }) {
+    const entry =
+      m.chatId && state.chat.find((item) => item.role === 'user' && item.id === m.chatId);
+    if (!entry) {
+      if (!m.chatId && m.error) {
+        state.error = m.error;
+        publish();
+      }
+      return;
+    }
+    if (!['queued', 'failed', 'unknown'].includes(m.state)) return;
+    entry.delivery = m.state as 'queued' | 'failed' | 'unknown';
+    entry.deliveryError =
+      m.state === 'queued'
+        ? undefined
+        : m.code === 'AGENT_UNAVAILABLE'
+          ? 'ui.error.agentUnavailable'
+          : m.state === 'unknown'
+            ? 'ui.error.deliveryUnconfirmed'
+            : 'ui.error.chatDeliveryFailed';
     await chrome.storage.local.set({ [REMOTE_CHAT_LOG_KEY]: state.chat });
     publish();
   }
@@ -194,10 +231,7 @@ export function startRemoteBackground() {
         await appendChat({ role: m.role, text: m.text, ts: m.ts ?? Date.now() });
         return;
       case 'chat-status':
-        if (m.error) {
-          state.error = m.error;
-          publish();
-        }
+        await updateDelivery(m);
         return;
       case 'req':
         await onRequest(m, gen);
@@ -226,7 +260,9 @@ export function startRemoteBackground() {
         code: 'BUSY',
         message: `more than ${MAX_INFLIGHT} commands in flight`,
       });
-    inflight.add(m.id);
+    const active = { method: m.method };
+    inflight.set(m.id, active);
+    publish();
     try {
       const result = await dispatch(
         {
@@ -257,7 +293,8 @@ export function startRemoteBackground() {
         });
       }
     } finally {
-      inflight.delete(m.id);
+      // A previous socket's late result must not clear a new request with the same id.
+      if (inflight.get(m.id) === active) inflight.delete(m.id);
       publish();
     }
   }
@@ -356,8 +393,10 @@ export function startRemoteBackground() {
           if (!state.connected) throw new Error('ui.error.messageNotSent');
           const text = m.text.trim();
           if (!text) throw new Error('ui.error.emptyMessage');
-          if (!send({ type: 'chat', text, ts: Date.now() })) throw new Error('ui.error.sendFailed');
-          await appendChat({ role: 'user', text, ts: Date.now() });
+          const id = crypto.randomUUID();
+          const ts = Date.now();
+          if (!send({ type: 'chat', id, text, ts })) throw new Error('ui.error.sendFailed');
+          await appendChat({ id, role: 'user', text, ts, delivery: 'sent' });
           return snapshot();
         }
         case 'remote-chat-clear':

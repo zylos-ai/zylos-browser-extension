@@ -281,6 +281,20 @@ html[data-theme='zylos'] > body {
   .task-title {
     overflow-wrap: anywhere;
   }
+  .task-card:not([data-phase='running']) .task-status {
+    color: var(--color-muted);
+  }
+  .reply-status,
+  .message-delivery {
+    margin-top: var(--zylos-space-12);
+    font-size: var(--text-caption);
+    line-height: var(--text-caption--line-height);
+    color: var(--color-muted);
+    overflow-wrap: anywhere;
+  }
+  .message-delivery {
+    color: var(--color-error);
+  }
   .task-buttons {
     display: flex;
     gap: var(--zylos-space-8);

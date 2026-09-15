@@ -102,6 +102,8 @@ try {
     agentPort: 0,
     onChat: async (message) => {
       chatMessages.push(message);
+      if (message.text === 'fixture:fail-delivery')
+        return { ok: false, code: 'C4_DELIVERY_FAILED' };
       return { ok: true };
     },
   });
@@ -338,6 +340,70 @@ try {
   await rpc('open', { url });
   await rpc('wait', { condition: 'loaded' });
   const mainTab = (await rpc('tabs')).tabs.find((t) => t.selected).id;
+  const panelPhase = async () =>
+    (
+      await cdp(
+        'Runtime.evaluate',
+        {
+          expression: "document.querySelector('.task-card')?.dataset.phase",
+          returnByValue: true,
+        },
+        sessionId,
+      )
+    ).result.value;
+  await check(
+    'sidebar shows actual command activity and stays finished after an assistant reply',
+    async () => {
+      await eventually(async () => (await panelPhase()) === 'ready');
+      const waiting = rpc('wait', {
+        condition: 'visible',
+        selector: '#never',
+        timeoutMs: 800,
+      }).catch((e) => e);
+      await eventually(async () => (await panelPhase()) === 'running');
+      assert.equal((await waiting).code, 'WAIT_TIMEOUT');
+      await eventually(async () => (await panelPhase()) === 'ready');
+      await rpc('finish');
+      await eventually(async () => (await panelPhase()) === 'finished');
+      const reply = await fetch(rpcUrl + '/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text: 'Browser fixture finished' }),
+      });
+      assert.equal((await reply.json()).ok, true);
+      assert.equal((await rpc('info')).control.phase, 'finished');
+      assert.equal(await panelPhase(), 'finished');
+      await rpc('snapshot');
+      await eventually(async () => (await panelPhase()) === 'ready');
+    },
+  );
+  await check('a failed C4 delivery is visible in the real sidebar', async () => {
+    await cdp(
+      'Runtime.evaluate',
+      {
+        expression:
+          "chrome.runtime.sendMessage({type:'remote-chat-send',text:'fixture:fail-delivery'})",
+        awaitPromise: true,
+        returnByValue: true,
+      },
+      sessionId,
+    );
+    await eventually(
+      async () =>
+        (
+          await cdp(
+            'Runtime.evaluate',
+            {
+              expression:
+                "!!document.querySelector('.message-delivery[role=alert]') && !document.querySelector('.reply-status')",
+              returnByValue: true,
+            },
+            sessionId,
+          )
+        ).result.value,
+    );
+    assert.equal(await panelPhase(), 'ready');
+  });
   await check('snapshot includes iframe and Shadow DOM controls', async () => {
     const snapshot = await rpc('snapshot', { interactive: true });
     assert.match(snapshot.text, /Frame button/);

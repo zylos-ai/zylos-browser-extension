@@ -28,6 +28,20 @@ export default {
   today: 'Today',
   newMessages: 'New messages ↓',
   browserTask: 'Browser task',
+  browserReady: 'Browser ready · No command running',
+  browserPaused: 'Browser actions paused',
+  browserFinished: 'Browser actions finished · Tabs kept',
+  replyWaiting: 'Message sent. Waiting for the Agent to reply…',
+  replyQueued: 'Message queued. Waiting for the Agent to reply…',
+  replyDelayed:
+    'No reply for over 2 minutes. Check the Agent through your original chat channel. Your message will not be resent automatically.',
+  replyDisconnected:
+    'Disconnected before a reply arrived. Reconnecting will not resend your message.',
+  chatDeliveryFailed: 'Your message could not reach the Agent queue. Check Browser Remote and C4.',
+  deliveryUnconfirmed:
+    'Delivery to the Agent queue could not be confirmed. Check the Agent before submitting the task again.',
+  agentUnavailable:
+    'The Agent is temporarily unavailable. This message was not queued. Check its status through your original chat channel.',
   operatingBrowser: 'Working in your browser',
   taskInProgress: 'Browser task in progress',
   taskTab: '{count} work tab · View anytime',

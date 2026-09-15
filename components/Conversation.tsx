@@ -1,5 +1,5 @@
-import { Fragment, useLayoutEffect, useRef, useState } from 'react';
-import type { RemoteState } from '../utils/remote';
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { REPLY_NOTICE_MS, type RemoteState } from '../utils/remote';
 import { Brand } from './Brand';
 import { useI18n } from './LanguageProvider';
 import { formatMessageDate } from '../utils/i18n';
@@ -19,13 +19,26 @@ export function Conversation({
   onStop: () => void;
   stopping: boolean;
 }) {
-  const { t, locale } = useI18n();
+  const { t, locale, errorText } = useI18n();
   const starters = [t('starterResearch'), t('starterCompare'), t('starterForm')];
   const historyRef = useRef<HTMLDivElement>(null);
   const following = useRef(true);
   const [unread, setUnread] = useState(false);
   const { chat, task } = state;
   const latest = chat.at(-1);
+  const [now, setNow] = useState(Date.now);
+  const awaiting =
+    latest?.role === 'user' && latest.delivery !== 'failed' && latest.delivery !== 'unknown';
+  const delayed = awaiting && now - latest.ts >= REPLY_NOTICE_MS;
+  useEffect(() => {
+    setNow(Date.now());
+    if (!awaiting) return;
+    const timer = setTimeout(
+      () => setNow(Date.now()),
+      Math.max(0, latest.ts + REPLY_NOTICE_MS - Date.now()),
+    );
+    return () => clearTimeout(timer);
+  }, [awaiting, latest?.ts]);
 
   function scrollToLatest() {
     const el = historyRef.current;
@@ -36,7 +49,15 @@ export function Conversation({
   useLayoutEffect(() => {
     if (following.current || latest?.role === 'user') scrollToLatest();
     else setUnread(true);
-  }, [latest?.ts, latest?.text, chat.length, task?.sessionId]);
+  }, [
+    latest?.ts,
+    latest?.text,
+    latest?.deliveryError,
+    chat.length,
+    task?.sessionId,
+    task?.phase,
+    delayed,
+  ]);
 
   return (
     <div className="conversation">
@@ -106,19 +127,32 @@ export function Conversation({
                   )}
                   {message.role === 'system' && <span className="system-label">{t('system')}</span>}
                   <p className="message-text">{message.text}</p>
+                  {message.role === 'user' && message.deliveryError && (
+                    <p className="message-delivery" role="alert">
+                      {errorText(message.deliveryError)}
+                    </p>
+                  )}
                 </article>
               </Fragment>
             ))}
           </div>
         )}
         {task && (
-          <section className="card task-card" aria-label={t('browserTask')}>
+          <section className="card task-card" data-phase={task.phase} aria-label={t('browserTask')}>
             <p className="task-status">
               <span className="status-dot" aria-hidden="true" />
-              {t('operatingBrowser')}
+              {t(
+                task.phase === 'running'
+                  ? 'operatingBrowser'
+                  : task.phase === 'paused'
+                    ? 'browserPaused'
+                    : task.phase === 'finished'
+                      ? 'browserFinished'
+                      : 'browserReady',
+              )}
             </p>
             <p className="task-title" title={task.url}>
-              {task.title || t('taskInProgress')}
+              {task.title || t('browserTask')}
             </p>
             <p className="text-caption text-muted">
               {t(task.tabCount === 1 ? 'taskTab' : 'taskTabs', { count: task.tabCount })}
@@ -137,6 +171,17 @@ export function Conversation({
               </button>
             </div>
           </section>
+        )}
+        {awaiting && (
+          <p className="reply-status" role="status">
+            {!state.connected
+              ? t('replyDisconnected')
+              : delayed
+                ? t('replyDelayed')
+                : latest.delivery === 'queued'
+                  ? t('replyQueued')
+                  : t('replyWaiting')}
+          </p>
         )}
       </div>
       {unread && (

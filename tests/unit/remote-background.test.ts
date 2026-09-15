@@ -4,8 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const executor = vi.hoisted(() => ({
   createTask: vi.fn(),
   release: vi.fn(async () => {}),
-  currentControl: vi.fn((): null | { sessionId: string; tabId: number; tabIds: number[] } => null),
-  currentGrant: vi.fn(() => null),
+  currentControl: vi.fn(
+    (): null | {
+      sessionId: string;
+      tabId: number;
+      tabIds: number[];
+      phase: 'ready' | 'paused' | 'finished';
+    } => null,
+  ),
+  currentGrant: vi.fn((): null | { url: string; title: string } => null),
   execute: vi.fn(async (c: { op: string }) => ({ ran: c.op })),
   onState: vi.fn(),
   initializeExecutor: vi.fn(),
@@ -77,6 +84,8 @@ beforeEach(() => {
     remoteConfig: { relayUrl: 'wss://agent.example/browser-remote/ext', key: KEY, enabled: true },
   };
   executor.currentControl.mockReturnValue(null);
+  executor.currentGrant.mockReturnValue(null);
+  executor.execute.mockImplementation(async (c: { op: string }) => ({ ran: c.op }));
   vi.stubGlobal('WebSocket', Socket);
   vi.stubGlobal('crypto', {
     randomUUID: () => '11111111-1111-4111-8111-111111111111',
@@ -125,6 +134,111 @@ async function bootConnected() {
 }
 
 describe('remote background', () => {
+  it('shows Working only while a browser command runs and preserves the title after finish', async () => {
+    const ws = await bootConnected();
+    const task = { sessionId: 'task', tabId: 3, tabIds: [3], phase: 'ready' as const };
+    executor.currentControl.mockReturnValue(task);
+    executor.currentGrant.mockReturnValue({ url: 'https://example.com', title: 'Video' });
+    expect((await ask({ type: 'remote-state' })).value?.task).toMatchObject({ phase: 'ready' });
+    let resolve!: (value: { ran: string }) => void;
+    executor.execute.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    );
+    ws.receive({ type: 'req', id: 1, method: 'click', params: { x: 10, y: 10 } });
+    await flush();
+    expect((await ask({ type: 'remote-state' })).value?.task).toMatchObject({ phase: 'running' });
+    resolve({ ran: 'click' });
+    await flush();
+    expect((await ask({ type: 'remote-state' })).value?.task).toMatchObject({ phase: 'ready' });
+    executor.execute.mockImplementationOnce(async () => {
+      executor.currentControl.mockReturnValue({ ...task, phase: 'finished' });
+      executor.currentGrant.mockReturnValue(null);
+      return { ran: 'finish' };
+    });
+    ws.receive({ type: 'req', id: 2, method: 'finish', params: {} });
+    await flush();
+    ws.receive({ type: 'chat', text: 'Done' });
+    await flush();
+    expect((await ask({ type: 'remote-state' })).value?.task).toMatchObject({
+      phase: 'finished',
+      title: 'Video',
+    });
+  });
+
+  it('records queue receipts and failures on the matching message, including persisted delivery errors', async () => {
+    const ws = await bootConnected();
+    await ask({ type: 'remote-chat-send', text: 'Check stocks' });
+    const chatId = ws.last('chat')!.id;
+    ws.receive({ type: 'chat-status', chatId: 'unrelated', state: 'failed' });
+    await flush();
+    expect((storage.remoteChatLog as { delivery: string }[])[0]!.delivery).toBe('sent');
+    ws.receive({ type: 'chat-status', chatId, state: 'queued' });
+    await flush();
+    expect((storage.remoteChatLog as { delivery: string }[])[0]!.delivery).toBe('queued');
+    ws.receive({ type: 'chat-status', chatId, state: 'failed', code: 'C4_DELIVERY_FAILED' });
+    await flush();
+    expect((storage.remoteChatLog as unknown[])[0]).toMatchObject({
+      text: 'Check stocks',
+      delivery: 'failed',
+      deliveryError: 'ui.error.chatDeliveryFailed',
+    });
+    expect((await ask({ type: 'remote-state' })).value?.connected).toBe(true);
+    ws.receive({ type: 'chat-status', chatId, state: 'unknown', code: 'C4_DELIVERY_TIMEOUT' });
+    await flush();
+    expect((storage.remoteChatLog as unknown[])[0]).toMatchObject({
+      delivery: 'unknown',
+      deliveryError: 'ui.error.deliveryUnconfirmed',
+    });
+    ws.receive({ type: 'chat-status', chatId, state: 'failed', code: 'AGENT_UNAVAILABLE' });
+    await flush();
+    expect((storage.remoteChatLog as unknown[])[0]).toMatchObject({
+      deliveryError: 'ui.error.agentUnavailable',
+    });
+  });
+
+  it('a late result from an old socket cannot clear a new command with the same id', async () => {
+    const ws = await bootConnected();
+    executor.currentControl.mockReturnValue({
+      sessionId: 'task',
+      tabId: 3,
+      tabIds: [3],
+      phase: 'ready',
+    });
+    let oldResolve!: (value: { ran: string }) => void;
+    executor.execute.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          oldResolve = resolve;
+        }),
+    );
+    ws.receive({ type: 'req', id: 1, method: 'click', params: { x: 10, y: 10 } });
+    await flush();
+    ws.serverClose(1006);
+    await vi.advanceTimersByTimeAsync(2000);
+    const next = sockets[1]!;
+    next.open();
+    let newResolve!: (value: { ran: string }) => void;
+    // dialog bypasses the previous request's serial queue, as it must for waits.
+    executor.execute.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          newResolve = resolve;
+        }),
+    );
+    next.receive({ type: 'req', id: 1, method: 'dialog', params: { action: 'get' } });
+    await flush();
+    oldResolve({ ran: 'click' });
+    await flush();
+    expect((await ask({ type: 'remote-state' })).value?.task).toMatchObject({ phase: 'running' });
+    expect(next.last('resp')).toBeUndefined();
+    newResolve({ ran: 'dialog' });
+    await flush();
+    expect((await ask({ type: 'remote-state' })).value?.task).toMatchObject({ phase: 'ready' });
+  });
+
   it('dials the relay with the key in the subprotocol and says hello', async () => {
     const ws = await bootConnected();
     expect(ws.url).toBe('wss://agent.example/browser-remote/ext');

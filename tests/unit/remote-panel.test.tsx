@@ -81,6 +81,7 @@ beforeEach(() => {
   root = createRoot(container);
 });
 afterEach(async () => {
+  vi.useRealTimers();
   await act(async () => {
     root.unmount();
   });
@@ -137,6 +138,7 @@ test('runtime updates render real tasks, stop/reveal remain wired, and disconnec
     ...state,
     task: {
       sessionId: 'task-1',
+      phase: 'running',
       tabId: 5,
       tabCount: 2,
       title: '对比两款产品',
@@ -148,6 +150,17 @@ test('runtime updates render real tasks, stop/reveal remain wired, and disconnec
   });
   expect(container.querySelector('.task-title')?.textContent).toBe('对比两款产品');
   expect(container.querySelector('.task-card')?.textContent).toContain('2 个工作标签页');
+  expect(container.querySelector('.task-status')?.textContent).toContain('正在操作浏览器');
+  for (const [phase, label] of [
+    ['ready', '浏览器待命'],
+    ['paused', '已暂停'],
+    ['finished', '已结束'],
+  ] as const) {
+    state.task!.phase = phase;
+    await act(async () => listener({ type: 'remote-updated', state }));
+    expect(container.querySelector('.task-status')?.textContent).toContain(label);
+    expect(container.querySelector('.task-status')?.textContent).not.toContain('正在操作');
+  }
   await click('.task-buttons button');
   expect(send).toHaveBeenLastCalledWith({ type: 'remote-reveal' });
   await click('#stop-task');
@@ -158,6 +171,40 @@ test('runtime updates render real tasks, stop/reveal remain wired, and disconnec
   });
   expect(input().disabled).toBe(true);
   expect(container.querySelector('#stop-task')).toBeNull();
+});
+
+test('waiting for a reply is separate from browser work and becomes a delay notice without resending', async () => {
+  vi.useFakeTimers();
+  state.chat = [{ role: 'user', text: '帮我看一下美股', ts: Date.now(), delivery: 'queued' }];
+  await mount();
+  expect(container.querySelector('.reply-status')?.textContent).toContain('等待 Agent 回复');
+  expect(container.querySelector('.task-card')).toBeNull();
+  const sent = send.mock.calls.length;
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(120_001);
+  });
+  expect(container.querySelector('.reply-status')?.textContent).toContain('超过 2 分钟');
+  expect(send.mock.calls.length).toBe(sent);
+  state.chat.push({ role: 'assistant', text: '收到，正在查询', ts: Date.now() });
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(container.querySelector('.reply-status')).toBeNull();
+});
+
+test('delivery failure remains visible beside the user message after reopening the panel', async () => {
+  state.chat = [
+    {
+      role: 'user',
+      text: 'Check stocks',
+      ts: Date.now(),
+      delivery: 'failed',
+      deliveryError: 'ui.error.chatDeliveryFailed',
+    },
+  ];
+  await mount();
+  expect(container.querySelector('.message-delivery')?.textContent).toContain(
+    '未能送入 Agent 队列',
+  );
+  expect(container.querySelector('.reply-status')).toBeNull();
 });
 
 test('settings show the saved URL without exposing the key and return to chat after saving', async () => {

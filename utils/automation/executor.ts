@@ -65,13 +65,17 @@ const inScope = (tab: chrome.tabs.Tab, session: Scope | null) =>
   session.tabIds.includes(tab.id) &&
   tab.groupId === session.groupId;
 let groupUpdates: Promise<unknown> = Promise.resolve();
-function markTask(session: Scope, phase: 'working' | 'paused') {
+function markTask(session: Scope, phase: Scope['phase']) {
+  if (control === session) {
+    session.phase = phase;
+    publish();
+  }
   const next = groupUpdates
     .catch(() => {})
     .then(async () => {
       if (control !== session) return;
       await chrome.tabGroups.update(session.groupId, {
-        color: phase === 'working' ? 'green' : 'grey',
+        color: phase === 'ready' ? 'green' : 'grey',
         title: 'zylos',
       });
     });
@@ -189,6 +193,7 @@ export async function createTask(initial: {
   }
   const session: Scope = {
     scope: 'task',
+    phase: 'ready',
     windowId: tab.windowId,
     sessionId: taskId,
     groupId,
@@ -203,7 +208,7 @@ export async function createTask(initial: {
   parked = false;
   publish();
   try {
-    await markTask(session, 'working');
+    await markTask(session, 'ready');
     if (control !== session) fail('STOPPED');
     await chrome.action.setBadgeBackgroundColor({ color: '#326C53' });
     if (control !== session) fail('STOPPED');
@@ -489,7 +494,8 @@ export async function execute(command: Command, deadline: number) {
     invalidate();
     await serial(() => detachCurrent(true));
     if (control !== session) fail('STOPPED');
-    if (session) await markTask(session, 'paused').catch(() => {});
+    if (session)
+      await markTask(session, command.op === 'finish' ? 'finished' : 'paused').catch(() => {});
     if (Date.now() > deadline) fail('COMMAND_EXPIRED');
     await chrome.action.setBadgeText({ text: '' });
     clearTimeout(pauseTimer);
@@ -552,6 +558,8 @@ export async function execute(command: Command, deadline: number) {
     return { handled: true, type: current.type };
   }
   if (command.op === 'wait') {
+    await markTask(session, 'ready');
+    checkSession();
     const until = Math.min(deadline, Date.now() + command.timeoutMs);
     while (Date.now() < until) {
       checkSession();
@@ -672,6 +680,8 @@ export async function execute(command: Command, deadline: number) {
     );
   }
   if (command.op === 'back' || command.op === 'forward' || command.op === 'reload') {
+    await markTask(session, 'ready');
+    checkSession();
     parked = false;
     await syncTarget();
     checkSession();
@@ -740,7 +750,7 @@ export async function execute(command: Command, deadline: number) {
     publish();
     await syncTarget();
     checkSession();
-    await markTask(session, 'working');
+    await markTask(session, 'ready');
     checkSession();
     return {
       tabId: target.id,
@@ -753,7 +763,7 @@ export async function execute(command: Command, deadline: number) {
   checkSession();
   if (!grant) fail('NO_CONTROLLABLE_TAB', '当前页不可操作；可用 open 打开普通网站，无需再次授权');
   await chrome.action.setBadgeText({ text: 'ON' });
-  await markTask(session, 'working');
+  await markTask(session, 'ready');
   checkSession();
   const lease = grant;
   const startGeneration = generation;

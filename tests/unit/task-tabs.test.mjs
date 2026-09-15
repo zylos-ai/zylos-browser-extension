@@ -177,13 +177,16 @@ test('handoff keeps the group; completion removes it without a terminal-status r
     const s = await fixture();
     await s.start();
     const task = s.executor.currentControl();
+    assert.equal(task.phase, 'ready');
     assert.equal(s.groups.get(task.groupId).title, 'zylos');
     await s.command({ op: 'pause' });
+    assert.equal(s.executor.currentControl().phase, 'paused');
     assert.equal(s.groups.get(task.groupId).title, 'zylos');
     assert.equal(s.tabs.get(task.tabId).groupId, task.groupId);
     assert.equal(s.attached.size, 0);
     // Finishing detaches the debugger while the paused task retains its group.
     await s.command({ op: 'finish' });
+    assert.equal(s.executor.currentControl().phase, 'finished');
     assert.equal(s.groups.get(task.groupId).title, 'zylos');
     if (outcome === 'stop') await s.command({ op: 'stop' });
     else
@@ -355,6 +358,7 @@ test('finish retains only work tabs; resume does not follow focus; closing a par
   chrome.tabs.onActivated.emit({ windowId: 1, tabId: 2 });
   await s.command({ op: 'snapshot' });
   assert.equal(s.executor.currentGrant().id, c.tabId);
+  assert.equal(s.executor.currentControl().phase, 'ready');
   await s.command({ op: 'finish' });
   s.tabs.delete(c.tabIds[0]);
   chrome.tabs.onRemoved.emit(c.tabIds[0]);
