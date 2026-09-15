@@ -18,6 +18,7 @@ import { isPanelSender } from '../../utils/messages';
 import {
   CHAT_LOG_CAP,
   REMOTE_CHAT_LOG_KEY,
+  REMOTE_CHAT_RECEIPTS_KEY,
   REMOTE_CONFIG_KEY,
   REMOTE_KEY_PROTO_PREFIX,
   REMOTE_SUBPROTOCOL,
@@ -56,6 +57,8 @@ export function startRemoteBackground() {
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   const idem = new IdempotencyCache();
   const inflight = new Map<number, { method: string }>();
+  const receivingChats = new Map<string, Promise<void>>();
+  const receivedChats = new Set<string>();
 
   const publish = () => {
     void chrome.runtime.sendMessage({ type: 'remote-updated', state: snapshot() }).catch(() => {});
@@ -90,7 +93,10 @@ export function startRemoteBackground() {
 
   // ---------------------------------------------------------------- chat log
   async function appendChat(entry: ChatEntry) {
-    state.chat.push(entry);
+    const existing =
+      entry.id && state.chat.findIndex((m) => m.role === entry.role && m.id === entry.id);
+    if (typeof existing === 'number' && existing >= 0) state.chat[existing] = entry;
+    else state.chat.push(entry);
     if (state.chat.length > CHAT_LOG_CAP) state.chat.splice(0, state.chat.length - CHAT_LOG_CAP);
     await chrome.storage.local.set({ [REMOTE_CHAT_LOG_KEY]: state.chat });
     publish();
@@ -229,16 +235,52 @@ export function startRemoteBackground() {
         send({ type: 'pong', ts: m.ts ?? Date.now() });
         return;
       case 'chat': {
-        let completion: Promise<void> | undefined;
-        if (m.role === 'assistant' && m.final) {
-          idem.cancel();
-          completion = completeTask().catch(() => {
-            state.error = 'ui.error.taskCleanupFailed';
-            publish();
+        const receive = async () => {
+          let completion: Promise<void> | undefined;
+          if (m.role === 'assistant' && m.final) {
+            idem.cancel();
+            completion = completeTask().catch(() => {
+              state.error = 'ui.error.taskCleanupFailed';
+              publish();
+            });
+          }
+          await appendChat({
+            id: m.id,
+            role: m.role,
+            text: m.text,
+            ts: m.ts ?? Date.now(),
+            final: m.final,
           });
+          await completion;
+          if (m.id) {
+            const receipts = [...receivedChats, m.id].slice(-500);
+            await chrome.storage.local.set({ [REMOTE_CHAT_RECEIPTS_KEY]: receipts });
+            receivedChats.clear();
+            receipts.forEach((id) => receivedChats.add(id));
+          }
+        };
+        try {
+          const pending = m.id && receivingChats.get(m.id);
+          if (pending) await pending;
+          else if (!m.id || !receivedChats.has(m.id)) {
+            const work = receive();
+            if (m.id) receivingChats.set(m.id, work);
+            try {
+              await work;
+            } finally {
+              if (m.id) receivingChats.delete(m.id);
+            }
+          }
+          // A duplicate after a lost acknowledgement must not end a newer task.
+          if (state.error === 'ui.error.chatSaveFailed') {
+            state.error = '';
+            publish();
+          }
+          if (m.id && gen === generation) send({ type: 'chat-ack', id: m.id });
+        } catch {
+          state.error = 'ui.error.chatSaveFailed';
+          publish();
         }
-        await appendChat({ role: m.role, text: m.text, ts: m.ts ?? Date.now(), final: m.final });
-        await completion;
         return;
       }
       case 'chat-status':
@@ -345,12 +387,18 @@ export function startRemoteBackground() {
     const saved = await chrome.storage.local.get([
       REMOTE_CONFIG_KEY,
       REMOTE_CHAT_LOG_KEY,
+      REMOTE_CHAT_RECEIPTS_KEY,
       LANGUAGE_STORAGE_KEY,
     ]);
     setWorkerLanguage(saved[LANGUAGE_STORAGE_KEY]);
     const cfg = remoteConfigSchema.safeParse(saved[REMOTE_CONFIG_KEY] ?? {});
     const log = z.array(chatEntrySchema).safeParse(saved[REMOTE_CHAT_LOG_KEY] ?? []);
     state.chat = log.success ? log.data.slice(-CHAT_LOG_CAP) : [];
+    const receipts = z.array(z.string().max(128)).safeParse(saved[REMOTE_CHAT_RECEIPTS_KEY] ?? []);
+    if (receipts.success) for (const id of receipts.data.slice(-500)) receivedChats.add(id);
+    for (const message of state.chat) {
+      if (message.role === 'assistant' && message.id) receivedChats.add(message.id);
+    }
     await applyConfig(cfg.success ? cfg.data : remoteConfigSchema.parse({}));
     if (config.enabled && state.configured) void connect();
     publish();

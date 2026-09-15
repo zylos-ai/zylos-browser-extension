@@ -6,7 +6,7 @@ import { z } from 'zod';
 
 export const REMOTE_SUBPROTOCOL = 'zylos-browser-remote.v2';
 export const REMOTE_KEY_PROTO_PREFIX = 'key.';
-export const REMOTE_VERSION = '1.2.0';
+export const REMOTE_VERSION = '1.3.0';
 export const MAX_CHAT_TEXT = 8000;
 export const CHAT_LOG_CAP = 200;
 export const REPLY_NOTICE_MS = 120_000;
@@ -24,6 +24,7 @@ export const remoteConfigSchema = z.object({
 export type RemoteConfig = z.infer<typeof remoteConfigSchema>;
 export const REMOTE_CONFIG_KEY = 'remoteConfig';
 export const REMOTE_CHAT_LOG_KEY = 'remoteChatLog';
+export const REMOTE_CHAT_RECEIPTS_KEY = 'remoteChatReceipts';
 
 export const chatEntrySchema = z.object({
   id: z.string().max(128).optional(),
@@ -99,6 +100,10 @@ export const relayFrameSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('chat'),
+    id: z
+      .string()
+      .regex(/^[a-f0-9-]{36}$/)
+      .optional(),
     role: z.enum(['assistant', 'system']).default('assistant'),
     text: z.string().max(MAX_CHAT_TEXT),
     final: z.boolean().default(true),

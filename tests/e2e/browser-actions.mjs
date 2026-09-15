@@ -100,6 +100,7 @@ try {
   relay = await start({
     extPort: 0,
     agentPort: 0,
+    outboxFile: path.join(profile, 'chat-outbox.json'),
     onChat: async (message) => {
       chatMessages.push(message);
       if (message.text === 'fixture:fail-delivery')
@@ -639,6 +640,51 @@ try {
           !browser.targets.some((target) => owned.includes(target.tabId) && target.attached)
         );
       });
+    },
+  );
+  await check(
+    'a final reply queued while disconnected is delivered on reconnect and removes the task',
+    async () => {
+      await rpc('open', { url });
+      await rpc('wait', { condition: 'loaded' });
+      const owned = (await rpc('tabs')).tabs.map((tab) => tab.id);
+      const keyId = relay.ext.connectedIds()[0];
+      const waiting = rpc('wait', {
+        condition: 'visible',
+        selector: '#never',
+        timeoutMs: 10000,
+      }).catch((e) => e);
+      await eventually(async () => (await panelPhase()) === 'running');
+      relay.ext.conns.get(keyId).ws.terminate();
+      await eventually(() => !relay.ext.isConnected(keyId));
+      assert.equal((await waiting).code, 'EXT_OFFLINE');
+      const response = await fetch(rpcUrl + '/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ endpoint: keyId, text: 'Recovered final answer after disconnect' }),
+      });
+      const receipt = await response.json();
+      assert.equal(response.status, 202);
+      assert.equal(receipt.queued, true);
+      await eventually(
+        async () => relay.ext.isConnected(keyId) && !relay.ext.outbox.first(keyId),
+        15000,
+      );
+      assert.equal((await rpc('info')).control, null);
+      assert.equal(await panelPhase(), undefined);
+      const page = (
+        await cdp(
+          'Runtime.evaluate',
+          {
+            expression: `(async () => ({ tabs: await chrome.tabs.query({}), replies: [...document.querySelectorAll('.message-text')].filter((el) => el.textContent === 'Recovered final answer after disconnect').length }))()`,
+            awaitPromise: true,
+            returnByValue: true,
+          },
+          sessionId,
+        )
+      ).result.value;
+      assert.equal(page.replies, 1);
+      assert.ok(owned.every((id) => page.tabs.some((tab) => tab.id === id && tab.groupId === -1)));
     },
   );
   await check('sidebar stop button revokes control and cleans task tabs', async () => {

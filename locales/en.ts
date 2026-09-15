@@ -34,6 +34,8 @@ export default {
   replyWaiting: 'Message sent. Waiting for the Agent to reply…',
   replyQueued: 'Message queued. Waiting for the Agent to reply…',
   replyProgress: 'Progress received. Waiting for the final reply…',
+  chatSaveFailed:
+    'The reply could not be saved. Reload the extension to receive unacknowledged replies again.',
   taskCleanupFailed:
     'Final reply received, but browser cleanup is incomplete. Reload the extension and check your tabs.',
   replyDelayed:

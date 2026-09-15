@@ -31,6 +31,7 @@ export default {
   replyWaiting: '消息已发送，等待 Agent 回复…',
   replyQueued: '消息已进入队列，等待 Agent 回复…',
   replyProgress: '已收到进度，等待最终回复…',
+  chatSaveFailed: '回复未能保存。请重新加载插件，连接后会重新接收待确认的回复。',
   taskCleanupFailed: '已收到最终回复，但浏览器控制清理未完成。请重新加载插件后检查标签页。',
   replyDelayed: '已超过 2 分钟未收到回复。请通过原来的聊天入口检查 Agent 状态；消息不会自动重发。',
   replyDisconnected: '连接已断开，尚未收到回复。重连后消息不会自动重发。',

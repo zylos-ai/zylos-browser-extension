@@ -139,6 +139,79 @@ async function bootConnected() {
 }
 
 describe('remote background', () => {
+  it('acknowledges a persisted final reply once and does not end a new task on replay', async () => {
+    const ws = await bootConnected();
+    const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    let save!: () => void;
+    vi.mocked(chrome.storage.local.set).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          save = resolve;
+        }),
+    );
+    ws.receive({ type: 'chat', id, text: 'Done' });
+    ws.receive({ type: 'chat', id, text: 'Done' });
+    await flush();
+    expect(ws.last('chat-ack')).toBeUndefined();
+    save();
+    await flush();
+    expect(ws.last('chat-ack')).toMatchObject({ id });
+    expect(executor.completeTask).toHaveBeenCalledOnce();
+    expect(storage.remoteChatReceipts).toContain(id);
+    const next = { sessionId: 'next', tabId: 4, tabIds: [4], phase: 'ready' as const };
+    executor.currentControl.mockReturnValue(next);
+    await ask({ type: 'remote-chat-clear' });
+    ws.receive({ type: 'chat', id, text: 'Done' });
+    await flush();
+    expect(executor.completeTask).toHaveBeenCalledOnce();
+    expect(executor.currentControl()).toEqual(next);
+    expect(storage.remoteChatLog).toEqual([]);
+  });
+
+  it('keeps acknowledgement history after clearing chat and restarting the worker', async () => {
+    const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    storage.remoteChatReceipts = [id];
+    const ws = await bootConnected();
+    ws.receive({ type: 'chat', id, text: 'Already received' });
+    await flush();
+    expect(ws.last('chat-ack')).toMatchObject({ id });
+    expect(executor.completeTask).not.toHaveBeenCalled();
+    expect((await ask({ type: 'remote-state' })).value?.chat).toEqual([]);
+  });
+
+  it('does not acknowledge failed persistence and retries without duplicating the bubble', async () => {
+    const ws = await bootConnected();
+    const message = { type: 'chat', id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', text: 'Result' };
+    vi.mocked(chrome.storage.local.set).mockRejectedValueOnce(new Error('storage unavailable'));
+    ws.receive(message);
+    await flush();
+    expect(ws.last('chat-ack')).toBeUndefined();
+    expect((await ask({ type: 'remote-state' })).value?.error).toBe('ui.error.chatSaveFailed');
+    ws.receive(message);
+    await flush();
+    expect(ws.last('chat-ack')).toMatchObject({ id: message.id });
+    expect(storage.remoteChatLog).toHaveLength(1);
+  });
+
+  it('answers heartbeats while a screenshot promise is still pending', async () => {
+    const ws = await bootConnected();
+    let resolve!: (value: { ran: string }) => void;
+    executor.execute.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    );
+    ws.receive({ type: 'req', id: 1, method: 'screenshot', params: {} });
+    await flush();
+    ws.receive({ type: 'ping', ts: 123 });
+    await flush();
+    expect(ws.last('pong')).toEqual({ type: 'pong', ts: 123 });
+    expect(ws.last('resp')).toBeUndefined();
+    resolve({ ran: 'screenshot' });
+    await flush();
+  });
+
   it('shows command activity and removes the task when the final answer arrives', async () => {
     const ws = await bootConnected();
     const task = { sessionId: 'task', tabId: 3, tabIds: [3], phase: 'ready' as const };

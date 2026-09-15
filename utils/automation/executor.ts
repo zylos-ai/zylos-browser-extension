@@ -7,6 +7,8 @@ import { PointerMotion } from './pointer-motion';
 import type { Command } from '../commands';
 import type { CdpResults, Cursor, GrantedTab, Point, Scope } from './types';
 
+export const SCREENSHOT_TIMEOUT_MS = 12_000;
+
 let grant: GrantedTab | null = null;
 const pointerMotion = new PointerMotion();
 let cursor: Cursor | null = null;
@@ -781,8 +783,15 @@ export async function execute(command: Command, deadline: number) {
   checkSession();
   const lease = grant;
   const startGeneration = generation;
+  let screenshotDeadline: number | undefined;
+  let screenshotStage = '';
   const check = () => {
     checkSession();
+    if (screenshotDeadline !== undefined && Date.now() >= screenshotDeadline)
+      fail(
+        'SCREENSHOT_TIMEOUT',
+        `Screenshot timed out during ${screenshotStage}; the page may still be usable. Do not repeat the preceding browser action.`,
+      );
     if (Date.now() > deadline) fail('COMMAND_EXPIRED');
     if (grant !== lease) fail('STOPPED');
     if (generation !== startGeneration) fail('PAGE_CHANGED', '页面已变化，请重新 snapshot');
@@ -904,8 +913,11 @@ export async function execute(command: Command, deadline: number) {
     ]);
   }
   async function screenshot() {
-    if (cursor) await showCursor('hide');
+    screenshotDeadline = Date.now() + SCREENSHOT_TIMEOUT_MS;
     try {
+      screenshotStage = 'hide cursor';
+      if (cursor) await showCursor('hide');
+      screenshotStage = 'Page.captureScreenshot';
       const result = await cdp('Page.captureScreenshot', {
         format: 'png',
         captureBeyondViewport: false,
@@ -914,6 +926,7 @@ export async function execute(command: Command, deadline: number) {
       if (result.data.length > 7_000_000)
         fail('SCREENSHOT_TOO_LARGE', '截图过大，请缩小浏览器窗口后重新观察');
       // Also validate the active target after capture; never return a different tab's pixels.
+      screenshotStage = 'Page.getLayoutMetrics';
       await cdp('Page.getLayoutMetrics');
       return result;
     } finally {
@@ -922,7 +935,7 @@ export async function execute(command: Command, deadline: number) {
     }
   }
   if (command.op === 'snapshot') return snapshot(command.interactive);
-  if (command.op === 'screenshot') return screenshot();
+  if (command.op === 'screenshot') return boundedCdp(screenshot, check);
   if (command.op === 'observe') {
     const tab = await chrome.tabs.get(lease.id);
     check();
@@ -957,7 +970,7 @@ export async function execute(command: Command, deadline: number) {
     const startedAt = new Date().toISOString();
     try {
       const { text } = await snapshot(command.interactive);
-      const { data } = await screenshot();
+      const { data } = await boundedCdp(screenshot, check);
       const fresh = await chrome.tabs.get(lease.id);
       check();
       if (fresh.status === 'loading' || fresh.pendingUrl) fail('PAGE_LOADING');

@@ -81,6 +81,7 @@ export const REMOTE_CAPABILITIES = [
   'popup-v1',
   'dialog-v1',
   'wait-v1',
+  'chat-ack-v1',
 ];
 
 export class RemoteError extends Error {
