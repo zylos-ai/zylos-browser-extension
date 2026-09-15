@@ -1,5 +1,5 @@
 // Runs only in our CDP isolated world. All text and markup are bundled, never page/Agent code.
-function renderCursor(update) {
+function renderCursor(update, palette, labels) {
   const key = '__cocoVisualCursor';
   let state = globalThis[key];
   if (update.action === 'remove') {
@@ -47,12 +47,13 @@ function renderCursor(update) {
     const shadow = host.attachShadow({ mode: 'closed' });
     const sheet = new CSSStyleSheet();
     sheet.replaceSync(`
+      ${palette}
       :host,*{pointer-events:none!important;box-sizing:border-box}
-      .pointer{position:fixed;left:0;top:0;filter:drop-shadow(0 2px 3px #10271f55);will-change:transform}
+      .pointer{position:fixed;left:0;top:0;filter:drop-shadow(0 2px 3px color-mix(in srgb,var(--zylos-neutral-900) 33%,transparent));will-change:transform}
       svg{display:block;width:27px;height:32px;overflow:visible}
-      .label{position:absolute;left:22px;top:24px;white-space:nowrap;padding:5px 9px;border-radius:7px;background:#24664e;color:#fff;font:600 12px/1.3 system-ui,sans-serif;box-shadow:0 2px 8px #10271f26}
-      .ring{position:fixed;left:0;top:0;width:36px;height:36px;margin:-18px;border:2px solid #30b889;border-radius:50%;opacity:0;background:#30b88920}
-      .outline{position:fixed;left:0;top:0;border:2px solid #30b889;border-radius:5px;box-shadow:0 0 0 3px #30b88922;display:none}
+      .label{position:absolute;left:22px;top:24px;white-space:nowrap;padding:5px 9px;border-radius:8px;background:var(--zylos-purple-500);color:var(--zylos-neutral-0);font:600 12px/1.3 system-ui,sans-serif;box-shadow:0 2px 8px color-mix(in srgb,var(--zylos-neutral-900) 15%,transparent)}
+      .ring{position:fixed;left:0;top:0;width:36px;height:36px;margin:-18px;border:2px solid var(--zylos-purple-500);border-radius:50%;opacity:0;background:color-mix(in srgb,var(--zylos-purple-500) 12%,transparent)}
+      .outline{position:fixed;left:0;top:0;border:2px solid var(--zylos-purple-500);border-radius:5px;box-shadow:0 0 0 3px color-mix(in srgb,var(--zylos-purple-500) 13%,transparent);display:none}
       @media(prefers-reduced-motion:reduce){.pointer{transition:none}}
     `);
     shadow.adoptedStyleSheets = [sheet];
@@ -62,8 +63,8 @@ function renderCursor(update) {
     svg.setAttribute('viewBox', '0 0 27 32');
     const arrow = document.createElementNS(svg.namespaceURI, 'path');
     arrow.setAttribute('d', 'M2 2L23 18L14 19L10 28Z');
-    arrow.setAttribute('fill', '#24664e');
-    arrow.setAttribute('stroke', '#fff');
+    arrow.setAttribute('fill', 'var(--zylos-purple-500)');
+    arrow.setAttribute('stroke', 'var(--zylos-neutral-0)');
     arrow.setAttribute('stroke-width', '2');
     arrow.setAttribute('stroke-linejoin', 'round');
     svg.append(arrow);
@@ -135,7 +136,7 @@ function renderCursor(update) {
       }
     });
   }
-  state.label.textContent = `Agent · ${{ move: '移动', click: '点击', input: '输入', scroll: '滚动', key: '按键' }[update.action] || '操作中'}`;
+  state.label.textContent = `Zylos · ${labels[update.action] || labels.working}`;
   state.label.style.left = x > innerWidth - 150 ? '-115px' : '22px';
   state.label.style.top = y > innerHeight - 65 ? '-28px' : '24px';
   state.outline.style.display = update.rect ? 'block' : 'none';

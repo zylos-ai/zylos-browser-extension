@@ -8,12 +8,21 @@ export default defineConfig({
     plugins: [tailwindcss()],
   }),
   manifest: {
-    name: 'Coco · Agent Browser (Zylos)',
-    description:
-      'Chat with your Zylos Agent and let it work in dedicated, marked tabs of this browser. Stop at any time.',
+    name: 'Zylos Browser',
+    description: '__MSG_extensionDescription__',
+    default_locale: 'en',
+    icons: { 16: 'icons/16.png', 32: 'icons/32.png', 48: 'icons/48.png', 128: 'icons/128.png' },
     minimum_chrome_version: '125',
     permissions: ['debugger', 'storage', 'tabs', 'alarms', 'sidePanel', 'tabGroups'],
-    action: { default_title: '打开 Coco 侧边栏' },
+    action: {
+      default_title: '__MSG_openSidebar__',
+      default_icon: {
+        16: 'icons/16.png',
+        32: 'icons/32.png',
+        48: 'icons/48.png',
+        128: 'icons/128.png',
+      },
+    },
     content_security_policy: { extension_pages: "script-src 'self'; object-src 'self'" },
     // The relay connection uses WebSocket; no website-to-extension entrypoint is needed.
   },

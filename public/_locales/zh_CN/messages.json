@@ -1,0 +1,6 @@
+{
+  "extensionDescription": {
+    "message": "在侧边栏与 Zylos Agent 聊天，让它在专用标签页中操作浏览器，随时可以停止。"
+  },
+  "openSidebar": { "message": "打开 Zylos 侧边栏" }
+}

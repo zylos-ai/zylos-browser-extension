@@ -95,6 +95,7 @@ beforeEach(() => {
       },
     },
     storage: {
+      onChanged: { addListener: vi.fn(), removeListener: vi.fn() },
       local: {
         setAccessLevel: vi.fn(async () => {}),
         get: vi.fn(async (keys: string[]) =>
@@ -210,7 +211,7 @@ describe('remote background', () => {
     await vi.advanceTimersByTimeAsync(120_000);
     expect(sockets).toHaveLength(2);
     const st = await ask({ type: 'remote-state' });
-    expect(st.value?.error).toMatch(/接管/);
+    expect(st.value?.error).toBe('ui.error.connectionTaken');
   });
 
   it('kill switch closes the socket and releases the task', async () => {

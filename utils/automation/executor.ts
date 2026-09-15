@@ -72,7 +72,7 @@ function markTask(session: Scope, phase: 'working' | 'paused') {
       if (control !== session) return;
       await chrome.tabGroups.update(session.groupId, {
         color: phase === 'working' ? 'green' : 'grey',
-        title: `Coco Agent · ${phase === 'working' ? '工作中' : '等待继续'}`,
+        title: 'zylos',
       });
     });
   groupUpdates = next.catch(() => {});

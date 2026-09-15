@@ -1,0 +1,23 @@
+/* 共享品牌色板：侧栏主题与网页内的 Agent 鼠标使用同一组变量。
+ * :root 用于侧栏，:host 用于鼠标的隔离 Shadow DOM。 */
+:root,
+:host {
+  /* 01 / 原始色板。名称与 Figma Primitives 的 WEB code syntax 一致。 */
+  --zylos-purple-500: #ac01c2;
+  --zylos-purple-600: #8d00a0;
+  --zylos-purple-50: #fbeefd;
+  --zylos-purple-200: #efcef3;
+  --zylos-neutral-0: #ffffff;
+  --zylos-neutral-50: #f7f7fa;
+  --zylos-neutral-100: #f1f1f5;
+  --zylos-neutral-200: #e5e4eb;
+  --zylos-neutral-500: #706776;
+  --zylos-neutral-900: #211a25;
+  --zylos-control-outline: #8c8492;
+  --zylos-green-600: #16734b;
+  --zylos-green-50: #effaf4;
+  --zylos-red-600: #b42335;
+  --zylos-red-50: #fff1f2;
+  --zylos-amber-600: #956000;
+  --zylos-amber-50: #fff8e8;
+}

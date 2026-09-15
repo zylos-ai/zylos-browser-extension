@@ -177,13 +177,14 @@ test('handoff keeps the group; completion removes it without a terminal-status r
     const s = await fixture();
     await s.start();
     const task = s.executor.currentControl();
+    assert.equal(s.groups.get(task.groupId).title, 'zylos');
     await s.command({ op: 'pause' });
-    assert.equal(s.groups.get(task.groupId).title, 'Coco Agent · 等待继续');
+    assert.equal(s.groups.get(task.groupId).title, 'zylos');
     assert.equal(s.tabs.get(task.tabId).groupId, task.groupId);
     assert.equal(s.attached.size, 0);
     // Finishing detaches the debugger while the paused task retains its group.
     await s.command({ op: 'finish' });
-    assert.equal(s.groups.get(task.groupId).title, 'Coco Agent · 等待继续');
+    assert.equal(s.groups.get(task.groupId).title, 'zylos');
     if (outcome === 'stop') await s.command({ op: 'stop' });
     else
       await s.command({
@@ -346,7 +347,7 @@ test('finish retains only work tabs; resume does not follow focus; closing a par
   await s.start();
   const c = s.executor.currentControl();
   await s.command({ op: 'finish' });
-  assert.equal(s.groups.get(c.groupId).title, 'Coco Agent · 等待继续');
+  assert.equal(s.groups.get(c.groupId).title, 'zylos');
   assert.equal(s.groups.get(c.groupId).color, 'grey');
   assert.equal(s.attached.size, 0);
   s.tabs.get(1).active = false;

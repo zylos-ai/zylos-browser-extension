@@ -1,3 +1,4 @@
+import { LANGUAGE_STORAGE_KEY, setWorkerLanguage } from '../../utils/i18n';
 // zylos-remote transport. Dials out to a zylos-browser-remote relay with
 // `relayUrl + key`, answers `req` frames through the executor, and carries the
 // side-panel chat both ways. Nothing here trusts the relay: params are
@@ -73,6 +74,7 @@ export function startRemoteBackground() {
     state.configured = !!(config.relayUrl && config.key);
     state.enabled = config.enabled;
     state.relayHost = relayHostOf(config.relayUrl);
+    state.relayUrl = config.relayUrl;
     return state;
   }
   onState(publish);
@@ -136,7 +138,7 @@ export function startRemoteBackground() {
       ]);
     } catch (e) {
       state.connecting = false;
-      state.error = `relay 地址无效：${e instanceof Error ? e.message : String(e)}`;
+      state.error = 'ui.error.invalidRelayUrl';
       publish();
       return;
     }
@@ -158,15 +160,14 @@ export function startRemoteBackground() {
       inflight.clear();
       idem.cancel();
       // 4001 = superseded by a newer socket of ours (another window / reload); do not fight it.
-      if (ev.code === 4001) state.error = '另一处连接已接管此 key';
-      else if (ev.code === 1006 && !state.error)
-        state.error = 'relay 拒绝连接（key 错误或 relay 未运行）';
+      if (ev.code === 4001) state.error = 'ui.error.connectionTaken';
+      else if (ev.code === 1006 && !state.error) state.error = 'ui.error.connectionRejected';
       publish();
       if (ev.code !== 4001) scheduleReconnect();
     };
     ws.onerror = () => {
       if (gen !== generation) return;
-      state.error = state.error || '连接 relay 失败';
+      state.error = state.error || 'ui.error.connectionFailed';
       publish();
     };
     ws.onmessage = (ev) => {
@@ -284,11 +285,21 @@ export function startRemoteBackground() {
     void connect();
   }
 
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes[LANGUAGE_STORAGE_KEY])
+      setWorkerLanguage(changes[LANGUAGE_STORAGE_KEY].newValue);
+  });
+
   // ---------------------------------------------------------------- boot
   const boot = (async () => {
     await chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }).catch(() => {});
     await recoverTasks();
-    const saved = await chrome.storage.local.get([REMOTE_CONFIG_KEY, REMOTE_CHAT_LOG_KEY]);
+    const saved = await chrome.storage.local.get([
+      REMOTE_CONFIG_KEY,
+      REMOTE_CHAT_LOG_KEY,
+      LANGUAGE_STORAGE_KEY,
+    ]);
+    setWorkerLanguage(saved[LANGUAGE_STORAGE_KEY]);
     const cfg = remoteConfigSchema.safeParse(saved[REMOTE_CONFIG_KEY] ?? {});
     const log = z.array(chatEntrySchema).safeParse(saved[REMOTE_CHAT_LOG_KEY] ?? []);
     state.chat = log.success ? log.data.slice(-CHAT_LOG_CAP) : [];
@@ -297,7 +308,7 @@ export function startRemoteBackground() {
     publish();
   })();
   void boot.catch((e) => {
-    state.error = `插件初始化失败：${e instanceof Error ? e.message : String(e)}`;
+    state.error = `ui.error.initializationFailed\n${e instanceof Error ? e.message : String(e)}`;
     publish();
   });
 
@@ -330,7 +341,7 @@ export function startRemoteBackground() {
             key: m.key.trim(),
             enabled: config.enabled,
           });
-          if (!next.relayUrl || !next.key) throw new Error('relay 地址和 key 都要填');
+          if (!next.relayUrl || !next.key) throw new Error('ui.error.credentialsRequired');
           await chrome.storage.local.set({ [REMOTE_CONFIG_KEY]: next });
           await applyConfig(next);
           return snapshot();
@@ -342,10 +353,10 @@ export function startRemoteBackground() {
           return snapshot();
         }
         case 'remote-chat-send': {
-          if (!state.connected) throw new Error('未连接 relay，消息未发送');
+          if (!state.connected) throw new Error('ui.error.messageNotSent');
           const text = m.text.trim();
-          if (!text) throw new Error('空消息');
-          if (!send({ type: 'chat', text, ts: Date.now() })) throw new Error('发送失败，请重试');
+          if (!text) throw new Error('ui.error.emptyMessage');
+          if (!send({ type: 'chat', text, ts: Date.now() })) throw new Error('ui.error.sendFailed');
           await appendChat({ role: 'user', text, ts: Date.now() });
           return snapshot();
         }

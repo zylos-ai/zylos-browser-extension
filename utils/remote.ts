@@ -13,13 +13,10 @@ export const CHAT_LOG_CAP = 200;
 // '' means "not configured yet"; anything else must be well-formed.
 export const remoteConfigSchema = z.object({
   relayUrl: z
-    .union([z.literal(''), z.string().regex(/^wss?:\/\/[^\s]+$/, '需要 ws:// 或 wss:// 地址')])
+    .union([z.literal(''), z.string().regex(/^wss?:\/\/[^\s]+$/, 'ui.error.invalidRelayUrl')])
     .default(''),
   key: z
-    .union([
-      z.literal(''),
-      z.string().regex(/^[a-f0-9]{32,128}$/, 'key 是 relay 发给你的一串十六进制'),
-    ])
+    .union([z.literal(''), z.string().regex(/^[a-f0-9]{32,128}$/, 'ui.error.invalidKey')])
     .default(''),
   enabled: z.boolean().default(true),
 });
@@ -42,6 +39,7 @@ export const remoteStateSchema = z.object({
   error: z.string(),
   keyId: z.string(),
   relayHost: z.string(),
+  relayUrl: z.string(),
   task: z
     .object({
       sessionId: z.string(),
@@ -63,6 +61,7 @@ export const initialRemoteState: RemoteState = {
   error: '',
   keyId: '',
   relayHost: '',
+  relayUrl: '',
   task: null,
   chat: [],
 };

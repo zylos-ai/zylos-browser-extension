@@ -2,33 +2,16 @@
  * Zylos Sidebar · 设计变量规范 v1 · 2026-09-15
  * Figma：https://www.figma.com/design/qEYh0ltFkLaL0Wj7rW5Qll/zylos-extension?node-id=4-68
  *
- * 本文件是界面变量的唯一来源：原始值 → 语义颜色 → 字体 / 间距 / 布局。
+ * 本文件是界面变量入口：共享色板 → 语义颜色 → 字体 / 间距 / 布局。
  * 主色 #AC01C2 取自 Logo；其余为已确认设计稿中的衍生色与排版规范。
  * 普通 CSS 使用 var(...)；Tailwind 使用对应工具类；DaisyUI 使用 zylos 主题。
- * 修改品牌或尺寸时优先修改这里，不在组件里另写一套色值或比例。
+ * 原始色板在 brand/palette.css，侧栏与网页鼠标共同使用；尺寸规范在本文件。
  */
+
+@import './brand/palette.css' layer(base);
 
 @layer base {
   :root {
-    /* 01 / 原始色板。名称与 Figma Primitives 的 WEB code syntax 一致。 */
-    --zylos-purple-500: #ac01c2;
-    --zylos-purple-600: #8d00a0;
-    --zylos-purple-50: #fbeefd;
-    --zylos-purple-200: #efcef3;
-    --zylos-neutral-0: #ffffff;
-    --zylos-neutral-50: #f7f7fa;
-    --zylos-neutral-100: #f1f1f5;
-    --zylos-neutral-200: #e5e4eb;
-    --zylos-neutral-500: #706776;
-    --zylos-neutral-900: #211a25;
-    --zylos-control-outline: #8c8492;
-    --zylos-green-600: #16734b;
-    --zylos-green-50: #effaf4;
-    --zylos-red-600: #b42335;
-    --zylos-red-50: #fff1f2;
-    --zylos-amber-600: #956000;
-    --zylos-amber-50: #fff8e8;
-
     /* 02 / 4px 间距体系。4=紧邻，8=控件内部，16=侧栏留白，24=消息间距。 */
     --zylos-space-0: 0px;
     --zylos-space-4: 4px;

@@ -1,7 +1,7 @@
-# Coco Browser Extension
+# Zylos Browser Extension
 
-Coco 是运行在 Chrome 中的浏览器插件。你在**侧边栏（Sidebar）**里与 Zylos Agent 聊天，
-Agent 通过插件在专用工作标签中操作网页。点击 Chrome 工具栏中的 Coco 图标即可打开侧边栏。
+Zylos Browser 是运行在 Chrome 中的浏览器插件。你在**侧边栏（Sidebar）**里与 Zylos Agent 聊天，
+Agent 通过插件在专用工作标签中操作网页。点击 Chrome 工具栏中的 Zylos 图标即可打开侧边栏。
 
 **当前结构：一个侧边栏界面，一个后台入口，一套浏览器执行器。**
 Agent 决定做什么，Relay 传递消息，插件把动作变成 Chrome 操作。
@@ -48,12 +48,26 @@ zylos-browser-extension/
 │       ├── index.html              侧边栏页面外壳
 │       └── main.tsx                挂载 React 界面并导入样式
 ├── components/
-│   ├── RemotePanel.tsx             聊天、连接设置、查看任务和停止按钮
+│   ├── RemotePanel.tsx             界面状态、页面切换和后台请求
+│   ├── Brand.tsx                   欢迎页和助手头像的章鱼图案
+│   ├── Conversation.tsx            欢迎页、聊天记录、浏览器任务卡片
+│   ├── ChatComposer.tsx            输入框、发送状态、中文输入与快捷键
+│   ├── ConnectionSettings.tsx      连接配置、启停插件与清空聊天
+│   ├── LanguageProvider.tsx        语言偏好、即时切换与跨侧栏同步
 │   └── ErrorBoundary.tsx           界面出错时显示兜底信息
 ├── assets/
-│   ├── design-tokens.css           品牌色、字体、间距、布局规范与 DaisyUI 主题
-│   └── styles.css                  Tailwind / DaisyUI 入口与侧边栏基础样式
+│   ├── design-tokens.css           设计变量入口：字体、间距、布局与 DaisyUI 主题
+│   ├── styles.css                  Tailwind / DaisyUI 入口与侧边栏布局样式
+│   └── brand/                      Figma 原始 Logo、发送图标和共享色板
+│       └── palette.css             侧栏与网页鼠标共同使用的品牌颜色
+├── locales/
+│   ├── zh-CN.ts                    中文界面文案
+│   └── en.ts                       英文界面文案（与中文键名一致）
+├── public/
+│   ├── icons/                      16 / 32 / 48 / 128px 章鱼插件图标
+│   └── _locales/                   Chrome 扩展描述和工具栏提示的中英文
 ├── utils/
+│   ├── i18n.ts                     语言解析、翻译、日期与错误提示格式化
 │   ├── remote.ts                   连接配置、消息格式、界面状态和存储键名
 │   ├── remote-commands.ts          Agent 方法列表、排队、停止打断和去重
 │   ├── commands.ts                 浏览器动作参数定义
@@ -99,6 +113,13 @@ WXT 是插件开发框架，React 负责界面，TypeScript 用于代码检查�
 [sidepanel/main.tsx](entrypoints/sidepanel/main.tsx) 直接把
 [RemotePanel](components/RemotePanel.tsx) 挂载到页面上，套上错误兜底组件并导入样式。
 界面组件负责显示状态、接收输入、向后台发请求。
+
+侧栏已按 [Figma 四种状态](https://www.figma.com/design/qEYh0ltFkLaL0Wj7rW5Qll/zylos-extension?node-id=5-75)
+实现欢迎页、日常对话、浏览器任务卡片和独立的连接设置页。页头和底部输入区固定，
+聊天区单独滚动，适配 320–480px 侧栏；短窗口中的设置页可以滚动。
+示例任务只填入输入框，由用户发送；Enter 发送、Shift + Enter 换行，中文输入法确认文字不会误发。
+发送失败保留草稿，阅读旧消息时新回复不会强行把页面拉到底部。
+任务卡片使用后台的真实任务和标签页状态，查看与停止按钮直接调用现有功能。
 
 例如，发送聊天用 `remote-chat-send`，保存设置用 `remote-save`，停止任务用 `remote-stop`。
 这些请求通过 `chrome.runtime.sendMessage` 在插件内部传递。
@@ -199,7 +220,8 @@ Shadow DOM 是网页组件内部的 DOM 子树；CSS 查询会遍历 open Shadow
 
 | 想修改的内容                         | 优先查看                                                     |
 | ------------------------------------ | ------------------------------------------------------------ |
-| 聊天气泡、设置、按钮和状态文案       | `components/RemotePanel.tsx`                                 |
+| 聊天气泡、设置、按钮和状态布局       | `components/`                                                |
+| 中英文界面文案                       | `locales/zh-CN.ts`、`locales/en.ts`                          |
 | 品牌色、字体、间距和布局变量         | `assets/design-tokens.css`                                   |
 | 侧边栏样式、Tailwind 扫描范围        | `assets/styles.css`                                          |
 | 保存配置、聊天收发、连接和重连       | `entrypoints/background/remote.ts`、`utils/remote.ts`        |
@@ -220,9 +242,10 @@ Relay 的 `/rpc` 通用转发已有的方法名与参数，新增动作通常无
 
 ### 界面设计变量与 DaisyUI
 
-[design-tokens.css](assets/design-tokens.css) 是设计变量规范文件，对应
+[design-tokens.css](assets/design-tokens.css) 是设计变量入口文件，对应
 [Figma 视觉规范](https://www.figma.com/design/qEYh0ltFkLaL0Wj7rW5Qll/zylos-extension?node-id=4-68)。
-文件按原始色板、间距、圆角、布局、字体和 DaisyUI 主题分段，并有中文注释：
+原始色板在 [brand/palette.css](assets/brand/palette.css)，由变量入口引入。
+间距、圆角、布局、字体和 DaisyUI 主题都在变量入口中分段维护，并有中文注释：
 
 - 品牌主色 `#AC01C2`；正文 `#211A25`；辅助文字 `#706776`。
 - 中英文统一使用浏览器 / 系统默认界面字体（`system-ui, sans-serif`），正文 14/22，辅助文字 12/18。
@@ -251,12 +274,37 @@ React 可以直接使用 DaisyUI 和 Tailwind 类名，无需额外的 React 包
 <div className="rounded-card bg-primary-soft p-4 text-body">任务内容</div>
 ```
 
-当前基础样式已引用品牌变量，完整页面布局仍按后续 Figma 实现推进。
-现有文本按钮用 `.text-button`，避免与 DaisyUI 自带的 `.link` 样式冲突。
+页面使用 DaisyUI 按钮、输入框和卡片，并按 Figma 细化布局。DaisyUI 的组件样式位于
+`utilities.daisyui`，页面定制样式位于其后的 `utilities.zylos`，Tailwind 工具类仍能覆盖两者。
+Logo 和发送图标从 Figma 原样导出并随插件打包，不依赖远程图片地址。
 字体由浏览器根据操作系统选择，不打包或远程加载字体文件。
 Figma 中的字体仅作排版示意，实际字形以用户系统为准。
+
+网页内的 **鼠标箭头、操作标签、点击光圈、目标元素描边** 统一使用品牌紫色 `#AC01C2`。
+[cursor.ts](utils/automation/cursor.ts) 将共享色板与光标脚本一起注入隔离环境，
+[cursor.js](utils/automation/injected/cursor.js) 在 Shadow DOM 中使用这些变量。
+改品牌色只需改色板；不需要在鼠标实现里再维护一组颜色。光标不拦截页面点击，
+仍会在任务结束或长时间无操作后自动清理。
 配置参考：[DaisyUI 自定义主题](https://daisyui.com/docs/themes/)、
 [Tailwind Vite 接入](https://tailwindcss.com/docs/installation/using-vite)。
+
+### 界面语言与插件图标
+
+默认跟随浏览器界面语言：中文浏览器（含 `zh-CN`、`zh-TW`、`zh-HK`）显示中文，
+其余显示英文。设置页的「界面语言 / Interface language」提供「跟随浏览器 / 中文 / English」，
+选择后立即生效，保存到 `chrome.storage.local.uiLanguage`，重新打开仍保留，并同步其他侧栏。
+鼠标操作标签也使用这项偏好，切换语言不重连 Relay。工作标签组标题统一为 `zylos`。
+聊天记录、Agent 回复、草稿和网页标题保留原文。
+
+新增界面文案时，在 `locales/zh-CN.ts` 和 `locales/en.ts` 添加相同键名，组件通过
+`useI18n().t(...)` 读取；动态数量使用 `{count}`。日期按界面语言格式化。
+插件产生的连接与表单错误通过 `ui.error.*` 错误码在界面翻译，Relay 自定义诊断保留原文。
+无需额外的多语言依赖。
+
+侧栏顶部已去掉品牌 Logo，只保留连接状态和设置入口。欢迎页和助手头像继续使用章鱼图案。
+Chrome 工具栏与扩展管理页的图标来自 [Figma 图标原稿](https://www.figma.com/design/qEYh0ltFkLaL0Wj7rW5Qll/zylos-extension?node-id=9-111)，
+原样导出到 `public/icons/`，通过 `wxt.config.ts` 的 `icons` 与 `action.default_icon` 引用。
+扩展描述与工具栏提示由 `public/_locales/` 按 Chrome 自身语言设置选择。
 
 ## 7. 本地启动与构建
 

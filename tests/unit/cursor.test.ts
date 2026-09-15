@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { cursorExpression } from '../../utils/automation/cursor';
+import { setWorkerLanguage } from '../../utils/i18n';
 
 const owner = 'test-cursor';
 const render = (update: Record<string, unknown>) =>
@@ -30,6 +31,7 @@ beforeEach(() => {
   Object.defineProperty(Element.prototype, 'animate', { configurable: true, value: animate });
 });
 afterEach(() => {
+  setWorkerLanguage('auto');
   render({ action: 'remove' });
   if (originalAnimate) Object.defineProperty(Element.prototype, 'animate', originalAnimate);
   else Reflect.deleteProperty(Element.prototype, 'animate');
@@ -102,4 +104,15 @@ test('hidden cursor restores before expiry and self-cleans after inactivity', as
   expect(document.querySelector('#coco-agent-cursor')).toBeNull();
   render({ action: 'restore' });
   expect(document.querySelector('#coco-agent-cursor')).toBeNull();
+});
+
+test('cursor labels follow the saved interface language, including the existing cursor', async () => {
+  setWorkerLanguage('en');
+  await render({ action: 'move', x: 100, y: 100 });
+  const state = (globalThis as unknown as { __cocoVisualCursor: { label: HTMLElement } })
+    .__cocoVisualCursor;
+  expect(state.label.textContent).toBe('Zylos · Moving');
+  setWorkerLanguage('zh-CN');
+  await render({ action: 'input', x: 100, y: 100 });
+  expect(state.label.textContent).toBe('Zylos · 输入');
 });

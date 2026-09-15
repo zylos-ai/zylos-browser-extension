@@ -11,7 +11,7 @@ test('build exposes one sidebar and no toolbar popup', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(output, 'manifest.json'), 'utf8'));
   assert.equal(manifest.manifest_version, 3);
   assert.equal(manifest.version, pkg.version);
-  assert.equal(manifest.name, 'Coco · Agent Browser (Zylos)');
+  assert.equal(manifest.name, 'Zylos Browser');
   assert.equal(manifest.action.default_popup, undefined);
   assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
   assert.equal(manifest.background.service_worker, 'background.js');
@@ -51,4 +51,25 @@ test('bundle contains Remote commands and no former protocol entrypoints', () =>
     'cdp-event',
   ])
     assert.ok(!scripts.includes(message), message);
+});
+
+test('ships octopus icons at the declared sizes and browser-localized metadata', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(output, 'manifest.json'), 'utf8'));
+  for (const size of [16, 32, 48, 128]) {
+    assert.equal(manifest.action.default_icon[size], manifest.icons[size]);
+    const png = fs.readFileSync(path.join(output, manifest.icons[size]));
+    assert.equal(png.subarray(1, 4).toString(), 'PNG');
+    assert.equal(png.readUInt32BE(16), size);
+    assert.equal(png.readUInt32BE(20), size);
+  }
+  assert.equal(manifest.default_locale, 'en');
+  for (const locale of ['en', 'zh_CN']) {
+    const messages = JSON.parse(
+      fs.readFileSync(path.join(output, '_locales', locale, 'messages.json'), 'utf8'),
+    );
+    for (const value of [manifest.description, manifest.action.default_title]) {
+      const key = /^__MSG_(.+)__$/.exec(value)?.[1];
+      assert.ok(messages[key]?.message, `${locale}: ${value}`);
+    }
+  }
 });

@@ -166,16 +166,38 @@ try {
         )
       ).result.value,
   );
-  const configured = await cdp(
+  // Configure through the real settings form, including native React input events.
+  await eventually(
+    async () =>
+      (
+        await cdp(
+          'Runtime.evaluate',
+          {
+            expression: "!!document.querySelector('#relay-url')",
+            returnByValue: true,
+          },
+          sessionId,
+        )
+      ).result.value,
+  );
+  for (const [selector, value] of [
+    ['#relay-url', relayUrl],
+    ['#access-key', process.env.BROWSER_REMOTE_KEY],
+  ]) {
+    await cdp(
+      'Runtime.evaluate',
+      {
+        expression: `document.querySelector(${JSON.stringify(selector)}).focus(); document.querySelector(${JSON.stringify(selector)}).select();`,
+      },
+      sessionId,
+    );
+    await cdp('Input.insertText', { text: value }, sessionId);
+  }
+  await cdp(
     'Runtime.evaluate',
-    {
-      expression: `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-save', relayUrl, key: process.env.BROWSER_REMOTE_KEY })})`,
-      awaitPromise: true,
-      returnByValue: true,
-    },
+    { expression: "document.querySelector('.save-button').click()" },
     sessionId,
   );
-  assert.equal(configured.result.value?.ok, true, JSON.stringify(configured));
   const behavior = await cdp(
     'Runtime.evaluate',
     {
@@ -243,6 +265,41 @@ try {
           )
         ).result.value,
     );
+    // Validate the built CSS in Chrome: DaisyUI must not override our theme/layout.
+    await cdp(
+      'Emulation.setDeviceMetricsOverride',
+      { width: 380, height: 820, deviceScaleFactor: 1, mobile: false },
+      sessionId,
+    );
+    await eventually(async () => {
+      const result = await cdp(
+        'Runtime.evaluate',
+        {
+          expression: `(() => {
+          const button = getComputedStyle(document.querySelector('.starter'));
+          const body = getComputedStyle(document.body);
+          return { background: button.backgroundColor, alignment: button.justifyContent, height: button.height,
+            font: body.fontFamily, fontSize: body.fontSize,
+            header: document.querySelector('.sidebar-header').getBoundingClientRect().height,
+            composerBottom: document.querySelector('.composer').getBoundingClientRect().bottom,
+            overflow: document.documentElement.scrollWidth > innerWidth };
+        })()`,
+          returnByValue: true,
+        },
+        sessionId,
+      );
+      assert.deepEqual(result.result.value, {
+        background: 'rgb(247, 247, 250)',
+        alignment: 'space-between',
+        height: '44px',
+        font: 'system-ui, sans-serif',
+        fontSize: '14px',
+        header: 64,
+        composerBottom: 820,
+        overflow: false,
+      });
+      return true;
+    });
     await cdp(
       'Runtime.evaluate',
       { expression: "document.querySelector('#message').focus()" },
@@ -478,8 +535,7 @@ try {
           await cdp(
             'Runtime.evaluate',
             {
-              expression:
-                "!!Array.from(document.querySelectorAll('button')).find(button => button.textContent === '停止')",
+              expression: "!!document.querySelector('#stop-task')",
               returnByValue: true,
             },
             sessionId,
@@ -489,8 +545,7 @@ try {
     await cdp(
       'Runtime.evaluate',
       {
-        expression:
-          "Array.from(document.querySelectorAll('button')).find(button => button.textContent === '停止').click()",
+        expression: "document.querySelector('#stop-task').click()",
       },
       sessionId,
     );
