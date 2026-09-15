@@ -5,23 +5,37 @@ Agent 通过插件在专用工作标签中操作网页。点击 Chrome 工具栏
 
 **当前结构：一个侧边栏界面，一个后台入口，一套浏览器执行器。**
 Agent 决定做什么，Relay 传递消息，插件把动作变成 Chrome 操作。
-本文按当前 0.12.0 的代码组织，适合第一次阅读项目时使用。
+本文按当前 0.13.0 的代码组织，适合第一次阅读项目时使用。
 
 ## 连接线上的 Agent
 
 如果你的 Zylos Agent 已在线上运行，并且已有独立的 HTTPS 地址，
 你电脑上只需要安装这个 Chrome 插件；Browser Remote、Core 和 Agent 运行在对应的服务器上。
 
-### 1. 让 Agent 准备连接信息
+### 1. 复制给 Agent，获取连接地址和 Key
 
-在你原来与 Agent 对话的入口，把
-[Browser Remote 安装说明](https://github.com/zylos-ai/zylos-browser-remote#让线上-agent-安装并返回连接信息)
-发给它，并说明：
+在 GitHub 页面上，将鼠标移到下面的文本块，点击右上角的**复制按钮**，
+再把整段文字粘贴到你原来与 Zylos Agent 对话的入口。
+Agent 会读取安装说明，完成服务配置，并在原对话中返回连接地址和完整 Key。
 
 ```text
-请按 Browser Remote README 安装和配置浏览器通信组件，使用你现有的公网 HTTPS 地址。
-完成服务启动和路由检查后，通过当前对话把完整的 WebSocket 地址和 Key 发给我。
-安装后读取组件 SKILL.md，了解插件聊天回复方式和浏览器操作命令。
+请帮我安装并配置 Zylos Browser Remote，让我能通过 Chrome 插件和你聊天，并让你操作我的浏览器。我确认安装（confirm）。
+
+请先阅读安装说明：
+https://github.com/zylos-ai/zylos-browser-remote/blob/main/README.md
+
+然后完成：
+1. 检查是否已安装 browser-remote；已安装则复用。
+2. 使用你现有的公网 HTTPS 域名，配置 WebSocket 转发路由。
+3. 启动服务，检查 Relay 和公网入口是否可用。
+4. 为我的 Chrome 插件生成一个连接 Key。
+5. 读取组件 SKILL.md，了解浏览器操作和插件聊天回复方式。
+
+完成后，请直接在当前对话返回：
+地址：wss://你的真实域名/browser-remote/ext
+Key：本次生成的完整密钥，不是 keyId
+
+我会把这两项填入插件设置，然后与你验证聊天和浏览器操作。
 ```
 
 例如 Agent 的 HTTPS 地址为 `https://alice.example.com`，它应返回：
