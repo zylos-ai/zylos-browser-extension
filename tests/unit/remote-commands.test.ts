@@ -66,6 +66,26 @@ describe('remote dispatch', () => {
     expect(r.capabilities).toEqual(REMOTE_CAPABILITIES);
     expect(r.capabilities).toContain('open');
     expect(r.capabilities).toContain('idempotency-v1');
+    expect(r.capabilities).toContain('describe');
+    expect(r.capabilities).toContain('tool-catalog-v1');
+  });
+
+  it('serves the live guide and parameter schemas without taking browser control', async () => {
+    executor.currentGrant.mockReturnValue({ id: 7, url: 'https://www.chase.com/login' });
+    const guide = (await call('describe')) as { instructions: string; tools: { name: string }[] };
+    expect(guide.instructions).toContain('Browser operation guide');
+    expect(guide.tools.some((tool) => tool.name === 'click')).toBe(true);
+    const details = (await call('describe', { methods: ['fill', 'observe'] })) as {
+      tools: { name: string; parameters: unknown }[];
+    };
+    expect(details.tools.map((tool) => tool.name)).toEqual(['fill', 'observe']);
+    expect(details.tools[0]?.parameters).toMatchObject({ required: ['ref', 'text'] });
+    await rejects(call('describe', { method: 'invented' }), 'UNKNOWN_METHOD');
+    await rejects(call('describe', { method: 'click', methods: ['click'] }), 'BAD_PARAMS');
+    await rejects(call('describe', { methods: [] }), 'BAD_PARAMS');
+    await rejects(call('describe', { extra: true }), 'BAD_PARAMS');
+    expect(executor.createTask).not.toHaveBeenCalled();
+    expect(executor.execute).not.toHaveBeenCalled();
   });
 
   it('open with no task creates the task tab beside the active tab, then navigates the task tab', async () => {
@@ -223,6 +243,7 @@ describe('browser actions v2', () => {
     const rejected = rejects(queued, 'STOPPED');
     await vi.waitFor(() => expect(executor.execute).toHaveBeenCalledTimes(1));
     await call('dialog', { action: 'dismiss' });
+    await expect(call('describe', { method: 'wait' })).resolves.toHaveProperty('tools');
     await call('stop');
     expect(executor.execute).toHaveBeenCalledTimes(3);
     release();

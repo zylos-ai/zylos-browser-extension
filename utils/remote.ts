@@ -6,7 +6,7 @@ import { z } from 'zod';
 
 export const REMOTE_SUBPROTOCOL = 'zylos-browser-remote.v2';
 export const REMOTE_KEY_PROTO_PREFIX = 'key.';
-export const REMOTE_VERSION = '1.3.0';
+export const REMOTE_VERSION = '1.4.0';
 export const MAX_CHAT_TEXT = 8000;
 export const CHAT_LOG_CAP = 200;
 export const REPLY_NOTICE_MS = 120_000;

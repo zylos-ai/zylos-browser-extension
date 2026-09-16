@@ -3,23 +3,17 @@
 //
 // The relay forwards `{method, params, requestId}` verbatim and knows nothing
 // about this table; anything not listed here is refused with UNKNOWN_METHOD.
-import { z } from 'zod';
 import { actionParams, commandSchema, type Command } from './commands';
 import { isBlockedUrl } from './guard';
 import { createTask, currentControl, currentGrant, execute } from './automation/executor';
 import { REMOTE_VERSION } from './remote';
-
-const url = z.string().url().max(4000);
-// Agent-visible actions use exactly the same schemas as the executor.
-const paramSchemas = {
-  ...actionParams,
-  info: z.object({}).strict(),
-  start: z.object({ url }).strict(),
-  finalize: z.object({ keep: z.array(z.number().int().nonnegative()).max(8).default([]) }).strict(),
-} as const;
-
-export type RemoteMethod = keyof typeof paramSchemas;
-export const REMOTE_METHODS = Object.keys(paramSchemas) as RemoteMethod[];
+import {
+  remoteParams as paramSchemas,
+  REMOTE_METHODS,
+  describeTools,
+  type RemoteMethod,
+} from './tool-catalog';
+export { REMOTE_METHODS, type RemoteMethod } from './tool-catalog';
 
 // Retried mutating calls replay their recorded answer instead of clicking twice.
 const IDEMPOTENT_METHODS = new Set<RemoteMethod>([
@@ -82,6 +76,7 @@ export const REMOTE_CAPABILITIES = [
   'dialog-v1',
   'wait-v1',
   'chat-ack-v1',
+  'tool-catalog-v1',
 ];
 
 export class RemoteError extends Error {
@@ -107,7 +102,8 @@ export class IdempotencyCache {
   }
   run(req: Dispatch, work: (assertActive: () => void) => Promise<unknown>): Promise<unknown> {
     const urgent = ['stop', 'pause', 'finish', 'finalize'].includes(req.method);
-    const independent = req.method === 'info' || req.method === 'dialog';
+    const independent =
+      req.method === 'info' || req.method === 'describe' || req.method === 'dialog';
     if (urgent) this.cancel();
     const epoch = this.epoch;
     const id = req.requestId;
@@ -252,12 +248,26 @@ async function dispatchNow(
 
   let result: unknown;
   switch (method) {
+    case 'describe': {
+      if (params.method && params.methods) fail('BAD_PARAMS', 'Use method OR methods');
+      const names = params.method
+        ? [params.method as string]
+        : (params.methods as string[] | undefined);
+      if (names?.some((name) => !Object.hasOwn(paramSchemas, name)))
+        fail(
+          'UNKNOWN_METHOD',
+          'Requested tool is not in this extension; call describe for its index',
+        );
+      result = describeTools(names as RemoteMethod[] | undefined);
+      break;
+    }
     case 'info':
       result = {
         name: 'zylos-browser-extension',
         version: REMOTE_VERSION,
         keyId: req.keyId,
         capabilities: REMOTE_CAPABILITIES,
+        toolCatalog: { method: 'describe', schemaVersion: 1 },
         control: currentControl(),
         tab: currentGrant(),
       };

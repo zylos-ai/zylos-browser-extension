@@ -253,6 +253,23 @@ try {
     checks.push(name);
     console.log('PASS', name);
   };
+  await check(
+    'extension supplies its guide and schemas through the unmodified RPC transport',
+    async () => {
+      const catalog = await rpc('describe');
+      assert.equal(catalog.schemaVersion, 1);
+      assert(catalog.instructions.includes('Browser operation guide'));
+      assert(catalog.tools.some((tool) => tool.name === 'observe'));
+      const details = await rpc('describe', { methods: ['fill', 'wait'] });
+      assert.deepEqual(details.tools[0].parameters.required, ['ref', 'text']);
+      assert.equal(details.tools[1].parameters.properties.timeoutMs.maximum, 60000);
+      assert.equal((await rpc('info')).control, null, 'discovery does not create a browser task');
+      await assert.rejects(
+        rpc('describe', { method: 'not-in-extension' }),
+        (error) => error.code === 'UNKNOWN_METHOD',
+      );
+    },
+  );
   await check('sidebar renders and sends/receives chat through the relay', async () => {
     await eventually(
       async () =>

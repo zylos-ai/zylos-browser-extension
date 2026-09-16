@@ -71,7 +71,8 @@ export function startRemoteBackground() {
         ? state.task
         : null;
     const running = [...inflight.values()].some(
-      ({ method }) => !['info', 'tabs', 'pause', 'finish', 'stop', 'finalize'].includes(method),
+      ({ method }) =>
+        !['info', 'describe', 'tabs', 'pause', 'finish', 'stop', 'finalize'].includes(method),
     );
     state.task = control
       ? {

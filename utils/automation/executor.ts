@@ -676,6 +676,9 @@ export async function execute(command: Command, deadline: number) {
         } catch (error) {
           checkSession();
           const code = (error as { code?: string }).code;
+          // Nested reads use the wait's shorter deadline. The outer command is
+          // still valid (checked above), so report an unmet wait condition.
+          if (code === 'COMMAND_EXPIRED' && Date.now() >= until) break;
           if (code === 'STALE_ELEMENT' && ['detached', 'hidden'].includes(command.condition))
             return { matched: true };
           if (
@@ -690,6 +693,7 @@ export async function execute(command: Command, deadline: number) {
         setTimeout(resolve, Math.min(100, Math.max(1, until - Date.now()))),
       );
     }
+    checkSession();
     fail(
       'WAIT_TIMEOUT',
       `Condition ${command.condition} did not match within ${command.timeoutMs}ms`,
@@ -935,7 +939,8 @@ export async function execute(command: Command, deadline: number) {
     }
   }
   if (command.op === 'snapshot') return snapshot(command.interactive);
-  if (command.op === 'screenshot') return boundedCdp(screenshot, check);
+  if (command.op === 'screenshot')
+    return { ...(await boundedCdp(screenshot, check)), mimeType: 'image/png' };
   if (command.op === 'observe') {
     const tab = await chrome.tabs.get(lease.id);
     check();

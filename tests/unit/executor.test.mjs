@@ -225,6 +225,35 @@ async function observationSetup() {
   return { ...s, methods };
 }
 
+test('wait distinguishes its polling deadline from the outer command deadline', async () => {
+  for (const [budget, code] of [
+    [10000, 'WAIT_TIMEOUT'],
+    [500, 'COMMAND_EXPIRED'],
+  ]) {
+    const s = await observationSetup();
+    vi.useFakeTimers();
+    try {
+      const original = chrome.debugger.sendCommand;
+      chrome.debugger.sendCommand = async (target, method, params) => {
+        const result = await original(target, method, params);
+        // A read begun before the wait expires completes just after its deadline.
+        if (method === 'Page.getFrameTree') vi.setSystemTime(Date.now() + 1200);
+        return result;
+      };
+      await assert.rejects(
+        s.executor.execute(
+          { op: 'wait', condition: 'visible', selector: '#missing', timeoutMs: 800 },
+          Date.now() + budget,
+        ),
+        (e) => e.code === code,
+      );
+    } finally {
+      vi.useRealTimers();
+      await s.executor.release();
+    }
+  }
+});
+
 test('observe returns fresh refs, screenshot and the authorized page identity without input events', async () => {
   const s = await observationSetup();
   const result = await s.executor.execute(
