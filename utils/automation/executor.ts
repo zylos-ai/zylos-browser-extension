@@ -30,6 +30,9 @@ let dialog: {
 let dragData: unknown = null;
 let popupQueue: Promise<unknown> = Promise.resolve();
 const newPopups: number[] = [];
+const popupSources = new Map<number, { sessionId: string; opener: number }>();
+export const taskPopupOpener = (id: number) =>
+  popupSources.get(id)?.sessionId === control?.sessionId ? popupSources.get(id)?.opener : undefined;
 
 let generation = 0;
 // Navigation events only: ref invalidation, debugger attachment and child-frame
@@ -44,6 +47,9 @@ function fail(code: string, message = code): never {
 }
 export const currentGrant = () => (control && grant ? { ...grant } : null);
 export const currentControl = () => (control ? { ...control, tabIds: [...control.tabIds] } : null);
+export const browserPageVersion = () =>
+  `${control?.sessionId}:${control?.tabId}:${navigationRevision}`;
+export const flushTaskPopups = () => popupQueue;
 export const onState = (fn: typeof changed) => {
   changed = fn;
 };
@@ -237,6 +243,7 @@ export async function release(cleanup = true, strict = false) {
   // Revoke synchronously: queued or in-flight attachments cannot revive consent.
   control = null;
   newPopups.length = 0;
+  popupSources.clear();
   parked = true;
   consentRevision++;
   operationRevision++;
@@ -479,18 +486,9 @@ export function initializeExecutor() {
     if (info.title) grant.title = info.title.slice(0, 500);
     changed(currentGrant());
   });
-  chrome.tabs.onCreated.addListener((tab) => {
+  function adoptPopup(id: number, opener: number, verifiedSource = false) {
     const session = control;
-    if (
-      !session ||
-      tab.id === undefined ||
-      tab.openerTabId === undefined ||
-      !session.tabIds.includes(tab.openerTabId) ||
-      tab.incognito
-    )
-      return;
-    const id = tab.id,
-      opener = tab.openerTabId;
+    if (!session || !session.tabIds.includes(opener)) return;
     const work = async () => {
       if (control !== session || session.tabIds.includes(id) || session.tabIds.length >= 8) return;
       const parent = await chrome.tabs.get(opener).catch(() => null);
@@ -500,7 +498,7 @@ export function initializeExecutor() {
         !parent ||
         !inScope(parent, session) ||
         !fresh ||
-        fresh.openerTabId !== opener ||
+        (!verifiedSource && fresh.openerTabId !== opener) ||
         fresh.incognito
       )
         return;
@@ -526,6 +524,7 @@ export function initializeExecutor() {
         return;
       }
       session.tabIds.push(id);
+      popupSources.set(id, { sessionId: session.sessionId, opener });
       newPopups.push(id);
       publish();
     };
@@ -533,7 +532,20 @@ export function initializeExecutor() {
       .catch(() => {})
       .then(work)
       .catch(() => {});
-  });
+  }
+  if (chrome.webNavigation?.onCreatedNavigationTarget) {
+    // Navigation source is authoritative even for noopener/background tabs;
+    // tabs.openerTabId may instead refer to the current foreground tab.
+    chrome.webNavigation.onCreatedNavigationTarget.addListener((event) => {
+      if (control?.tabIds.includes(event.sourceTabId))
+        adoptPopup(event.tabId, event.sourceTabId, true);
+    });
+  } else {
+    chrome.tabs.onCreated.addListener((tab) => {
+      if (tab.id !== undefined && tab.openerTabId !== undefined && !tab.incognito)
+        adoptPopup(tab.id, tab.openerTabId);
+    });
+  }
   // Browser focus is the user's, not an authorization or routing signal.
   const lostTab = (id: number) => {
     if (!control?.tabIds.includes(id)) return;
@@ -898,7 +910,7 @@ export async function execute(command: Command, deadline: number, navigation?: N
   checkSession();
   const lease = grant;
   const startGeneration = generation;
-  let clickReleaseAcknowledged = false;
+  let inputAcknowledged = false;
   let screenshotDeadline: number | undefined;
   let screenshotStage = '';
   const check = () => {
@@ -958,11 +970,16 @@ export async function execute(command: Command, deadline: number, navigation?: N
     const result = await boundedCdp(async () => {
       const value = await chrome.debugger.sendCommand(target, method, params);
       if (
-        command.op === 'click' &&
-        method === 'Input.dispatchMouseEvent' &&
-        params.type === 'mouseReleased'
+        (command.op === 'click' &&
+          method === 'Input.dispatchMouseEvent' &&
+          params.type === 'mouseReleased') ||
+        (command.op === 'keypress' &&
+          command.key === 'Enter' &&
+          method === 'Input.dispatchKeyEvent' &&
+          params.type === 'keyDown' &&
+          params.key === 'Enter')
       )
-        clickReleaseAcknowledged = true;
+        inputAcknowledged = true;
       return value;
     }, check);
     check();
@@ -1056,7 +1073,26 @@ export async function execute(command: Command, deadline: number, navigation?: N
         await showCursor('restore').catch(() => {});
     }
   }
-  if (command.op === 'snapshot') return snapshot(command.interactive);
+  if (command.op === 'snapshot') {
+    const result = await snapshot(command.interactive);
+    if (!command.viewport) return result;
+    const { cssLayoutViewport: v, cssContentSize: content } = await cdp('Page.getLayoutMetrics');
+    return {
+      ...result,
+      tabId: lease.id,
+      url: lease.url,
+      title: lease.title,
+      pageVersion: browserPageVersion(),
+      viewport: {
+        width: v.clientWidth,
+        height: v.clientHeight,
+        scrollX: v.pageX,
+        scrollY: v.pageY,
+        contentHeight: content.height,
+        remainingBelow: Math.max(0, content.height - v.pageY - v.clientHeight),
+      },
+    };
+  }
   if (command.op === 'screenshot')
     return { ...(await boundedCdp(screenshot, check)), mimeType: 'image/png' };
   if (command.op === 'observe') {
@@ -1126,12 +1162,11 @@ export async function execute(command: Command, deadline: number, navigation?: N
   try {
     return await actions.run(command);
   } catch (error) {
-    // A normal link click can navigate before CDP's post-dispatch check runs.
-    // Report the acknowledged click, without replaying input on the new page.
+    // Click/Enter may navigate before CDP's post-dispatch check runs.
+    // Report acknowledged input, without replaying it on the new page.
     // Changes before mouseReleased, unacknowledged input and revoked control
     // retain their original errors.
-    if (!clickReleaseAcknowledged || (error as { code?: string }).code !== 'PAGE_CHANGED')
-      throw error;
+    if (!inputAcknowledged || (error as { code?: string }).code !== 'PAGE_CHANGED') throw error;
     checkSession();
     const tab = await chrome.tabs.get(lease.id);
     checkSession();

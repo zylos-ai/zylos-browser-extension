@@ -18,7 +18,9 @@ export const actionParams = {
   stop: z.object({}).strict(),
   tabs: z.object({}).strict(),
   frames: z.object({}).strict(),
-  snapshot: z.object({ interactive: z.boolean().default(false) }).strict(),
+  snapshot: z
+    .object({ interactive: z.boolean().default(false), viewport: z.boolean().optional() })
+    .strict(),
   observe: z.object({ interactive: z.boolean().default(false) }).strict(),
   screenshot: z.object({}).strict(),
   click: z.object({ ...target, modifiers }).strict(),

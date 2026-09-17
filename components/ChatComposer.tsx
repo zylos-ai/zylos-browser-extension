@@ -13,6 +13,7 @@ export function ChatComposer({
   inputRef,
   preview,
   pageContext,
+  onStop,
 }: {
   draft: string;
   onDraftChange: (value: string) => void;
@@ -22,6 +23,7 @@ export function ChatComposer({
   inputRef: React.RefObject<HTMLTextAreaElement | null>;
   preview?: React.ReactNode;
   pageContext?: React.ReactNode;
+  onStop?: () => void;
 }) {
   const { t } = useI18n();
   const composing = useRef(false);
@@ -73,6 +75,16 @@ export function ChatComposer({
         />
         <div className="composer-toolbar">
           <span className="text-caption text-muted">{t('composerTagline')}</span>
+          {onStop && (
+            <button
+              type="button"
+              className="btn btn-ghost"
+              aria-label={t('stopTask')}
+              onClick={onStop}
+            >
+              ■
+            </button>
+          )}
           <button
             id="send"
             className="btn btn-primary send-button"

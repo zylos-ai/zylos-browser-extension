@@ -15,6 +15,36 @@
 Remote 是插件当前使用的连接方式，可以连接本机或服务器上的 Relay。
 浏览器操作引擎在本仓库的 `utils/automation/`。
 
+### 当前默认链路：插件任务循环
+
+Remote 握手返回 `agent-loop-v1` 后，每条侧栏消息由 `utils/browser-loop.ts` 管理。
+首轮只附当前页面摘要和两个入口动作，普通聊天无需整份工具目录。需要浏览器时先选择
+当前页或打开指定网址；插件执行并读取状态后，下一轮自动附完整动作规则和参数。
+
+`utils/browser-round.ts` 执行模型的一批已知动作，处理加载、任务新 Tab 和观察。
+允许最多五个动作，只有已有引用的表单编辑能放在后续动作之前；点击、导航、读取和滚动
+结束一批。整批参数先校验，页面变化或错误中止后续动作。输入只执行一次，变化中的只读
+快照最多尝试三次。默认传有界文本、视口/滚动信息、任务标签和实际动作结果，不传截图；
+视觉任务才请求 observe。新 Tab 来源取自 webNavigation 的导航事件，避免前台切换影响归属。
+
+Remote 将首次 `agent-request` 经 C4 送到远端 Agent。Agent 通过 `scripts/decision.js` 提交一个
+关联请求 ID 的 JSON，内容为 actions / done / blocked。它不再手工调用动作和读取状态。
+插件在动作后生成下一轮状态，由 Remote 的 `/decision` 直接作为同一次 CLI 的返回值交给
+Agent，无需重新入 C4 队列。最终回复保存后返回 finished，释放控制。任务进行时，外部直接浏览器 RPC
+返回 LOOP_OWNS_BROWSER，旧聊天出口返回 DECISION_REQUIRED；info/describe 和停止仍可用。
+Monitor 通过 `agent-event` 记录插件本地执行步骤，决策轮次不会冒充浏览器工具。
+
+重复决策不会再次执行；停止、断线、重载后旧决策不能重新启动任务。新消息中断上一轮，
+保留已打开页面，再捕获新消息的当前页面。任务最多 30 轮 / 15 分钟，单次 Agent 决策
+最多等 5 分钟，连续三轮失败终止。加载稳定观察最长 8 秒，其结果不等于业务目标完成。
+异步页面仍需 Agent 根据实际状态判断。最终答复和中断状态保存于插件聊天记录。
+
+浏览器协议与规则见 [decision-guide.md](../agent/decision-guide.md)。Remote 仅转发、处理
+关联和图片附件；zylos-core 无需改动。C4 排队和 Agent 推理成本仍存在，本地测试不证明
+线上任务提速比例。升级需更新并重启 Remote、重载插件（新增 webNavigation 权限）。
+
+下文 `describe` / CLI / `step` 的说明属于保留的直接 RPC 接口；连接旧 Remote 时仍使用它。
+
 工具的唯一来源也在本插件：`utils/tool-catalog.ts` 使用执行时的 Zod 参数规则生成描述，
 并为每个方法维护用途、约束与例子；`agent/browser-guide.md` 保存浏览器工作流程与错误恢复。
 `describe` 无须启动浏览器任务，返回精简工具目录和指南；`describe method=<name>` 或

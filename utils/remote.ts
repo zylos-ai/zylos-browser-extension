@@ -61,6 +61,7 @@ export const chatEntrySchema = z.object({
   delivery: z.enum(['sent', 'queued', 'failed', 'unknown']).optional(),
   deliveryError: z.string().optional(),
   final: z.boolean().optional(),
+  loopStatus: z.enum(['active', 'done', 'blocked', 'interrupted', 'stopped']).optional(),
   page: z.object({ title: z.string(), url: z.string(), status: z.string() }).optional(),
   toolRun: toolRunSchema.optional(),
 });
@@ -75,6 +76,7 @@ export const remoteStateSchema = z.object({
   keyId: z.string(),
   relayHost: z.string(),
   relayUrl: z.string(),
+  loopActive: z.boolean().optional(),
   task: z
     .object({
       sessionId: z.string(),
@@ -124,6 +126,13 @@ export type RemoteRequest = z.infer<typeof remoteRequestSchema>;
 
 // Relay -> extension frames.
 export const relayFrameSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('ready'), capabilities: z.array(z.string()).max(32) }),
+  z.object({
+    type: z.literal('agent-status'),
+    requestId: z.string().max(128),
+    state: z.string(),
+    code: z.string().optional(),
+  }),
   z.object({ type: z.literal('ping'), ts: z.number().optional() }),
   z.object({
     type: z.literal('req'),

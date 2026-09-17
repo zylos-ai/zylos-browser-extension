@@ -19,8 +19,9 @@ const chromePath =
 const require = createRequire(import.meta.url);
 const relayRoot = process.env.RELAY_ROOT || path.resolve(root, '../zylos-browser-remote');
 process.env.BROWSER_REMOTE_KEY = 'ab'.repeat(32);
-const { start } = require(path.join(relayRoot, 'relay/server.js'));
 const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'coco-actions-e2e-'));
+process.env.BROWSER_REMOTE_OBS_DIR = path.join(profile, 'observations');
+const { start } = require(path.join(relayRoot, 'relay/server.js'));
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const checks = [];
 const chatMessages = [];
@@ -62,6 +63,13 @@ function cdpClient(ws) {
     });
 }
 function fixture(url, port) {
+  if (url.startsWith('/loop'))
+    return `<!doctype html><title>Browser loop fixture</title>
+    <form action="/next" target="_blank"><input name="q" aria-label="Popup query"></form>
+    <form action="/next"><input name="q" aria-label="Same tab query"></form>
+    <button onclick="this.textContent='Clicked '+(++window.clicks)">Count click</button>
+    <div style="height:5000px">Scroll for more results</div><h2>Bottom results</h2>
+    <script>window.clicks=0;addEventListener('scroll',()=>{if(!document.querySelector('#lazy')&&scrollY>100){const e=document.createElement('p');e.id='lazy';e.textContent='Lazy result loaded';document.body.append(e)}})</script>`;
   if (url.startsWith('/media'))
     return `<!doctype html><title>Native media playback fixture</title>
     <video id="player" muted playsinline width="320" height="180"></video>
@@ -128,6 +136,7 @@ try {
   await new Promise((resolve) => site.listen(0, resolve));
   const url = `http://127.0.0.1:${site.address().port}/`;
   relay = await start({
+    agentLoop: false, // Legacy RPC compatibility; extension-owned rounds are tested below separately.
     extPort: 0,
     agentPort: 0,
     monitor: true,
@@ -283,6 +292,7 @@ try {
   }
   const state = async (selector) => rpc('inspect', { ref: await find(selector) });
   const check = async (name, work) => {
+    if (process.env.BROWSER_LOOP_ONLY === '1' && !name.startsWith('extension loop')) return;
     await work();
     checks.push(name);
     console.log('PASS', name);
@@ -1611,6 +1621,258 @@ try {
       return !tabs.result.value.some((tab) => owned.includes(tab.id));
     });
   });
+  // Negotiate the new mode over a fresh real connection. The preceding checks
+  // exercise legacy compatibility; the following ones use only model decisions.
+  relay.ext.agentLoop = true;
+  await previewPanel("chrome.runtime.sendMessage({type:'remote-set-enabled',enabled:false})");
+  await previewPanel("chrome.runtime.sendMessage({type:'remote-set-enabled',enabled:true})");
+  await eventually(() => relay.ext.connectedIds().length > 0);
+  const askLoop = async (text, tab) => {
+    const reply = await previewPanel(
+      `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-chat-send', text, ...(tab ? { tabId: tab.id, windowId: tab.windowId } : {}) })})`,
+    );
+    assert.equal(reply.ok, true, JSON.stringify(reply));
+    return eventually(() =>
+      chatMessages.find((message) => message.text === text && message.request),
+    );
+  };
+  const decision = async (request, value) => {
+    const response = await fetch(rpcUrl + '/decision', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: request.request.id, decision: value }),
+    });
+    const body = await response.json();
+    if (!body.ok)
+      throw Object.assign(new Error(`${body.code}: ${body.message}`), { code: body.code });
+    if (body.next && !chatMessages.some((message) => message.request?.id === body.next.id))
+      chatMessages.push({
+        text: body.next.text,
+        chatId: body.next.taskId,
+        request: { id: body.next.id, round: body.next.round, payload: body.next.payload },
+      });
+    return { replayed: false, ...body };
+  };
+  const nextRound = (request) =>
+    eventually(
+      () =>
+        chatMessages.find(
+          (message) =>
+            message.chatId === request.chatId &&
+            message.request?.round === request.request.round + 1,
+        ),
+      18000,
+    );
+  const refIn = (request, label) => {
+    const line = request.request.payload.observation.page.text
+      .split('\n')
+      .find((line) => line.includes(JSON.stringify(label)));
+    assert.ok(line, `Missing ref ${label}: ${JSON.stringify(request.request.payload.observation)}`);
+    return line.split(' ')[0];
+  };
+  const finishLoop = async (request, text) => {
+    await decision(request, { kind: 'done', text });
+    await eventually(
+      async () =>
+        !(await previewPanel("chrome.runtime.sendMessage({type:'remote-state'})")).value.loopActive,
+    );
+    assert.equal((await rpc('info')).control, null);
+  };
+  await check(
+    'extension loop answers ordinary chat without opening or controlling tabs',
+    async () => {
+      const before = (await previewPanel('chrome.tabs.query({})')).map((tab) => tab.id);
+      const request = await askLoop('Loop: just say hello');
+      assert.equal(request.request.payload.protocol, 'browser-decision-v1');
+      assert.equal(
+        request.request.payload.tools.length,
+        2,
+        'ordinary chat does not receive the entire browser catalog',
+      );
+      await finishLoop(request, 'Hello from structured decision');
+      assert.deepEqual(
+        (await previewPanel('chrome.tabs.query({})')).map((tab) => tab.id),
+        before,
+      );
+    },
+  );
+  await check(
+    'extension loop validates before input, batches fill+Enter and follows its actual popup',
+    async () => {
+      const tab = await previewPanel(
+        `chrome.tabs.create({url:${JSON.stringify(url + 'loop')},active:true})`,
+      );
+      await eventually(
+        async () => (await previewPanel(`chrome.tabs.get(${tab.id})`)).status === 'complete',
+      );
+      let request = await askLoop('Loop: search in the captured page', tab);
+      const initial = request;
+      await decision(request, {
+        kind: 'actions',
+        actions: [
+          {
+            method: 'use-current-tab',
+            params: { contextId: request.request.payload.initialPage.contextId },
+          },
+        ],
+      });
+      request = await nextRound(request);
+      assert.equal(request.request.payload.observation.target.id, tab.id);
+      const ref = refIn(request, 'Popup query');
+      await assert.rejects(
+        decision(request, {
+          kind: 'actions',
+          actions: [
+            { method: 'fill', params: { ref, text: 'MUST NOT RUN' } },
+            { method: 'click', params: {} },
+          ],
+        }),
+        (error) => error.code === 'BAD_DECISION',
+      );
+      await assert.rejects(
+        rpc('click', { x: 10, y: 10 }),
+        (error) => error.code === 'LOOP_OWNS_BROWSER',
+      );
+      const legacy = await fetch(rpcUrl + '/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text: 'wrong reply route' }),
+      });
+      assert.equal((await legacy.json()).code, 'DECISION_REQUIRED');
+      const unrelated = await previewPanel(
+        `chrome.tabs.create({url:${JSON.stringify(url + 'next?personal=1')},active:true})`,
+      );
+      const value = {
+        kind: 'actions',
+        memory: 'Need actual search results',
+        actions: [
+          { method: 'fill', params: { ref, text: 'spider' } },
+          { method: 'keypress', params: { key: 'Enter', ref } },
+        ],
+      };
+      const receipt = await decision(request, value);
+      assert.equal(receipt.replayed, false);
+      assert.equal((await decision(request, value)).replayed, true);
+      const previous = request;
+      request = await nextRound(request);
+      assert.equal(request.request.payload.failed, false, JSON.stringify(request.request.payload));
+      assert.ok(
+        request.request.payload.observation.target.url.includes('/next?q=spider'),
+        JSON.stringify({
+          payload: request.request.payload,
+          tabs: await previewPanel('chrome.tabs.query({})'),
+        }),
+      );
+      assert.notEqual(request.request.payload.observation.target.id, tab.id);
+      assert.notEqual(request.request.payload.observation.target.id, unrelated.id);
+      assert.equal((await previewPanel(`chrome.tabs.get(${tab.id})`)).url, url + 'loop');
+      const opened = (await previewPanel('chrome.tabs.query({})')).filter((t) =>
+        t.url.includes('/next?q=spider'),
+      );
+      assert.equal(opened.length, 1, 'duplicate decisions never submit twice');
+      await finishLoop(request, 'Popup search completed');
+      assert.equal((await decision(previous, value)).replayed, true);
+      assert.equal(
+        (await previewPanel('chrome.tabs.query({})')).filter((t) =>
+          t.url.includes('/next?q=spider'),
+        ).length,
+        1,
+      );
+      const run = relay.monitor.runs.find((run) => run.question === initial.text);
+      assert.ok(run.steps.some((step) => step.kind === 'command' && step.title === 'keypress'));
+      assert.ok(run.steps.some((step) => step.kind === 'command' && step.title === 'switch-tab'));
+      assert.ok(
+        !run.steps.some((step) => step.kind === 'command' && step.title === 'agent-decision'),
+      );
+      assert.equal(run.status, 'delivered');
+    },
+  );
+  await check(
+    'extension loop observes same-tab Enter navigation without guessed URL or false failure',
+    async () => {
+      const tab = await previewPanel(
+        `chrome.tabs.create({url:${JSON.stringify(url + 'loop')},active:true})`,
+      );
+      await eventually(
+        async () => (await previewPanel(`chrome.tabs.get(${tab.id})`)).status === 'complete',
+      );
+      let request = await askLoop('Loop: submit within the same tab', tab);
+      await decision(request, {
+        kind: 'actions',
+        actions: [
+          {
+            method: 'use-current-tab',
+            params: { contextId: request.request.payload.initialPage.contextId },
+          },
+        ],
+      });
+      request = await nextRound(request);
+      const ref = refIn(request, 'Same tab query');
+      await decision(request, {
+        kind: 'actions',
+        actions: [
+          { method: 'fill', params: { ref, text: 'same' } },
+          { method: 'keypress', params: { ref, key: 'Enter' } },
+        ],
+      });
+      request = await nextRound(request);
+      assert.equal(request.request.payload.failed, false, JSON.stringify(request.request.payload));
+      assert.equal(request.request.payload.observation.target.id, tab.id);
+      assert.ok(request.request.payload.observation.target.url.includes('/next?q=same'));
+      await finishLoop(request, 'Same-tab search completed');
+    },
+  );
+  await check(
+    'extension loop returns real scroll metrics, loads later content, and stops pending decisions',
+    async () => {
+      const tab = await previewPanel(
+        `chrome.tabs.create({url:${JSON.stringify(url + 'loop')},active:true})`,
+      );
+      await eventually(
+        async () => (await previewPanel(`chrome.tabs.get(${tab.id})`)).status === 'complete',
+      );
+      let request = await askLoop('Loop: browse further down', tab);
+      await decision(request, {
+        kind: 'actions',
+        actions: [
+          {
+            method: 'use-current-tab',
+            params: { contextId: request.request.payload.initialPage.contextId },
+          },
+        ],
+      });
+      request = await nextRound(request);
+      assert.ok(request.request.payload.observation.page.viewport.remainingBelow > 0);
+      await decision(request, {
+        kind: 'actions',
+        actions: [{ method: 'scroll', params: { direction: 'down', pixels: 800 } }],
+      });
+      request = await nextRound(request);
+      assert.equal(request.request.payload.failed, false, JSON.stringify(request.request.payload));
+      assert.ok(request.request.payload.observation.page.viewport.scrollY > 0);
+      assert.ok(request.request.payload.observation.page.text.includes('Lazy result loaded'));
+      await decision(request, { kind: 'actions', actions: [{ method: 'observe', params: {} }] });
+      request = await nextRound(request);
+      const image = request.request.payload.observation.page.screenshot;
+      assert.equal(image.data, undefined, 'image encoding must not reach Agent stdout');
+      assert.equal(image.imageReadRequired, true);
+      assert.equal(path.dirname(image.path), process.env.BROWSER_REMOTE_OBS_DIR);
+      assert.ok(
+        (await fs.readFile(image.path)).length > 100,
+        'Agent host can read the real screenshot',
+      );
+      await previewPanel("chrome.runtime.sendMessage({type:'remote-stop'})");
+      await assert.rejects(
+        decision(request, {
+          kind: 'actions',
+          actions: [{ method: 'click', params: { x: 10, y: 10 } }],
+        }),
+        (error) => error.code === 'STALE_DECISION',
+      );
+      assert.equal((await rpc('info')).control, null);
+      assert.ok(await previewPanel(`chrome.tabs.get(${tab.id})`), 'borrowed tab remains open');
+    },
+  );
   console.log(
     JSON.stringify(
       { passed: checks.length, checks, browser: await cdp('Browser.getVersion') },

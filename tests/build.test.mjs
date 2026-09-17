@@ -22,6 +22,7 @@ test('build exposes one sidebar and no toolbar popup', () => {
     'storage',
     'tabGroups',
     'tabs',
+    'webNavigation',
   ]);
   assert.equal(manifest.host_permissions, undefined);
   assert.equal(manifest.externally_connectable, undefined);

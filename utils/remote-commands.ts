@@ -95,6 +95,7 @@ export const REMOTE_CAPABILITIES = [
   'tool-catalog-v1',
   'current-page-v1',
   'action-step-v1',
+  'agent-loop-v1',
 ];
 
 export class RemoteError extends Error {

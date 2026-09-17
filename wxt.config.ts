@@ -13,7 +13,15 @@ export default defineConfig({
     default_locale: 'en',
     icons: { 16: 'icons/16.png', 32: 'icons/32.png', 48: 'icons/48.png', 128: 'icons/128.png' },
     minimum_chrome_version: '125',
-    permissions: ['debugger', 'storage', 'tabs', 'alarms', 'sidePanel', 'tabGroups'],
+    permissions: [
+      'debugger',
+      'storage',
+      'tabs',
+      'alarms',
+      'sidePanel',
+      'tabGroups',
+      'webNavigation',
+    ],
     action: {
       default_title: '__MSG_openSidebar__',
       default_icon: {

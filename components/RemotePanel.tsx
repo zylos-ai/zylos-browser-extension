@@ -206,6 +206,11 @@ export function RemotePanel() {
             onDraftChange={setDraft}
             connected={connected}
             sending={sending}
+            onStop={
+              state.loopActive && !state.task
+                ? () => void action({ type: 'remote-stop' })
+                : undefined
+            }
             onSend={() => void sendChat()}
             inputRef={inputRef}
           />

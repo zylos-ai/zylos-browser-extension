@@ -56,7 +56,10 @@ export function Conversation({
   const activityTs = Math.max(hasProgress ? progress!.ts : (turn?.ts ?? 0), browserActivityTs);
   const [now, setNow] = useState(Date.now);
   const awaiting =
-    turn?.role === 'user' && turn.delivery !== 'failed' && turn.delivery !== 'unknown';
+    turn?.role === 'user' &&
+    turn.delivery !== 'failed' &&
+    turn.delivery !== 'unknown' &&
+    (!turn.loopStatus || turn.loopStatus === 'active');
   const delayed = awaiting && !browserBusy && now - activityTs >= REPLY_NOTICE_MS;
   useEffect(() => {
     setNow(Date.now());
