@@ -39,9 +39,12 @@ function endRun(run: ToolRun, status: Exclude<ToolRun['status'], 'running'>) {
 export class ToolActivity {
   private active?: ChatEntry;
   private sequence = 0;
+  // Retry evidence lives only in memory; raw arguments must never enter chat storage.
+  private failures = new Map<string, { step: ToolStep; signature: string; context: string }>();
   constructor(
     private chat: () => ChatEntry[],
     private changed: () => void,
+    private context: () => string | undefined = () => undefined,
   ) {}
 
   begin(method: string, params: Record<string, unknown>) {
@@ -56,6 +59,7 @@ export class ToolActivity {
         chat[turnIndex]?.delivery !== 'failed' &&
         !chat.slice(turnIndex + 1).some((m) => m.toolRun && m.toolRun.status !== 'running');
       if (['info', 'describe'].includes(method) && !waiting) return;
+      this.failures.clear();
       const ts = Date.now();
       this.active = {
         id: `tools-${crypto.randomUUID()}-${++this.sequence}`,
@@ -79,6 +83,8 @@ export class ToolActivity {
     };
     run.steps.push(step);
     if (run.steps.length > TOOL_STEPS_CAP) run.steps.splice(0, run.steps.length - TOOL_STEPS_CAP);
+    for (const [id, entry] of this.failures)
+      if (!run.steps.includes(entry.step)) this.failures.delete(id);
     // Bound aggregate history well below Chrome's storage quota too.
     let excess = chat.reduce((count, m) => count + (m.toolRun?.steps.length ?? 0), 0) - 2000;
     for (const message of chat) {
@@ -94,9 +100,36 @@ export class ToolActivity {
       this.chat().includes(entry) &&
       run.status === 'running' &&
       (step.status === 'queued' || step.status === 'running');
+    let evidence: { signature: string; context: string } | undefined;
     return {
       start: () => {
         if (!pending()) return;
+        if (
+          [
+            'start',
+            'open',
+            'new-tab',
+            'switch-tab',
+            'use-current-tab',
+            'back',
+            'forward',
+            'reload',
+          ].includes(method)
+        )
+          this.failures.clear();
+        const context = this.context();
+        if (context !== undefined) {
+          const signature = JSON.stringify([method, params], (_key, value) =>
+            value && typeof value === 'object' && !Array.isArray(value)
+              ? Object.fromEntries(
+                  Object.keys(value)
+                    .sort()
+                    .map((key) => [key, value[key]]),
+                )
+              : value,
+          );
+          evidence = { context, signature };
+        }
         step.status = 'running';
         step.startedAt = Date.now();
         this.changed();
@@ -104,9 +137,25 @@ export class ToolActivity {
       finish: (errorCode?: string, replayed?: boolean) => {
         if (!pending()) return;
         step.status = errorCode === 'STOPPED' ? 'cancelled' : errorCode ? 'error' : 'success';
-        if (step.status === 'error') run.failed++;
+        if (step.status === 'error' && !replayed) run.failed++;
         step.errorCode = errorCode?.replace(/[^\w-]/g, '').slice(0, 64);
         step.replayed = replayed || undefined;
+        if (evidence && step.status === 'error' && !replayed)
+          this.failures.set(step.id, { step, ...evidence });
+        if (
+          evidence &&
+          step.status === 'success' &&
+          !replayed &&
+          this.context() === evidence.context
+        ) {
+          for (const [id, failed] of this.failures) {
+            if (failed.context !== evidence.context || failed.signature !== evidence.signature)
+              continue;
+            failed.step.recovered = true;
+            run.recovered = (run.recovered ?? 0) + 1;
+            this.failures.delete(id);
+          }
+        }
         step.endedAt = Date.now();
         this.changed();
       },
@@ -116,9 +165,15 @@ export class ToolActivity {
     };
   }
 
+  hasUnresolvedErrors() {
+    const run = this.active?.toolRun;
+    return !!run && run.failed > (run.recovered ?? 0);
+  }
+
   end(status: Exclude<ToolRun['status'], 'running'>) {
     const entry = this.active;
     this.active = undefined;
+    this.failures.clear();
     if (!entry || !this.chat().includes(entry)) return;
     endRun(entry.toolRun!, status);
     this.changed();

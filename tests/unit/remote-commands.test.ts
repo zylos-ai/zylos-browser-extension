@@ -190,6 +190,267 @@ describe('remote dispatch', () => {
   });
 });
 
+describe('one action with a result observation', () => {
+  const read = { op: 'snapshot' };
+  const click = { op: 'click', ref: '@a-e1' };
+  const establish = () =>
+    executor.currentControl.mockReturnValue({ sessionId: 'task', tabId: 7, tabIds: [7] });
+
+  it('opens, waits and reads in order within one deadline, exposing the actual stages', async () => {
+    const events: string[] = [];
+    const result = await dispatch(
+      {
+        method: 'step',
+        params: {
+          action: { op: 'open', url: 'https://example.com/' },
+          read,
+        },
+        deadline: Date.now() + 20000,
+        keyId: 'abc',
+      },
+      idem,
+      undefined,
+      undefined,
+      (method) => {
+        events.push(method);
+        return { finish: (error) => events.push(error ?? 'ok') };
+      },
+    );
+    expect(result).toMatchObject({
+      completed: true,
+      steps: [
+        { stage: 'action', method: 'open', status: 'success', result: { started: true } },
+        { stage: 'wait', method: 'wait', status: 'success' },
+        { stage: 'read', method: 'snapshot', status: 'success' },
+      ],
+    });
+    expect(executor.execute.mock.calls.map(([c]) => c)).toEqual([
+      { op: 'wait', condition: 'loaded', timeoutMs: 10000 },
+      { op: 'snapshot', interactive: false },
+    ]);
+    expect(executor.execute.mock.calls[0]![1]).toBe(executor.execute.mock.calls[1]![1]);
+    expect(events).toEqual(['open', 'ok', 'wait', 'ok', 'snapshot', 'ok']);
+  });
+
+  it.each([
+    { action: { op: 'click', x: 1 }, read },
+    { action: click, wait: { condition: 'visible' }, read },
+    { action: click, wait: { condition: 'loaded' }, read },
+    { action: click, wait: { condition: 'new-tab' }, read },
+    { action: click, wait: { condition: 'navigation', url: 'https://guessed.example/' }, read },
+    { action: click, wait: { condition: 'navigation', selector: '#next' }, read },
+    {
+      action: { op: 'open', url: 'https://example.com/' },
+      wait: { condition: 'navigation' },
+      read,
+    },
+    { action: click, read: { op: 'fill', ref: 'x', text: 'second mutation' } },
+    { action: { op: 'step' }, read },
+    { action: { op: 'stop' }, read },
+    { action: click, read: { op: 'find', selector: '' } },
+  ])('validates the whole sequence before any action: %j', async (params) => {
+    await rejects(call('step', params), 'BAD_PARAMS');
+    expect(executor.execute).not.toHaveBeenCalled();
+    expect(executor.createTask).not.toHaveBeenCalled();
+  });
+
+  it('caches partial failure, preserves executed actions, skips the read and rejects changed request IDs', async () => {
+    establish();
+    executor.execute.mockImplementation(async (command) => {
+      if (command.op === 'wait')
+        throw Object.assign(new Error('unmet condition'), { code: 'WAIT_TIMEOUT' });
+      return { done: true };
+    });
+    const params = { action: click, wait: { condition: 'visible', selector: '#next' }, read };
+    const failed = await rejects(call('step', params, { requestId: 'partial' }), 'STEP_INCOMPLETE');
+    expect(failed.details).toMatchObject({
+      completed: false,
+      steps: [
+        { method: 'click', status: 'success' },
+        { method: 'wait', status: 'error', error: { code: 'WAIT_TIMEOUT' } },
+        { method: 'snapshot', status: 'skipped' },
+      ],
+    });
+    const retry = await rejects(call('step', params, { requestId: 'partial' }), 'STEP_INCOMPLETE');
+    expect(retry.details).toMatchObject({ replayed: true });
+    await rejects(
+      call('step', { ...params, action: { ...click, ref: 'other' } }, { requestId: 'partial' }),
+      'REQUEST_ID_CONFLICT',
+    );
+    expect(executor.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it('captures navigation inside the action and shares it only with its waiting stage', async () => {
+    establish();
+    const checkpoint = { sessionId: 'task', tabId: 7, url: 'https://example.com/', revision: 3 };
+    executor.execute.mockImplementation(async (command, _deadline, watch) => {
+      if (command.op === 'click') watch.before = checkpoint;
+      if (command.op === 'wait') expect(watch.before).toEqual(checkpoint);
+      return { done: true };
+    });
+    const result = await call('step', { action: click, wait: { condition: 'navigation' }, read });
+    expect(result).toMatchObject({ completed: true });
+    const calls = executor.execute.mock.calls;
+    expect(calls.map(([c]) => c.op)).toEqual(['click', 'wait', 'snapshot']);
+    expect(calls[1]![0]).toEqual({ op: 'wait', condition: 'loaded', timeoutMs: 10000 });
+    expect(calls[0]![2]).toBe(calls[1]![2]);
+    expect(calls[2]![2]).toBeUndefined();
+  });
+
+  it('waits for load when an action already reports navigation, without a predicted URL', async () => {
+    establish();
+    executor.execute.mockResolvedValueOnce({
+      done: true,
+      navigating: true,
+      needsObservation: true,
+    });
+    const result = await call('step', { action: click, read });
+    expect(executor.execute.mock.calls.map(([c]) => c.op)).toEqual(['click', 'wait', 'snapshot']);
+    expect(result).toMatchObject({
+      completed: true,
+      steps: [
+        { status: 'success' },
+        { stage: 'wait', status: 'success' },
+        { stage: 'read', status: 'success' },
+      ],
+    });
+    expect(executor.execute.mock.calls[1]![0]).toEqual({
+      op: 'wait',
+      condition: 'loaded',
+      timeoutMs: 10000,
+    });
+  });
+
+  it('replays uncertain mutation errors too instead of trying the action again', async () => {
+    establish();
+    executor.execute.mockRejectedValueOnce(
+      Object.assign(new Error('lost acknowledgement'), { code: 'PAGE_CHANGED' }),
+    );
+    const params = { action: click, read };
+    const failed = await rejects(
+      call('step', params, { requestId: 'uncertain' }),
+      'STEP_INCOMPLETE',
+    );
+    expect(failed.details).toMatchObject({ steps: [{ status: 'error' }, { status: 'skipped' }] });
+    await rejects(call('step', params, { requestId: 'uncertain' }), 'STEP_INCOMPLETE');
+    expect(executor.execute).toHaveBeenCalledOnce();
+  });
+
+  it('guards both the initial URL and a redirect before the read', async () => {
+    const blocked = await rejects(
+      call('step', { action: { op: 'open', url: 'https://example.com/checkout' }, read }),
+      'STEP_INCOMPLETE',
+    );
+    expect(blocked.details).toMatchObject({
+      steps: [{ error: { code: 'BLOCKED_URL' } }, { status: 'skipped' }, { status: 'skipped' }],
+    });
+    expect(executor.createTask).not.toHaveBeenCalled();
+    establish();
+    executor.execute.mockImplementationOnce(async () => {
+      executor.currentGrant.mockReturnValue({ id: 7, url: 'https://example.com/checkout' });
+      return { done: true };
+    });
+    const redirected = await rejects(call('step', { action: click, read }), 'STEP_INCOMPLETE');
+    expect(redirected.details).toMatchObject({
+      steps: [{ status: 'success' }, { error: { code: 'BLOCKED_URL' } }],
+    });
+    expect(executor.execute).toHaveBeenCalledOnce();
+  });
+
+  it('keeps one queue slot, coalesces duplicates and does not interleave another action', async () => {
+    establish();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    executor.execute.mockImplementationOnce(async () => {
+      await gate;
+      return { done: true };
+    });
+    const first = call('step', { action: click, read }, { requestId: 'batch' });
+    const retry = call('step', { action: click, read }, { requestId: 'batch' });
+    const next = call('fill', { ref: 'later', text: 'later' });
+    await vi.waitFor(() => expect(executor.execute).toHaveBeenCalledTimes(1));
+    release();
+    await first;
+    expect(await retry).toMatchObject({ completed: true, replayed: true });
+    await next;
+    expect(executor.execute.mock.calls.map(([c]) => c.op)).toEqual(['click', 'snapshot', 'fill']);
+    await call('step', { action: click, read }, { requestId: 'batch' });
+    expect(executor.execute).toHaveBeenCalledTimes(3);
+    expect(await call('step', { action: click, read }, { requestId: 'batch' })).toMatchObject({
+      steps: [{ status: 'success' }, { result: { omittedFromReplay: true } }],
+    });
+  });
+
+  it('stop interrupts the composite and cancels queued mutations without continuing to read', async () => {
+    establish();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    executor.execute.mockImplementation(async (command) => {
+      if (command.op === 'wait') {
+        await gate;
+        throw Object.assign(new Error('stopped'), { code: 'STOPPED' });
+      }
+      return { done: true };
+    });
+    const active = rejects(
+      call('step', { action: click, wait: { condition: 'visible', selector: '#later' }, read }),
+      'STEP_INCOMPLETE',
+    );
+    await vi.waitFor(() => expect(executor.execute).toHaveBeenCalledTimes(2));
+    const queued = rejects(call('click', { ref: 'later' }), 'STOPPED');
+    await call('stop');
+    release();
+    expect((await active).details).toMatchObject({
+      steps: [{ status: 'success' }, { error: { code: 'STOPPED' } }, { status: 'skipped' }],
+    });
+    await queued;
+    expect(executor.execute.mock.calls.map(([c]) => c.op)).toEqual(['click', 'wait', 'stop']);
+  });
+
+  it('does not read a different task target after a waiting stage', async () => {
+    establish();
+    executor.execute.mockImplementation(async (command) => {
+      if (command.op === 'wait')
+        executor.currentControl.mockReturnValue({ sessionId: 'other', tabId: 9, tabIds: [9] });
+      return { done: true };
+    });
+    const failed = await rejects(
+      call('step', { action: click, wait: { condition: 'visible', selector: '#later' }, read }),
+      'STEP_INCOMPLETE',
+    );
+    expect(failed.details).toMatchObject({
+      steps: [{ status: 'success' }, { status: 'success' }, { error: { code: 'STOPPED' } }],
+    });
+    expect(executor.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not grant each stage a fresh timeout budget', async () => {
+    establish();
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      executor.execute.mockImplementationOnce(async () => {
+        clock.mockReturnValue(now + 101);
+        return { done: true };
+      });
+      const failed = await rejects(
+        call('step', { action: click, read }, { deadline: now + 100 }),
+        'STEP_INCOMPLETE',
+      );
+      expect(failed.details).toMatchObject({
+        steps: [{ status: 'success' }, { error: { code: 'COMMAND_EXPIRED' } }],
+      });
+      expect(executor.execute).toHaveBeenCalledOnce();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+});
+
 describe('browser actions v2', () => {
   it('validates every new action before dispatch, retaining the thin relay contract', async () => {
     await call('open', { url: 'https://example.com/' });

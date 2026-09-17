@@ -291,3 +291,15 @@ test('disconnect retains local Stop while control exists, then an explicit stop 
   service.sync(null, null, false);
   expect(a.state()).toMatchObject({ status: 'stopped', canStop: false });
 });
+
+test('completion remains an error if an earlier action is unresolved despite the latest success', async () => {
+  const a = client();
+  a.visible(true);
+  service.sync(scope(), grant(), true);
+  await tick();
+  service.result('snapshot', false);
+  service.result('finish', false, true);
+  expect(a.state().status).toBe('error');
+  service.finish('completed');
+  expect(a.state().status).toBe('error');
+});

@@ -36,6 +36,8 @@ function domAction(action, option) {
       tag: this.tagName.toLowerCase(),
       role,
       text: (this.innerText || this.textContent || '').slice(0, 4000),
+      ariaLabel: this.getAttribute('aria-label')?.slice(0, 512),
+      title: this.getAttribute('title')?.slice(0, 512),
       value: sensitive
         ? '[redacted]'
         : 'value' in this
@@ -65,6 +67,24 @@ function domAction(action, option) {
         !disabled() &&
         !this.readOnly &&
         (this.isContentEditable || /^(INPUT|TEXTAREA)$/.test(this.tagName)),
+      // Read native playback facts without clicking a play/pause toggle or
+      // exposing the media source URL. Use the element's own iframe realm.
+      media:
+        this instanceof view.HTMLMediaElement
+          ? {
+              paused: this.paused,
+              ended: this.ended,
+              seeking: this.seeking,
+              currentTime: this.currentTime,
+              duration: Number.isFinite(this.duration) ? this.duration : null,
+              readyState: this.readyState,
+              networkState: this.networkState,
+              muted: this.muted,
+              volume: this.volume,
+              playbackRate: this.playbackRate,
+              error: this.error ? { code: this.error.code } : null,
+            }
+          : undefined,
       options:
         this.tagName === 'SELECT'
           ? Array.from(this.options, (o) => ({

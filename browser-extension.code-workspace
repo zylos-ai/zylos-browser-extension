@@ -8,6 +8,9 @@
 		},
 		{
 			"path": "../zylos-core"
+		},
+		{
+			"path": "../nanobrowser"
 		}
 	]
 }

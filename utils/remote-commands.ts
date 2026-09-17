@@ -5,9 +5,22 @@
 // about this table; anything not listed here is refused with UNKNOWN_METHOD.
 import { actionParams, commandSchema, type Command } from './commands';
 import { isBlockedUrl } from './guard';
-import { createTask, currentControl, currentGrant, execute } from './automation/executor';
+import {
+  createTask,
+  currentControl,
+  currentGrant,
+  execute,
+  type NavigationWatch,
+} from './automation/executor';
 import { REMOTE_VERSION } from './remote';
 import { usePageContext, clearPageContexts } from './page-context';
+import {
+  navigationActions,
+  stepReceipt,
+  type ActionStep,
+  type StepObserver,
+  type StepResult,
+} from './action-step';
 import {
   remoteParams as paramSchemas,
   REMOTE_METHODS,
@@ -18,6 +31,7 @@ export { REMOTE_METHODS, type RemoteMethod } from './tool-catalog';
 
 // Retried mutating calls replay their recorded answer instead of clicking twice.
 const IDEMPOTENT_METHODS = new Set<RemoteMethod>([
+  'step',
   'start',
   'use-current-tab',
   'open',
@@ -80,6 +94,7 @@ export const REMOTE_CAPABILITIES = [
   'chat-ack-v1',
   'tool-catalog-v1',
   'current-page-v1',
+  'action-step-v1',
 ];
 
 export class RemoteError extends Error {
@@ -119,7 +134,17 @@ export class IdempotencyCache {
           new RemoteError('REQUEST_ID_CONFLICT', 'requestId belongs to another command'),
         );
       if (previous)
-        return previous.promise.then((value) => ({ ...(value as object), replayed: true }));
+        return previous.promise.then(
+          (value) => ({ ...(value as object), replayed: true }),
+          (error) => {
+            if (error instanceof RemoteError && error.code === 'STEP_INCOMPLETE')
+              throw new RemoteError(error.code, error.message, {
+                ...(error.details as object),
+                replayed: true,
+              });
+            throw error;
+          },
+        );
     }
     const assertActive = () => {
       if (!urgent && epoch !== this.epoch)
@@ -127,9 +152,11 @@ export class IdempotencyCache {
     };
     const execute = async () => {
       assertActive();
-      const result = await work(assertActive);
-      if (id && this.map.has(id)) this.signatures.set(id, signature);
-      return result;
+      try {
+        return await work(assertActive);
+      } finally {
+        if (id && this.map.has(id)) this.signatures.set(id, signature);
+      }
     };
     const promise = urgent || independent ? execute() : this.queue.catch(() => {}).then(execute);
     if (!urgent && !independent) this.queue = promise.catch(() => {});
@@ -204,10 +231,11 @@ export function dispatch(
   idem: IdempotencyCache,
   onStart?: () => void,
   onExecute?: () => void,
+  onPart?: StepObserver,
 ): Promise<unknown> {
   return idem.run(req, (assertActive) => {
     onStart?.();
-    return dispatchNow(req, idem, assertActive, onExecute);
+    return dispatchNow(req, idem, assertActive, onExecute, onPart);
   });
 }
 async function dispatchNow(
@@ -215,6 +243,8 @@ async function dispatchNow(
   idem: IdempotencyCache,
   assertActive: () => void,
   onExecute?: () => void,
+  onPart?: StepObserver,
+  navigation?: NavigationWatch,
 ): Promise<unknown> {
   const method = req.method as RemoteMethod;
   const schema = Object.hasOwn(paramSchemas, method) ? paramSchemas[method] : undefined;
@@ -237,6 +267,11 @@ async function dispatchNow(
 
   if (req.requestId && IDEMPOTENT_METHODS.has(method)) {
     const prior = idem.get(req.requestId);
+    if (prior instanceof RemoteError)
+      throw new RemoteError(prior.code, prior.message, {
+        ...(prior.details as object),
+        replayed: true,
+      });
     if (prior !== undefined) return { ...(prior as object), replayed: true };
   }
 
@@ -263,6 +298,9 @@ async function dispatchNow(
   onExecute?.();
   let result: unknown;
   switch (method) {
+    case 'step':
+      result = await runStep(req, params as ActionStep, idem, assertActive, onPart);
+      break;
     case 'use-current-tab':
       result = await usePageContext(params.contextId as string, assertActive);
       break;
@@ -310,9 +348,108 @@ async function dispatchNow(
     }
     default:
       if (method === 'stop') clearPageContexts();
-      result = await execute(commandSchema.parse({ op: method, ...params }) as Command, deadline);
+      result = await execute(
+        commandSchema.parse({ op: method, ...params }) as Command,
+        deadline,
+        navigation,
+      );
   }
 
-  if (req.requestId && IDEMPOTENT_METHODS.has(method)) idem.set(req.requestId, result);
+  if (req.requestId && IDEMPOTENT_METHODS.has(method))
+    idem.set(req.requestId, method === 'step' ? stepReceipt(result as StepResult) : result);
   return result ?? null;
+}
+
+async function runStep(
+  req: Dispatch,
+  params: ActionStep,
+  idem: IdempotencyCache,
+  assertActive: () => void,
+  onPart?: StepObserver,
+): Promise<StepResult> {
+  const wait =
+    params.wait ??
+    (navigationActions.has(params.action.op)
+      ? { condition: 'loaded' as const, timeoutMs: 10000 }
+      : undefined);
+  const commands = [params.action, ...(wait ? [{ op: 'wait', ...wait }] : []), params.read];
+  // Created inside the queue, captured by the executor immediately before input.
+  // The Agent never supplies a baseline or predicts the destination URL.
+  const navigation: NavigationWatch | undefined = wait?.condition === 'navigation' ? {} : undefined;
+  const result: StepResult = {
+    completed: false,
+    steps: commands.map((command, i) => ({
+      stage: i === 0 ? 'action' : i === commands.length - 1 ? 'read' : 'wait',
+      method: command.op,
+      status: 'skipped',
+    })),
+  };
+  // One queue slot for the entire sequence. Child dispatches must NOT re-enter
+  // IdempotencyCache.run (which would deadlock behind their own parent).
+  const deadline = req.deadline ?? Date.now() + 30000;
+  let target: ReturnType<typeof currentControl> = null;
+  for (const [index, command] of commands.entries()) {
+    const part = result.steps[index]!;
+    const { op, ...childParams } = command;
+    let ticket: ReturnType<StepObserver>;
+    const started = Date.now();
+    try {
+      assertActive();
+      ticket = onPart?.(op, childParams);
+      if (index > 0) {
+        const now = currentControl();
+        if (!target || !now || target.sessionId !== now.sessionId || target.tabId !== now.tabId)
+          fail(
+            'STOPPED',
+            'The action target is no longer controlled; remaining stages were skipped',
+          );
+      }
+      part.result = await dispatchNow(
+        {
+          ...req,
+          method: op,
+          params: index === 1 && navigation ? { ...childParams, condition: 'loaded' } : childParams,
+          requestId: undefined,
+          deadline,
+        },
+        idem,
+        assertActive,
+        undefined,
+        undefined,
+        index < 2 ? navigation : undefined,
+      );
+      part.status = 'success';
+      ticket?.finish();
+      if (index === 0) target = currentControl();
+      // A click already acknowledged by Chrome can navigate before returning.
+      // Finish that observed navigation without requiring a predicted URL.
+      if (index === 0 && !wait && (part.result as { navigating?: boolean } | null)?.navigating) {
+        commands.splice(1, 0, { op: 'wait', condition: 'loaded', timeoutMs: 10000 });
+        result.steps.splice(1, 0, { stage: 'wait', method: 'wait', status: 'skipped' });
+      }
+    } catch (error) {
+      const e = error as { code?: string; message?: string };
+      const code = typeof e?.code === 'string' ? e.code : 'EXT_ERROR';
+      part.status = 'error';
+      part.error = { code, message: e?.message || code };
+      ticket?.finish(code);
+      part.durationMs = Date.now() - started;
+      const failure = new RemoteError(
+        'STEP_INCOMPLETE',
+        `${part.stage} (${op}) failed: ${code}. Check details.steps; do not repeat completed actions.`,
+        result,
+      );
+      // Cache failures too: the mutation may have succeeded before a failed
+      // observation, or a mutation error may have an uncertain outcome.
+      if (req.requestId)
+        idem.set(
+          req.requestId,
+          new RemoteError(failure.code, failure.message, stepReceipt(result)),
+        );
+      throw failure;
+    }
+    part.durationMs = Date.now() - started;
+  }
+  result.completed = true;
+  return result;
 }

@@ -2,10 +2,12 @@ import { z } from 'zod';
 import { actionParams } from './commands';
 import { REMOTE_VERSION } from './remote';
 import instructions from '../agent/browser-guide.md?raw';
+import { stepParams } from './action-step';
 
 // The same schemas validate RPC inputs and generate the Agent's live reference.
 export const remoteParams = {
   ...actionParams,
+  step: stepParams,
   info: z.object({}).strict(),
   'use-current-tab': z.object({ contextId: z.string().uuid() }).strict(),
   start: z.object({ url: z.string().url().max(4000) }).strict(),
@@ -30,6 +32,40 @@ const targetRule =
 // Adding a method without documentation is a TypeScript error. All browser
 // semantics stay in this extension; the transport has no copy of this table.
 export const toolHelp = {
+  step: {
+    description:
+      'Execute one browser action, wait for a specified outcome if needed, and return one fresh observation in a single call. Prefer this over separate action/wait/read round trips.',
+    constraints: [
+      'Exactly one action and one read; no nested steps or additional mutations. All parameters are validated before any action. Uses the same guards and task scope as individual tools.',
+      'For same-tab link clicks or Enter submissions, prefer wait:{condition:"navigation"} without any URL. The extension watches before input, requires a real navigation (including redirects, SPA URL changes or same-URL reloads) and load, then returns the actual URL. This step-only wait supports click/keypress. It does not prove asynchronous page content or a business outcome is ready.',
+      'open/new-tab/back/forward/reload automatically wait for loaded (10 seconds) when wait is omitted. Other actions that already report navigating also wait for load. Otherwise an omitted wait reads current state immediately. For asynchronous in-page changes use a relevant observed element/text condition. loaded is refused for interactions because the old page may already be loaded.',
+      'Never guess destination URLs, content IDs or selectors. A link ref/title does not reveal its href. Use exact URL waits only for complete URLs supplied by the user or observed in tool results, when an exact match is needed. Prefer navigation for unknown destinations.',
+      'All stages share the outer CLI timeout (default 30 seconds). Set --timeout above the chosen wait timeout plus action/read time. A popup requires separate wait new-tab and switch-tab calls.',
+      'STEP_INCOMPLETE includes details.completed=false and ordered steps with success/error/skipped status. A completed action is never rolled back or automatically repeated. If wait/read fails, inspect or wait separately; do not repeat the entire step. Same requestId replays the recorded success or partial failure within the worker cache; a new CLI invocation has a new ID.',
+      'Cached success replays retain stage receipts but mark the read result omittedFromReplay to avoid retaining stale snapshots/images. Request a fresh standalone read if needed; do not repeat the action.',
+      'completed=true means the requested stages executed, not that the user goal is proven. Assess the returned evidence. After navigation use fresh selectors or snapshot, never refs from the old page.',
+    ],
+    examples: [
+      {
+        action: { op: 'open', url: 'https://example.com/' },
+        read: { op: 'snapshot', interactive: true },
+      },
+      {
+        action: { op: 'click', ref: '@1a2b3c4d-e17' },
+        wait: { condition: 'navigation', timeoutMs: 10000 },
+        read: { op: 'snapshot', interactive: true },
+      },
+      {
+        action: { op: 'click', ref: '@1a2b3c4d-e17' },
+        wait: { condition: 'visible', selector: '#results', timeoutMs: 10000 },
+        read: { op: 'find', selector: '#results' },
+      },
+      {
+        action: { op: 'fill', ref: '@1a2b3c4d-e17', text: 'example' },
+        read: { op: 'inspect', ref: '@1a2b3c4d-e17' },
+      },
+    ],
+  },
   describe: {
     description:
       'Read the live browser guide and tool index; request method or methods for parameter schemas.',
@@ -83,19 +119,28 @@ export const toolHelp = {
   },
   find: {
     description:
-      'Find elements by CSS selector, traversing open Shadow DOM; return usable refs and state.',
-    examples: [{ selector: 'input[type="search"]' }],
+      'Find elements by CSS selector, traversing open Shadow DOM; return usable refs and state, including native video/audio playback facts in state.media.',
+    examples: [{ selector: 'input[type="search"]' }, { selector: 'video,audio' }],
     constraints: [
       'Quote CSS attribute values containing punctuation: a[href*="/comments/"] is valid; a[href*=/comments/] is not.',
     ],
   },
   inspect: {
     description:
-      'Read current element value, checked/disabled/expanded/visible/clickable state, focus, options and scrolling state. Sensitive values are hidden.',
+      'Read current control state, ariaLabel/title, focus, options and scroll. Native video/audio includes media playback facts (paused, ended, seeking, currentTime, duration, readyState, networkState, muted, volume, playbackRate, error). Sensitive values are hidden.',
+    constraints: [
+      'Use the state relevant to the goal: value for filled inputs, checked/selected/expanded for controls. A local field value does not prove a server-side save or submission.',
+      'Native media facts also appear in find matches[].state.media. Scope to the intended player/frame; an ad or unrelated preview playing does not confirm the requested content.',
+      'Media not paused, not ended, not seeking, with no error, readyState >= 3 and positive playbackRate indicates active playback with available data. If ambiguous, one subsequent inspect can confirm currentTime advances. A nonzero timestamp alone is not proof. duration is null when unknown or unbounded.',
+      'Buffering does not justify repeatedly toggling play/pause. For a custom player without native media, inspect its visible state and report uncertainty if playback cannot be verified.',
+    ],
   },
   click: {
     description: 'Click an element or viewport point using native pointer events.',
-    constraints: [targetRule],
+    constraints: [
+      targetRule,
+      'Read toggle/selection state before clicking; leave an already-correct state alone. Do not repeat clicks, saves or submissions as verification; inspect the requested outcome.',
+    ],
   },
   hover: {
     description: 'Move the pointer to an element or viewport point without clicking.',
@@ -145,6 +190,8 @@ export const toolHelp = {
       'Wait for an element, text, exact URL, page load or new task tab; return when the condition holds.',
     constraints: [
       'Use ref OR selector. attached/detached/visible/hidden/enabled/clickable/checked require one. text requires text; url requires the exact full URL. The CLI request timeout must exceed timeoutMs.',
+      'Never invent an expected URL. For a click/keypress leading to an unknown destination, use step with wait:{condition:"navigation"}; that wait captures its baseline before the action and is not available as a standalone wait.',
+      'text checks DOM text, not aria-label/title, stored form values or playback state. Use find/inspect for those facts; a missing word alone does not prove the action failed.',
     ],
     examples: [
       { condition: 'loaded' },
@@ -176,6 +223,9 @@ export function parameterSchema(schema: z.ZodTypeAny): JsonSchema {
   if (schema instanceof z.ZodDefault)
     return { ...parameterSchema(schema.removeDefault()), default: schema._def.defaultValue() };
   if (schema instanceof z.ZodEffects) return parameterSchema(schema.innerType());
+  if (schema instanceof z.ZodDiscriminatedUnion)
+    return { oneOf: schema.options.map((option: z.ZodTypeAny) => parameterSchema(option)) };
+  if (schema instanceof z.ZodLiteral) return { type: typeof schema.value, const: schema.value };
   if (schema instanceof z.ZodObject) {
     const properties: Record<string, JsonSchema> = {},
       required: string[] = [];

@@ -542,6 +542,45 @@ describe('remote background', () => {
     expect(ws.frames.find((f) => f.id === 3)).toMatchObject({ type: 'error', code: 'BLOCKED_URL' });
   });
 
+  it('records composite child progress and partial errors without persisting nested inputs', async () => {
+    const ws = await bootConnected();
+    executor.currentControl.mockReturnValue({
+      sessionId: 'task',
+      tabId: 7,
+      tabIds: [7],
+      phase: 'ready',
+    });
+    executor.execute.mockImplementation(async (command) => {
+      if (command.op === 'wait') throw Object.assign(new Error('unmet'), { code: 'WAIT_TIMEOUT' });
+      return { ran: command.op };
+    });
+    const params = {
+      action: { op: 'fill', ref: '@input', text: 'private composite input' },
+      wait: { condition: 'visible', selector: '#later', timeoutMs: 100 },
+      read: { op: 'snapshot' },
+    };
+    ws.receive({ type: 'req', id: 91, method: 'step', params, requestId: 'composite' });
+    await flush();
+    expect(ws.frames.find((f) => f.id === 91)).toMatchObject({
+      type: 'error',
+      code: 'STEP_INCOMPLETE',
+      details: { steps: [{ status: 'success' }, { status: 'error' }, { status: 'skipped' }] },
+    });
+    const chat = (await ask({ type: 'remote-state' })).value!.chat as ChatEntry[];
+    const run = chat.find((e) => e.toolRun)!.toolRun!;
+    expect(run.steps.map((s) => [s.method, s.status])).toEqual([
+      ['fill', 'success'],
+      ['wait', 'error'],
+    ]);
+    expect(run.failed).toBe(1);
+    expect(JSON.stringify(chat)).not.toContain('private composite input');
+    ws.receive({ type: 'req', id: 92, method: 'step', params, requestId: 'composite' });
+    await flush();
+    expect(ws.frames.find((f) => f.id === 92)).toMatchObject({ details: { replayed: true } });
+    expect(run.failed).toBe(1);
+    expect(executor.execute).toHaveBeenCalledTimes(2);
+  });
+
   it('carries chat both ways and persists the log', async () => {
     const ws = await bootConnected();
     ws.receive({ type: 'chat', role: 'assistant', text: '好的，我来搜', ts: 10 });

@@ -32,6 +32,12 @@ let popupQueue: Promise<unknown> = Promise.resolve();
 const newPopups: number[] = [];
 
 let generation = 0;
+// Navigation events only: ref invalidation, debugger attachment and child-frame
+// loads must not make an unchanged old page satisfy a step's navigation wait.
+let navigationRevision = 0;
+export type NavigationWatch = {
+  before?: { sessionId: string; tabId: number; url: string; revision: number };
+};
 let changed: (tab: GrantedTab | null) => void = () => {};
 function fail(code: string, message = code): never {
   throw Object.assign(new Error(message), { code });
@@ -430,6 +436,7 @@ export function initializeExecutor() {
     if (childSource.sessionId) return;
     const frame = (params as { frame?: { parentId?: string; url: string } } | undefined)?.frame;
     if (grant && method === 'Page.frameNavigated' && frame && !frame.parentId) {
+      navigationRevision++;
       cursor = null;
       invalidate();
       if (!allowed(frame.url)) refreshTaskTarget();
@@ -461,6 +468,7 @@ export function initializeExecutor() {
       return;
     }
     if (info.url) {
+      navigationRevision++;
       invalidate();
       if (!allowed(info.url)) {
         refreshTaskTarget();
@@ -584,7 +592,7 @@ async function dispatchPointer(
   });
 }
 
-export async function execute(command: Command, deadline: number) {
+export async function execute(command: Command, deadline: number, navigation?: NavigationWatch) {
   const startedOperationRevision = operationRevision;
   if (command.op === 'finalize') {
     if (Date.now() > deadline) fail('COMMAND_EXPIRED');
@@ -672,6 +680,10 @@ export async function execute(command: Command, deadline: number) {
   if (command.op === 'wait') {
     await markTask(session, 'ready');
     checkSession();
+    const before = navigation?.before;
+    if (navigation && !before) fail('BAD_PARAMS', 'Navigation wait requires a preceding action');
+    if (before && (before.sessionId !== session.sessionId || before.tabId !== session.tabId))
+      fail('STOPPED');
     const until = Math.min(deadline, Date.now() + command.timeoutMs);
     while (Date.now() < until) {
       checkSession();
@@ -686,15 +698,18 @@ export async function execute(command: Command, deadline: number) {
       } else if (command.condition === 'url' || command.condition === 'loaded') {
         const tab = await chrome.tabs.get(session.tabId);
         checkSession();
+        if (before && (!inScope(tab, session) || !inspectable(tab))) fail('TAB_NOT_GRANTED');
+        if (before && (isBlockedUrl(tab.url) || isBlockedUrl(tab.pendingUrl))) fail('BLOCKED_URL');
         if (
           inScope(tab, session) &&
           inspectable(tab) &&
           !isBlockedUrl(tab.url) &&
           tab.status === 'complete' &&
           !tab.pendingUrl &&
+          (!before || navigationRevision !== before.revision || tab.url !== before.url) &&
           (command.condition !== 'url' || tab.url === command.url)
         )
-          return { matched: true, url: tab.url };
+          return { matched: true, url: tab.url, ...(before ? { navigated: true } : {}) };
       } else {
         try {
           let matches: { ref: string; state: any }[];
@@ -792,7 +807,7 @@ export async function execute(command: Command, deadline: number) {
     checkSession();
     fail(
       'WAIT_TIMEOUT',
-      `Condition ${command.condition} did not match within ${command.timeoutMs}ms`,
+      `Condition ${before ? 'navigation' : command.condition} did not match within ${command.timeoutMs}ms`,
     );
   }
   if (command.op === 'back' || command.op === 'forward' || command.op === 'reload') {
@@ -1101,6 +1116,13 @@ export async function execute(command: Command, deadline: number) {
     }
   }
   dragData = null;
+  if (navigation)
+    navigation.before = {
+      sessionId: session.sessionId,
+      tabId: session.tabId,
+      url: lease.url,
+      revision: navigationRevision,
+    };
   try {
     return await actions.run(command);
   } catch (error) {

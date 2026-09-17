@@ -61,10 +61,31 @@ describe('extension-owned Agent reference', () => {
       const help = toolHelp[name] as { examples?: Record<string, unknown>[] };
       for (const example of help.examples || []) {
         expect(remoteParams[name].safeParse(example).success, name).toBe(true);
-        if (!['describe', 'info', 'start', 'finalize'].includes(name))
+        if (!['describe', 'info', 'start', 'finalize', 'step'].includes(name))
           expect(commandSchema.safeParse({ op: name, ...example }).success, name).toBe(true);
       }
     }
     expect(() => parameterSchema(z.date())).toThrow('No parameter exporter');
+  });
+
+  it('exports executable nested action/read alternatives for the composite tool', () => {
+    const schema = describeTools(['step']).tools[0]!.parameters as any;
+    expect(schema.required).toEqual(['action', 'read']);
+    const actions = schema.properties.action.oneOf;
+    expect(actions.find((s: any) => s.properties.op.const === 'fill')).toMatchObject({
+      required: ['ref', 'text', 'op'],
+    });
+    expect(actions.some((s: any) => s.properties.op.const === 'step')).toBe(false);
+    const navigation = schema.properties.wait.oneOf.find(
+      (s: any) => s.properties.condition.const === 'navigation',
+    );
+    expect(Object.keys(navigation.properties)).toEqual(['condition', 'timeoutMs']);
+    expect(navigation.additionalProperties).toBe(false);
+    expect(schema.properties.read.oneOf.map((s: any) => s.properties.op.const)).toEqual([
+      'snapshot',
+      'observe',
+      'find',
+      'inspect',
+    ]);
   });
 });

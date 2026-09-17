@@ -122,6 +122,13 @@ export function startRemoteBackground() {
         });
       }, 250);
     },
+    () => {
+      const control = currentControl();
+      const grant = currentGrant();
+      return control && grant?.id === control.tabId
+        ? JSON.stringify([control.sessionId, control.tabId, grant.url])
+        : undefined;
+    },
   );
   async function appendChat(entry: ChatEntry) {
     const existing =
@@ -273,7 +280,7 @@ export function startRemoteBackground() {
         const receive = async () => {
           let completion: Promise<void> | undefined;
           if (m.role === 'assistant' && m.final) {
-            preview.finish('completed');
+            preview.finish(activity.hasUnresolvedErrors() ? 'error' : 'completed');
             idem.cancel();
             activity.end('completed');
             completion = completeTask().catch(() => {
@@ -343,7 +350,10 @@ export function startRemoteBackground() {
     const reply = (frame: Record<string, unknown>) => {
       if (gen === generation) send({ id: m.id, ...frame });
     };
-    const step = activity.begin(m.method, m.params);
+    // Composite calls record their real child operations, avoiding a duplicate
+    // wrapper stage. Rejections/replays still get a diagnostic wrapper entry.
+    let step = m.method === 'step' ? undefined : activity.begin(m.method, m.params);
+    let hadParts = false;
     if (inflight.has(m.id)) {
       step?.finish('DUPLICATE_ID');
       return reply({ type: 'error', code: 'DUPLICATE_ID', message: 'id already in flight' });
@@ -377,6 +387,12 @@ export function startRemoteBackground() {
           preview.resume(m.method);
           publish();
         },
+        (method, params) => {
+          hadParts = true;
+          const child = activity.begin(method, params);
+          child?.start();
+          return child;
+        },
       );
       const replayed = !!(
         result &&
@@ -384,19 +400,24 @@ export function startRemoteBackground() {
         'replayed' in result &&
         result.replayed
       );
-      if (gen === generation && !replayed) preview.result(m.method, false);
+      if (!step && !hadParts) step = activity.begin(m.method, m.params);
       step?.finish(undefined, replayed);
+      if (gen === generation && !replayed)
+        preview.result(m.method, false, activity.hasUnresolvedErrors());
       if (m.method === 'stop' && gen === generation) step?.stop();
       reply({ type: 'resp', result });
     } catch (e) {
-      if (gen === generation) preview.result(m.method, true);
+      const replayed =
+        e instanceof RemoteError && !!(e.details as { replayed?: boolean })?.replayed;
+      if (gen === generation && !replayed) preview.result(m.method, true);
       const code =
         e instanceof z.ZodError
           ? 'BAD_PARAMS'
           : e && typeof e === 'object' && 'code' in e && typeof e.code === 'string'
             ? e.code
             : 'EXT_ERROR';
-      step?.finish(code);
+      if (!step && !hadParts) step = activity.begin(m.method, m.params);
+      step?.finish(code, replayed);
       if (e instanceof RemoteError)
         reply({ type: 'error', code: e.code, message: e.message, details: e.details });
       else if (e instanceof z.ZodError)

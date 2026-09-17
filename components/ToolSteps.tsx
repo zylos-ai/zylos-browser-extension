@@ -1,10 +1,12 @@
-import { useId, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
+import { LONG_WAIT_MS, stageLabels, summarizeTools } from '../utils/tool-progress';
 import type { TranslationKey } from '../utils/i18n';
 import type { ToolRun, ToolStep } from '../utils/remote';
 import type { RemoteMethod } from '../utils/tool-catalog';
 import { useI18n } from './LanguageProvider';
 
 const labels = {
+  step: 'toolStep',
   info: 'toolInfo',
   describe: 'toolDescribe',
   'use-current-tab': 'toolUseCurrentTab',
@@ -59,23 +61,34 @@ function duration(ms: number) {
 export function ToolSteps({ run }: { run: ToolRun }) {
   const { t } = useI18n();
   const listId = useId();
-  // A phase change resets the default, while an explicit toggle remains local
-  // to that phase. Final replies collapse even a previously expanded live run.
   const [toggle, setToggle] = useState<{ phase: ToolRun['status']; open: boolean }>();
-  const open = toggle?.phase === run.status ? toggle.open : run.status === 'running';
-  const busy = run.steps.some((step) => step.status === 'running' || step.status === 'queued');
-  const phase =
+  const open = toggle?.phase === run.status ? toggle.open : false;
+  const [, setClock] = useState(0);
+  const waitAt =
     run.status === 'running'
-      ? busy
-        ? 'activityRunning'
-        : 'activityWaiting'
-      : run.status === 'completed'
-        ? 'activityCompleted'
-        : run.status === 'stopped'
-          ? 'activityStopped'
-          : 'activityInterrupted';
+      ? Math.min(
+          ...run.steps
+            .filter((s) => s.method === 'wait' && s.status === 'running')
+            .map((s) => (s.startedAt ?? s.queuedAt) + LONG_WAIT_MS),
+        )
+      : Infinity;
+  // One timer at the long-wait boundary; no polling or extra Agent requests.
+  useEffect(() => {
+    const delay = waitAt - Date.now();
+    if (!Number.isFinite(delay) || delay < 0) return;
+    const timer = setTimeout(() => setClock((n) => n + 1), delay + 1);
+    return () => clearTimeout(timer);
+  }, [waitAt]);
+  const progress = summarizeTools(run);
+  const successful = run.status === 'completed' && !progress.hasIssues;
+  const attention = progress.hasIssues && run.status !== 'stopped';
   return (
-    <section className="tool-activity" data-status={run.status} aria-label={t('activityTitle')}>
+    <section
+      className="tool-activity"
+      data-status={run.status}
+      data-outcome={attention ? 'attention' : successful ? 'success' : undefined}
+      aria-label={t('activityTitle')}
+    >
       <button
         type="button"
         className="tool-activity-toggle"
@@ -83,24 +96,25 @@ export function ToolSteps({ run }: { run: ToolRun }) {
         aria-controls={listId}
         onClick={() => setToggle({ phase: run.status, open: !open })}
       >
-        <span
-          className={`tool-activity-icon ${busy && run.status === 'running' ? 'is-busy' : ''}`}
-          aria-hidden="true"
-        >
-          ≡
+        <span className={`tool-activity-icon ${progress.busy ? 'is-busy' : ''}`} aria-hidden="true">
+          {successful ? '✓' : attention && !progress.busy ? '!' : '≡'}
         </span>
         <span className="tool-activity-heading">
-          <span className="tool-activity-title">
-            {t('activityTitle')}{' '}
-            <span className="tool-activity-count">{t('activityCount', { count: run.total })}</span>
-          </span>
+          <span className="tool-activity-title">{t(progress.label)}</span>
           <span className="tool-activity-summary">
-            {t(phase)}
+            {t('activityTitle')}
+            {progress.stages.length > 0 && (
+              <span className="tool-activity-count">
+                {t(run.total > run.steps.length ? 'activityRecentCount' : 'activityCount', {
+                  count: progress.stages.length,
+                })}
+              </span>
+            )}
             {run.endedAt !== undefined && ` · ${duration(run.endedAt - run.startedAt)}`}
-            {run.failed > 0 && (
+            {attention && run.status === 'running' && (
               <span className="tool-activity-failures">
-                {' '}
-                · {t('activityFailures', { count: run.failed })}
+                {' · '}
+                {t('activityIssues')}
               </span>
             )}
           </span>
@@ -110,45 +124,80 @@ export function ToolSteps({ run }: { run: ToolRun }) {
         </span>
       </button>
       <div id={listId} hidden={!open} className="tool-activity-body">
-        {run.total > run.steps.length && (
-          <p className="tool-activity-note">
-            {t('activityOmitted', {
-              count: run.steps.length,
-              omitted: run.total - run.steps.length,
-            })}
-          </p>
+        {progress.stages.length === 0 && (
+          <p className="tool-activity-note">{t('activityNoStages')}</p>
         )}
-        <ol className="tool-step-list" aria-label={t('activityTitle')}>
-          {run.steps.map((step) => (
-            <li key={step.id} className="tool-step" data-status={step.status}>
+        {progress.omittedErrors > 0 && (
+          <p className="tool-activity-failures tool-activity-note">{t('activityEarlierIssues')}</p>
+        )}
+        <ol className="tool-step-list tool-stage-list" aria-label={t('activityStages')}>
+          {progress.stages.map((stage, index) => (
+            <li key={stage.id} className="tool-step tool-stage" data-status={stage.status}>
               <span className="tool-step-marker" aria-hidden="true">
-                {step.status === 'success' ? '✓' : step.status === 'error' ? '!' : step.number}
+                {stage.status === 'success' ? '✓' : stage.status === 'error' ? '!' : index + 1}
               </span>
               <div className="tool-step-content">
                 <div className="tool-step-heading">
-                  <span className="tool-step-label">
-                    {Object.hasOwn(labels, step.method)
-                      ? t(labels[step.method as RemoteMethod])
-                      : step.method}
+                  <span className="tool-step-label">{t(stageLabels[stage.kind])}</span>
+                  <span className="tool-step-status">
+                    {t(stage.status === 'error' ? 'stageIssue' : statuses[stage.status])}
                   </span>
-                  <span className="tool-step-status">{t(statuses[step.status])}</span>
                 </div>
-                <p className="tool-step-detail">
-                  <code>{step.method}</code>
-                  {step.endedAt !== undefined &&
-                    ` · ${duration(step.endedAt - (step.startedAt ?? step.queuedAt))}`}
-                  {step.replayed && ` · ${t('stepReplayed')}`}
-                </p>
-                {step.target && (
-                  <p className="tool-step-target" title={step.target}>
-                    {step.target}
+                {stage.target && (
+                  <p className="tool-step-target" title={stage.target}>
+                    {stage.target}
                   </p>
                 )}
-                {step.errorCode && <p className="tool-step-error">{step.errorCode}</p>}
               </div>
             </li>
           ))}
         </ol>
+        <details className="tool-diagnostics" key={run.status}>
+          <summary>
+            {t('activityLog')} · {t('activityCalls', { count: run.total })}
+          </summary>
+          {run.total > run.steps.length && (
+            <p className="tool-activity-note">
+              {t('activityOmitted', {
+                count: run.steps.length,
+                omitted: run.total - run.steps.length,
+              })}
+            </p>
+          )}
+          <ol className="tool-step-list tool-raw-list" aria-label={t('activityLog')}>
+            {run.steps.map((step) => (
+              <li key={step.id} className="tool-step tool-log-step" data-status={step.status}>
+                <span className="tool-step-marker" aria-hidden="true">
+                  {step.status === 'success' ? '✓' : step.status === 'error' ? '!' : step.number}
+                </span>
+                <div className="tool-step-content">
+                  <div className="tool-step-heading">
+                    <span className="tool-step-label">
+                      {Object.hasOwn(labels, step.method)
+                        ? t(labels[step.method as RemoteMethod])
+                        : step.method}
+                    </span>
+                    <span className="tool-step-status">
+                      {t(step.recovered ? 'stepRecovered' : statuses[step.status])}
+                    </span>
+                  </div>
+                  <p className="tool-step-detail">
+                    <code>{step.method}</code>
+                    {step.endedAt !== undefined &&
+                      ` · ${duration(step.endedAt - (step.startedAt ?? step.queuedAt))}`}
+                    {step.replayed && ` · ${t('stepReplayed')}`}
+                  </p>
+                  {step.target && (
+                    <p className="tool-step-target" title={step.target}>
+                      {step.target}
+                    </p>
+                  )}
+                  {step.errorCode && <p className="tool-step-error">{step.errorCode}</p>}
+                </div>
+              </li>
+            ))}
+          </ol>
+        </details>
       </div>
     </section>
   );

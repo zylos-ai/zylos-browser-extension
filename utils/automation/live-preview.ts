@@ -108,9 +108,10 @@ export class LivePreview {
     if (!this.stream) this.attempted = null;
   }
 
-  result(method: string, failed: boolean) {
+  result(method: string, failed: boolean, unresolvedErrors = false) {
     if (!PASSIVE.has(method)) this.lastFailed = failed;
-    if (!failed && ['finish', 'finalize'].includes(method)) this.finish('completed');
+    if (!failed && ['finish', 'finalize'].includes(method))
+      this.finish(unresolvedErrors ? 'error' : 'completed');
     if (!failed && method === 'stop') this.finish('stopped');
   }
 

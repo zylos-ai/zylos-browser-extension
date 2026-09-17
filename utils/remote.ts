@@ -39,6 +39,7 @@ export const toolStepSchema = z.object({
   endedAt: z.number().optional(),
   errorCode: z.string().max(64).optional(),
   replayed: z.boolean().optional(),
+  recovered: z.boolean().optional(),
 });
 export const toolRunSchema = z.object({
   status: z.enum(['running', 'completed', 'stopped', 'interrupted']),
@@ -46,6 +47,7 @@ export const toolRunSchema = z.object({
   endedAt: z.number().optional(),
   total: z.number().int(),
   failed: z.number().int(),
+  recovered: z.number().int().nonnegative().optional(),
   steps: z.array(toolStepSchema).max(TOOL_STEPS_CAP),
 });
 export type ToolStep = z.infer<typeof toolStepSchema>;

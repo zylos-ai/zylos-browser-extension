@@ -95,3 +95,77 @@ test('inspect returns control state and redacts secrets; writing password or OTP
   expect(state.checked).toBe(true);
   expect(state.disabled).toBe(true);
 });
+
+test('media inspection reports playback changes without operating the player or exposing its URL', () => {
+  const video = document.createElement('video');
+  video.src = 'https://example.test/private-video?token=secret';
+  document.body.append(video);
+  const play = vi.spyOn(video, 'play');
+  const pause = vi.spyOn(video, 'pause');
+  let paused = false;
+  Object.defineProperties(video, {
+    paused: { get: () => paused },
+    currentTime: { value: 12.5 },
+    duration: { value: 60 },
+    readyState: { value: 4 },
+    networkState: { value: 1 },
+  });
+  expect(action.call(video, 'inspect')).toMatchObject({
+    media: {
+      paused: false,
+      ended: false,
+      seeking: false,
+      currentTime: 12.5,
+      duration: 60,
+      readyState: 4,
+      networkState: 1,
+      muted: false,
+      volume: 1,
+      playbackRate: 1,
+      error: null,
+    },
+  });
+  paused = true;
+  const state = action.call(video, 'inspect');
+  expect(state).toMatchObject({ media: { paused: true } });
+  expect(JSON.stringify(state)).not.toContain('private-video');
+  expect(JSON.stringify(state)).not.toContain('secret');
+  expect(play).not.toHaveBeenCalled();
+  expect(pause).not.toHaveBeenCalled();
+});
+
+test.each([
+  { duration: NaN, readyState: 0, ended: false, error: null },
+  { duration: Infinity, readyState: 2, ended: false, error: null },
+  { duration: 60, readyState: 4, ended: true, error: null },
+  { duration: NaN, readyState: 0, ended: false, error: { code: 4 } },
+])('media inspection preserves loading, ended and error facts: %j', (facts) => {
+  const audio = document.createElement('audio');
+  document.body.append(audio);
+  for (const [key, value] of Object.entries(facts)) Object.defineProperty(audio, key, { value });
+  expect(action.call(audio, 'inspect')).toMatchObject({
+    media: { ...facts, duration: Number.isFinite(facts.duration) ? facts.duration : null },
+  });
+});
+
+test('media in another frame is inspected in its own realm', () => {
+  const frame = document.createElement('iframe');
+  document.body.append(frame);
+  const video = frame.contentDocument!.createElement('video');
+  frame.contentDocument!.body.append(video);
+  expect(video instanceof HTMLMediaElement).toBe(false);
+  expect(action.call(video, 'inspect')).toMatchObject({ media: { paused: true, readyState: 0 } });
+});
+
+test('icon controls expose bounded labels without pretending to be native media', () => {
+  const button = document.createElement('button');
+  button.setAttribute('aria-label', 'Pause');
+  button.title = 'x'.repeat(600);
+  document.body.append(button);
+  expect(action.call(button, 'inspect')).toMatchObject({
+    text: '',
+    ariaLabel: 'Pause',
+    title: 'x'.repeat(512),
+    media: undefined,
+  });
+});

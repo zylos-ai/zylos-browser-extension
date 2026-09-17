@@ -62,6 +62,19 @@ function cdpClient(ws) {
     });
 }
 function fixture(url, port) {
+  if (url.startsWith('/media'))
+    return `<!doctype html><title>Native media playback fixture</title>
+    <video id="player" muted playsinline width="320" height="180"></video>
+    <button id="play-toggle" aria-label="Play" title="Play" data-clicks="0">Toggle</button>
+    <script>
+    const canvas=document.createElement('canvas');canvas.width=320;canvas.height=180;
+    const ctx=canvas.getContext('2d');let frame=0;
+    setInterval(()=>{ctx.fillStyle=frame++%2?'#7856bb':'#37a177';ctx.fillRect(0,0,320,180);ctx.fillStyle='white';ctx.fillText(String(frame),30,30)},50);
+    const player=document.querySelector('#player'),toggle=document.querySelector('#play-toggle');
+    player.srcObject=canvas.captureStream(20);
+    toggle.onclick=async()=>{toggle.dataset.clicks=String(+toggle.dataset.clicks+1);if(player.paused)await player.play();else player.pause()};
+    for(const event of ['play','pause'])player.addEventListener(event,()=>{toggle.ariaLabel=toggle.title=player.paused?'Play':'Pause'});
+    </script>`;
   if (url.startsWith('/preview'))
     return `<!doctype html><title>Research board · Live preview</title>
     <style>body{margin:0;padding:48px;font:20px system-ui;background:#f6f3fa;color:#2c2033}header{font-size:18px;color:#8064a1}h1{font-size:42px;margin:28px 0 8px}.cards{display:flex;gap:24px;margin-top:36px}.card{padding:28px;background:white;border-radius:20px;flex:1;box-shadow:0 8px 24px #29113608}.bar{height:12px;border-radius:8px;background:#b997eb;margin-top:20px;transform-origin:left;animation:progress 2s infinite alternate ease-in-out}@keyframes progress{from{transform:scaleX(.1)}to{transform:scaleX(1)}}.tag{font-size:14px;color:#826996}</style>
@@ -91,6 +104,12 @@ body{font:16px sans-serif;margin:20px}button,input,select{margin:5px;padding:8px
 <button id="dialog" onclick="document.querySelector('#dialog-result').textContent=confirm('Fixture confirm?')?'Accepted':'Dismissed'">Confirm</button><span id="dialog-result"></span>
 <button id="prompt" onclick="document.querySelector('#dialog-result').textContent=prompt('Fixture prompt?','default')">Prompt</button>
 <button id="schedule" onclick="setTimeout(()=>{let b=document.createElement('button');b.id='late';b.textContent='Ready';document.body.append(b)},300)">Schedule</button>
+<button id="delayed-next" onclick="setTimeout(()=>location.href='/next',450)">Delayed navigation</button>
+<a id="redirect-next" href="/redirect">Redirect navigation</a>
+<button id="same-url-reload" onclick="sessionStorage.setItem('reload-proof','yes');location.reload()">Reload same URL</button>
+<button id="frame-only" onclick="document.querySelector('iframe').src='/frame?changed=1'">Frame navigation only</button>
+<button id="delayed-blocked" onclick="setTimeout(()=>location.href='/checkout',450)">Blocked destination</button>
+<form action="/next"><input id="submit-input" name="q" aria-label="Submit query"></form>
 <a id="popup" href="/popup" target="_blank">Open popup</a><a id="next" href="/next">Next</a>
 <a id="spa" href="/spa" onclick="event.preventDefault();history.pushState({},'',this.href);this.textContent='SPA opened'">Open SPA</a>
 <iframe title="Same origin" src="/frame"></iframe><iframe title="Cross origin" src="http://localhost:${port}/frame"></iframe>
@@ -98,6 +117,11 @@ body{font:16px sans-serif;margin:20px}button,input,select{margin:5px;padding:8px
 }
 try {
   site = http.createServer((req, res) => {
+    if (req.url === '/redirect') {
+      res.writeHead(302, { location: '/next?actual=redirected' });
+      res.end();
+      return;
+    }
     res.setHeader('content-type', 'text/html');
     res.end(fixture(req.url, site.address().port));
   });
@@ -106,6 +130,9 @@ try {
   relay = await start({
     extPort: 0,
     agentPort: 0,
+    monitor: true,
+    monitorFile: path.join(profile, 'monitor.json'),
+    agentMonitorDir: null,
     outboxFile: path.join(profile, 'chat-outbox.json'),
     onChat: async (message) => {
       chatMessages.push(message);
@@ -245,6 +272,7 @@ try {
     if (!body.ok)
       throw Object.assign(new Error(`${method}: ${body.code}: ${body.message}`), {
         code: body.code,
+        details: body.details,
       });
     return body.result;
   }
@@ -433,6 +461,311 @@ try {
       );
     },
   );
+  await check('one round trip opens, waits and observes; child steps remain visible', async () => {
+    await previewPanel("chrome.runtime.sendMessage({type:'remote-chat-clear'})");
+    const separateStart = performance.now();
+    await rpc('open', { url });
+    await rpc('wait', { condition: 'loaded' });
+    const separate = await rpc('snapshot', { interactive: true });
+    const separateMs = performance.now() - separateStart;
+    const combinedStart = performance.now();
+    const combined = await rpc('step', {
+      action: { op: 'open', url },
+      read: { op: 'snapshot', interactive: true },
+    });
+    const combinedMs = performance.now() - combinedStart;
+    assert.equal(combined.completed, true);
+    assert.deepEqual(
+      combined.steps.map((s) => [s.method, s.status]),
+      [
+        ['open', 'success'],
+        ['wait', 'success'],
+        ['snapshot', 'success'],
+      ],
+    );
+    assert(separate.text.includes('Browser actions fixture'));
+    assert(combined.steps.at(-1).result.text.includes('Browser actions fixture'));
+    await eventually(() => previewPanel("document.querySelectorAll('.tool-log-step').length >= 6"));
+    assert.deepEqual(
+      await previewPanel(
+        "[...document.querySelectorAll('.tool-step-detail code')].slice(-3).map(e=>e.textContent)",
+      ),
+      ['open', 'wait', 'snapshot'],
+    );
+    console.log(
+      'COMPARISON',
+      JSON.stringify({
+        workflow: 'open/wait/snapshot',
+        separate: { rpcCalls: 3, ms: Math.round(separateMs) },
+        combined: { rpcCalls: 1, ms: Math.round(combinedMs) },
+        includesAgentInference: false,
+      }),
+    );
+  });
+  await check(
+    'composite input reads its result and delayed navigation needs no destination URL',
+    async () => {
+      const input = await find('#input');
+      const filled = await rpc('step', {
+        action: { op: 'fill', ref: input, text: 'one call' },
+        read: { op: 'inspect', ref: input },
+      });
+      assert.equal(filled.steps.at(-1).result.value, 'one call');
+      const result = await rpc('step', {
+        action: { op: 'click', ref: await find('#delayed-next') },
+        wait: { condition: 'navigation', timeoutMs: 5000 },
+        read: { op: 'find', selector: '#next' },
+      });
+      assert.equal(result.steps.at(-1).result.matches[0].state.text, 'Next page');
+      assert.equal(result.steps[1].result.url, url + 'next');
+      assert.equal(result.steps[1].result.navigated, true);
+    },
+  );
+  await check(
+    'navigation wait follows the actual redirect and observes its destination',
+    async () => {
+      await rpc('step', { action: { op: 'open', url }, read: { op: 'snapshot' } });
+      const result = await rpc('step', {
+        action: { op: 'click', ref: await find('#redirect-next') },
+        wait: { condition: 'navigation', timeoutMs: 5000 },
+        read: { op: 'snapshot' },
+      });
+      assert.equal(result.steps[1].result.url, url + 'next?actual=redirected');
+      assert(result.steps.at(-1).result.text.includes('Title: Next page'));
+    },
+  );
+  await check('navigation wait recognizes SPA changes and same-URL document reloads', async () => {
+    await rpc('step', { action: { op: 'open', url }, read: { op: 'snapshot' } });
+    const spa = await rpc('step', {
+      action: { op: 'click', ref: await find('#spa') },
+      wait: { condition: 'navigation', timeoutMs: 3000 },
+      read: { op: 'find', selector: '#spa' },
+    });
+    assert.equal(spa.steps[1].result.url, url + 'spa');
+    assert.equal(spa.steps.at(-1).result.matches[0].state.text, 'SPA opened');
+    const reload = await rpc('step', {
+      action: { op: 'click', ref: await find('#same-url-reload') },
+      wait: { condition: 'navigation', timeoutMs: 3000 },
+      read: { op: 'find', selector: '#spa' },
+    });
+    assert.equal(reload.steps[1].result.url, url + 'spa');
+    assert.equal(reload.steps.at(-1).result.matches[0].state.text, 'Open SPA');
+  });
+  await check(
+    'Enter submission waits for its real destination without predicting a query',
+    async () => {
+      const result = await rpc('step', {
+        action: { op: 'keypress', ref: await find('#submit-input'), key: 'Enter' },
+        wait: { condition: 'navigation', timeoutMs: 3000 },
+        read: { op: 'find', selector: '#next' },
+      });
+      assert.equal(result.steps[1].result.url, url + 'next?q=');
+      assert.equal(result.steps.at(-1).result.matches[0].state.text, 'Next page');
+    },
+  );
+  await check(
+    'an unchanged loaded page and child-frame navigation cannot satisfy navigation wait',
+    async () => {
+      await rpc('step', { action: { op: 'open', url }, read: { op: 'snapshot' } });
+      for (const selector of ['#click', '#frame-only']) {
+        const failure = await rpc('step', {
+          action: { op: 'click', ref: await find(selector) },
+          wait: { condition: 'navigation', timeoutMs: 500 },
+          read: { op: 'snapshot' },
+        }).catch((e) => e);
+        assert.equal(failure.code, 'STEP_INCOMPLETE');
+        assert.deepEqual(
+          failure.details.steps.map((s) => s.status),
+          ['success', 'error', 'skipped'],
+        );
+        assert.equal(failure.details.steps[1].error.code, 'WAIT_TIMEOUT');
+      }
+      assert.equal((await state('#click')).text, 'Clicked 1');
+    },
+  );
+  await check(
+    'navigation wait still enforces destination guards and can be interrupted',
+    async () => {
+      const blocked = await rpc('step', {
+        action: { op: 'click', ref: await find('#delayed-blocked') },
+        wait: { condition: 'navigation', timeoutMs: 3000 },
+        read: { op: 'snapshot' },
+      }).catch((e) => e);
+      assert.equal(blocked.code, 'STEP_INCOMPLETE');
+      assert.equal(blocked.details.steps[1].error.code, 'BLOCKED_URL');
+      assert.equal(blocked.details.steps[2].status, 'skipped');
+      await rpc('stop');
+      await rpc('step', { action: { op: 'open', url }, read: { op: 'snapshot' } });
+      const active = rpc('step', {
+        action: { op: 'click', ref: await find('#click') },
+        wait: { condition: 'navigation', timeoutMs: 10000 },
+        read: { op: 'snapshot' },
+      }).catch((e) => e);
+      await eventually(() =>
+        previewPanel(
+          "[...document.querySelectorAll('.tool-log-step[data-status=running] .tool-step-detail code')].some(e=>e.textContent==='wait')",
+        ),
+      );
+      await rpc('pause');
+      const stopped = await active;
+      assert.equal(stopped.code, 'STEP_INCOMPLETE');
+      assert.equal(stopped.details.steps[1].error.code, 'STOPPED');
+      assert.equal(stopped.details.steps[2].status, 'skipped');
+    },
+  );
+  await check(
+    'a failed wait preserves its click and retries never duplicate the completed action',
+    async () => {
+      await rpc('step', { action: { op: 'open', url }, read: { op: 'snapshot' } });
+      const ref = await find('#click');
+      const params = {
+        action: { op: 'click', ref },
+        wait: { condition: 'visible', selector: '#never', timeoutMs: 250 },
+        read: { op: 'snapshot' },
+      };
+      const options = { requestId: 'e2e-composite-partial' };
+      const failed = await rpc('step', params, options).catch((e) => e);
+      assert.equal(failed.code, 'STEP_INCOMPLETE');
+      assert.deepEqual(
+        failed.details.steps.map((s) => s.status),
+        ['success', 'error', 'skipped'],
+      );
+      assert.equal(failed.details.steps[1].error.code, 'WAIT_TIMEOUT');
+      const retry = await rpc('step', params, options).catch((e) => e);
+      assert.equal(retry.details.replayed, true);
+      assert.equal((await state('#click')).text, 'Clicked 1');
+      const valid = { action: { op: 'click', ref }, read: { op: 'inspect', ref } };
+      const first = await rpc('step', valid, { requestId: 'e2e-composite-success' });
+      assert.equal(first.steps.at(-1).result.text, 'Clicked 2');
+      assert.equal(
+        (await rpc('step', valid, { requestId: 'e2e-composite-success' })).replayed,
+        true,
+      );
+      assert.equal((await state('#click')).text, 'Clicked 2');
+    },
+  );
+  await check('stopping a composite wait cancels the observation and queued writes', async () => {
+    const input = await find('#input');
+    const active = rpc('step', {
+      action: { op: 'fill', ref: input, text: 'before stop' },
+      wait: { condition: 'visible', selector: '#never', timeoutMs: 10000 },
+      read: { op: 'snapshot' },
+    }).catch((e) => e);
+    await eventually(() =>
+      previewPanel(
+        "!!document.querySelector('.tool-log-step[data-status=running] .tool-step-detail code') && [...document.querySelectorAll('.tool-log-step[data-status=running] .tool-step-detail code')].some(e=>e.textContent==='wait')",
+      ),
+    );
+    const queued = rpc('fill', { ref: input, text: 'must not execute' }).catch((e) => e);
+    await eventually(() =>
+      previewPanel("!!document.querySelector('.tool-log-step[data-status=queued]')"),
+    );
+    await rpc('pause');
+    const stopped = await active;
+    assert.equal(stopped.code, 'STEP_INCOMPLETE');
+    assert.equal(stopped.details.steps[1].error.code, 'STOPPED');
+    assert.equal(stopped.details.steps[2].status, 'skipped');
+    assert.equal((await queued).code, 'STOPPED');
+    assert.equal((await state('#input')).value, 'before stop');
+    const tab = (await rpc('info')).control.tabId;
+    await rpc('finish');
+    await previewPanel(`chrome.tabs.remove(${tab})`);
+    await previewPanel("chrome.runtime.sendMessage({type:'remote-chat-clear'})");
+  });
+  await check(
+    'Monitor expands composite stages including executed, failed and skipped parts',
+    async () => {
+      const { targetId: monitorTarget } = await cdp('Target.createTarget', {
+        url: rpcUrl + '/monitor/',
+      });
+      const { sessionId: monitorSession } = await cdp('Target.attachToTarget', {
+        targetId: monitorTarget,
+        flatten: true,
+      });
+      await eventually(
+        async () =>
+          (
+            await cdp(
+              'Runtime.evaluate',
+              {
+                expression: `[...document.querySelectorAll('.compound-parts')].some(list=>list.textContent.includes('wait · 失败') && list.textContent.includes('snapshot · 未执行'))`,
+                returnByValue: true,
+              },
+              monitorSession,
+            )
+          ).result.value,
+      );
+      await cdp(
+        'Runtime.evaluate',
+        {
+          expression:
+            "for (const list of document.querySelectorAll('.compound-parts')) list.closest('details').open=true",
+        },
+        monitorSession,
+      );
+      await cdp('Target.closeTarget', { targetId: monitorTarget });
+    },
+  );
+  await check(
+    'native media can be verified without repeated toggles and keeps playing after the final reply',
+    async () => {
+      const opened = await rpc('open', { url: url + 'media' });
+      await rpc('wait', { condition: 'loaded' });
+      const initial = (await rpc('find', { selector: '#player' })).matches[0];
+      assert.equal(initial.state.media.paused, true);
+      const toggle = await find('#play-toggle');
+      await rpc('click', { ref: toggle });
+      const playing = await eventually(async () => {
+        const match = (await rpc('find', { selector: 'video,audio' })).matches[0];
+        return !match.state.media.paused && match.state.media.readyState >= 3 && match;
+      });
+      assert.equal(playing.state.media.ended, false);
+      assert.equal(playing.state.media.error, null);
+      assert.equal(playing.state.media.duration, null, 'live streams have unbounded duration');
+      await eventually(async () => {
+        const next = await rpc('inspect', { ref: playing.ref });
+        return next.media.currentTime > playing.state.media.currentTime;
+      });
+      assert.equal((await rpc('inspect', { ref: toggle })).ariaLabel, 'Pause');
+      const target = (await cdp('Target.getTargets')).targetInfos.find(
+        (t) => t.type === 'page' && t.url === url + 'media',
+      );
+      const { sessionId: mediaSession } = await cdp('Target.attachToTarget', {
+        targetId: target.targetId,
+        flatten: true,
+      });
+      const mediaFacts = async () =>
+        (
+          await cdp(
+            'Runtime.evaluate',
+            {
+              expression: `({paused:document.querySelector('#player').paused,
+            time:document.querySelector('#player').currentTime,
+            clicks:Number(document.querySelector('#play-toggle').dataset.clicks)})`,
+              returnByValue: true,
+            },
+            mediaSession,
+          )
+        ).result.value;
+      const before = await mediaFacts();
+      const response = await fetch(rpcUrl + '/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text: 'Playback verified', final: true }),
+      });
+      assert.equal((await response.json()).ok, true);
+      await eventually(async () => (await rpc('info')).control === null);
+      const after = await eventually(async () => {
+        const facts = await mediaFacts();
+        return facts.time > before.time && facts;
+      });
+      assert.equal(after.paused, false);
+      assert.equal(after.clicks, 1, 'observations and task completion never toggle playback');
+      await cdp('Target.detachFromTarget', { sessionId: mediaSession });
+      await previewPanel(`chrome.tabs.remove(${opened.tabId})`);
+      await previewPanel("chrome.runtime.sendMessage({type:'remote-chat-clear'})");
+    },
+  );
   await check('sidebar renders and sends/receives chat through the relay', async () => {
     await eventually(
       async () =>
@@ -614,7 +947,7 @@ try {
     },
   );
   await check(
-    'inline tool steps show queued/running/results, collapse on final reply, and survive panel reload',
+    'compact progress groups tools, preserves diagnostics, flags unresolved errors and survives reload',
     async () => {
       const panel = async (expression) => {
         const result = await cdp(
@@ -644,34 +977,54 @@ try {
         chatMessages.some((m) => m.text === '打开示例网页，读取内容并查找按钮。'),
       );
       const opened = await rpc('open', { url });
+      await rpc('info');
+      await rpc('describe');
+      await rpc('snapshot');
       await rpc('snapshot');
       const waiting = rpc('wait', {
         condition: 'visible',
         selector: '#never',
         timeoutMs: 4000,
       }).catch((e) => e);
-      await eventually(() => panel("!!document.querySelector('.tool-step[data-status=running]')"));
+      await eventually(() =>
+        panel("!!document.querySelector('.tool-log-step[data-status=running]')"),
+      );
       const queued = rpc('find', { selector: '#click' });
-      await eventually(() => panel("!!document.querySelector('.tool-step[data-status=queued]')"));
+      await eventually(() =>
+        panel("!!document.querySelector('.tool-log-step[data-status=queued]')"),
+      );
       assert.equal(
         await panel(
           "document.querySelector('.tool-activity-toggle').getAttribute('aria-expanded')",
         ),
-        'true',
+        'false',
       );
       assert.equal(
         await panel(
           "getComputedStyle(document.querySelector('.tool-activity-body')).display === 'none'",
         ),
-        false,
+        true,
       );
       assert.equal(await panel('document.documentElement.scrollWidth > innerWidth'), false);
+      await eventually(() =>
+        panel(
+          "document.querySelector('.tool-activity-title').textContent.includes('等待页面响应')",
+        ),
+      );
+      assert.equal(await panel("document.querySelector('.tool-diagnostics').open"), false);
       await screenshot('steps-live');
+      await panel("document.querySelector('.tool-activity-toggle').click()");
+      await eventually(() => panel("!document.querySelector('.tool-activity-body').hidden"));
+      assert.equal(
+        await panel("document.querySelector('.tool-stage-list').textContent.includes('snapshot')"),
+        false,
+      );
+      await screenshot('steps-live-expanded');
       assert.equal((await waiting).code, 'WAIT_TIMEOUT');
       await queued;
       await eventually(() =>
         panel(
-          "document.querySelector('.tool-step[data-status=error]')?.textContent.includes('WAIT_TIMEOUT')",
+          "document.querySelector('.tool-log-step[data-status=error]')?.textContent.includes('WAIT_TIMEOUT')",
         ),
       );
       const reply = await fetch(rpcUrl + '/chat', {
@@ -695,6 +1048,9 @@ try {
         ),
         true,
       );
+      await eventually(() =>
+        panel("document.querySelector('.live-preview')?.dataset.status === 'error'"),
+      );
       await screenshot('steps-collapsed');
       await panel("document.querySelector('.tool-activity-toggle').click()");
       assert.equal(
@@ -707,16 +1063,32 @@ try {
         await panel(
           "[...document.querySelectorAll('.tool-step-detail code')].map((el)=>el.textContent)",
         ),
-        ['open', 'snapshot', 'wait', 'find'],
+        ['open', 'info', 'describe', 'snapshot', 'snapshot', 'wait', 'find'],
       );
+      assert.equal(await panel("document.querySelectorAll('.tool-stage').length"), 4);
+      assert.equal(
+        await panel("document.querySelector('.tool-activity').dataset.outcome"),
+        'attention',
+      );
+      assert.equal(
+        await panel(
+          "document.querySelector('.tool-stage-list').textContent.includes('WAIT_TIMEOUT')",
+        ),
+        false,
+      );
+      assert.equal(await panel("document.querySelector('.tool-diagnostics').open"), false);
       await screenshot('steps-expanded');
+      await panel("document.querySelector('.tool-diagnostics summary').click()");
+      assert.equal(await panel("document.querySelector('.tool-diagnostics').open"), true);
+      await screenshot('steps-diagnostics');
       await cdp('Page.reload', {}, sessionId);
       await eventually(() =>
         panel(
           "document.querySelector('.tool-activity-toggle')?.getAttribute('aria-expanded') === 'false'",
         ),
       );
-      assert.equal(await panel("document.querySelectorAll('.tool-step').length"), 4);
+      assert.equal(await panel("document.querySelectorAll('.tool-log-step').length"), 7);
+      assert.equal(await panel("document.querySelector('.tool-diagnostics').open"), false);
       await panel("document.querySelector('.tool-activity-toggle').click()");
       assert.equal(
         await panel(
@@ -727,6 +1099,50 @@ try {
       await panel(`chrome.tabs.remove(${opened.tabId})`);
       await panel("chrome.runtime.sendMessage({type:'remote-chat-clear'})");
       await panel("chrome.storage.local.set({uiLanguage:'auto'})");
+    },
+  );
+  await check(
+    'a confirmed retry clears the progress warning and retains the original failure in diagnostics',
+    async () => {
+      await previewPanel("chrome.runtime.sendMessage({type:'remote-chat-clear'})");
+      const opened = await rpc('open', { url });
+      await rpc('wait', { condition: 'loaded' });
+      const params = { condition: 'visible', selector: '#late', timeoutMs: 200 };
+      await assert.rejects(rpc('wait', params), (error) => error.code === 'WAIT_TIMEOUT');
+      await eventually(() =>
+        previewPanel("document.querySelector('.tool-activity')?.dataset.outcome === 'attention'"),
+      );
+      await rpc('click', { ref: await find('#schedule') });
+      // The fixture inserts the element after 300 ms; retry the exact same request.
+      await sleep(350);
+      await rpc('wait', params);
+      await eventually(() =>
+        previewPanel("document.querySelector('.tool-activity')?.dataset.outcome !== 'attention'"),
+      );
+      await fetch(rpcUrl + '/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text: 'Retry fixture completed', final: true }),
+      });
+      await eventually(() =>
+        previewPanel("document.querySelector('.tool-activity')?.dataset.outcome === 'success'"),
+      );
+      await previewPanel("document.querySelector('.tool-activity-toggle').click()");
+      await previewPanel("document.querySelector('.tool-diagnostics summary').click()");
+      assert.equal(
+        await previewPanel(
+          "!!document.querySelector('.tool-log-step[data-status=error] .tool-step-error')",
+        ),
+        true,
+      );
+      assert.equal(
+        await previewPanel(
+          "document.querySelector('.tool-log-step[data-status=error] .tool-step-status').textContent.includes('成功') || document.querySelector('.tool-log-step[data-status=error] .tool-step-status').textContent.includes('succeeded')",
+        ),
+        true,
+      );
+      await previewPanel(`chrome.tabs.remove(${opened.tabId})`);
+      await previewPanel("chrome.runtime.sendMessage({type:'remote-chat-clear'})");
     },
   );
   await check(
