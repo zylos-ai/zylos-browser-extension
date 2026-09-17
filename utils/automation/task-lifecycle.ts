@@ -84,7 +84,10 @@ export async function cleanupTask(taskId: string, keep: number[] = [], recovery 
     r.pending = true;
     for (const t of r.tabs) if (keep.includes(t.id)) t.keep = true;
     await save(); // Persist the keep decision before any destructive operation.
-    if (r.browser !== browser || (recovery && r.groupId === null)) {
+    if (
+      (r.browser !== browser || (recovery && r.groupId === null)) &&
+      r.tabs.some((t) => t.owned)
+    ) {
       throw Object.assign(new Error(warning), { code: 'CLEANUP_PENDING' });
     }
     const closed: number[] = [],
@@ -96,6 +99,11 @@ export async function cleanupTask(taskId: string, keep: number[] = [], recovery 
     for (const t of r.tabs) {
       const tab = existing.find((v) => v.id === t.id);
       if (!tab) continue;
+      // Borrowed user pages keep their original group and lifetime, even on stop/recovery.
+      if (!t.owned) {
+        retained.push(t.id);
+        continue;
+      }
       if (tab.windowId !== r.windowId || (r.groupId !== null && tab.groupId !== r.groupId)) {
         handedOff.push(t.id);
         continue; // User moved it: relinquish ownership, never chase it.

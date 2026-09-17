@@ -7,6 +7,7 @@ import { actionParams, commandSchema, type Command } from './commands';
 import { isBlockedUrl } from './guard';
 import { createTask, currentControl, currentGrant, execute } from './automation/executor';
 import { REMOTE_VERSION } from './remote';
+import { usePageContext, clearPageContexts } from './page-context';
 import {
   remoteParams as paramSchemas,
   REMOTE_METHODS,
@@ -18,6 +19,7 @@ export { REMOTE_METHODS, type RemoteMethod } from './tool-catalog';
 // Retried mutating calls replay their recorded answer instead of clicking twice.
 const IDEMPOTENT_METHODS = new Set<RemoteMethod>([
   'start',
+  'use-current-tab',
   'open',
   'new-tab',
   'switch-tab',
@@ -77,6 +79,7 @@ export const REMOTE_CAPABILITIES = [
   'wait-v1',
   'chat-ack-v1',
   'tool-catalog-v1',
+  'current-page-v1',
 ];
 
 export class RemoteError extends Error {
@@ -196,13 +199,22 @@ export type Dispatch = {
   keyId: string;
 };
 
-export function dispatch(req: Dispatch, idem: IdempotencyCache): Promise<unknown> {
-  return idem.run(req, (assertActive) => dispatchNow(req, idem, assertActive));
+export function dispatch(
+  req: Dispatch,
+  idem: IdempotencyCache,
+  onStart?: () => void,
+  onExecute?: () => void,
+): Promise<unknown> {
+  return idem.run(req, (assertActive) => {
+    onStart?.();
+    return dispatchNow(req, idem, assertActive, onExecute);
+  });
 }
 async function dispatchNow(
   req: Dispatch,
   idem: IdempotencyCache,
   assertActive: () => void,
+  onExecute?: () => void,
 ): Promise<unknown> {
   const method = req.method as RemoteMethod;
   const schema = Object.hasOwn(paramSchemas, method) ? paramSchemas[method] : undefined;
@@ -246,8 +258,14 @@ async function dispatchNow(
     }
   }
 
+  // Only actual execution may resume a completed preview. Cache replays and
+  // rejected requests must not restart its stream or change its terminal state.
+  onExecute?.();
   let result: unknown;
   switch (method) {
+    case 'use-current-tab':
+      result = await usePageContext(params.contextId as string, assertActive);
+      break;
     case 'describe': {
       if (params.method && params.methods) fail('BAD_PARAMS', 'Use method OR methods');
       const names = params.method
@@ -291,6 +309,7 @@ async function dispatchNow(
       break;
     }
     default:
+      if (method === 'stop') clearPageContexts();
       result = await execute(commandSchema.parse({ op: method, ...params }) as Command, deadline);
   }
 

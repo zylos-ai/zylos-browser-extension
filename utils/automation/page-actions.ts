@@ -80,7 +80,10 @@ export class PageActions {
     return byValue ? response.result?.value : response.result;
   }
   async resolve(ref: string): Promise<Element> {
-    const entry = this.io.refs.get(ref);
+    // Accept a missing display marker only for the full, exact generated ID.
+    // Still require the same live ref map and generation; never guess a node.
+    const canonical = /^[a-f0-9]{8}-e\d+$/.test(ref) ? `@${ref}` : ref;
+    const entry = this.io.refs.get(canonical);
     if (!entry || entry.generation !== this.io.generation)
       fail('STALE_ELEMENT', 'Take a new snapshot or find');
     const frames = await this.safeFrames();

@@ -62,6 +62,11 @@ function cdpClient(ws) {
     });
 }
 function fixture(url, port) {
+  if (url.startsWith('/preview'))
+    return `<!doctype html><title>Research board · Live preview</title>
+    <style>body{margin:0;padding:48px;font:20px system-ui;background:#f6f3fa;color:#2c2033}header{font-size:18px;color:#8064a1}h1{font-size:42px;margin:28px 0 8px}.cards{display:flex;gap:24px;margin-top:36px}.card{padding:28px;background:white;border-radius:20px;flex:1;box-shadow:0 8px 24px #29113608}.bar{height:12px;border-radius:8px;background:#b997eb;margin-top:20px;transform-origin:left;animation:progress 2s infinite alternate ease-in-out}@keyframes progress{from{transform:scaleX(.1)}to{transform:scaleX(1)}}.tag{font-size:14px;color:#826996}</style>
+    <header>COCO / WORKSPACE</header><h1>Research board</h1><p>Organizing your browser findings</p>
+    <div class="cards"><div class="card"><span class="tag">READING</span><h2>Product overview</h2><p>Reviewing the current page</p><div class="bar"></div></div><div class="card"><span class="tag">COMPARING</span><h2>Key features</h2><p>Collecting useful details</p><div class="bar" style="animation-delay:-1s"></div></div></div>`;
   if (url.startsWith('/far-frame'))
     return `<!doctype html><title>Offscreen iframe</title><input type="password" value="fixture-password" aria-label="Password"><input id="otp" autocomplete="one-time-code" value="987654" aria-label="One-time code"><div style="height:2400px">Top</div><iframe style="width:450px;height:250px" src="http://localhost:${port}/frame"></iframe>`;
   if (url.startsWith('/nested'))
@@ -87,6 +92,7 @@ body{font:16px sans-serif;margin:20px}button,input,select{margin:5px;padding:8px
 <button id="prompt" onclick="document.querySelector('#dialog-result').textContent=prompt('Fixture prompt?','default')">Prompt</button>
 <button id="schedule" onclick="setTimeout(()=>{let b=document.createElement('button');b.id='late';b.textContent='Ready';document.body.append(b)},300)">Schedule</button>
 <a id="popup" href="/popup" target="_blank">Open popup</a><a id="next" href="/next">Next</a>
+<a id="spa" href="/spa" onclick="event.preventDefault();history.pushState({},'',this.href);this.textContent='SPA opened'">Open SPA</a>
 <iframe title="Same origin" src="/frame"></iframe><iframe title="Cross origin" src="http://localhost:${port}/frame"></iframe>
 <iframe title="Nested scaled" style="transform:scale(.9);transform-origin:top left;height:200px" src="/nested"></iframe><div id="shadow"></div><div id="closed"></div><script>const closed=document.querySelector('#closed').attachShadow({mode:'closed'});closed.innerHTML='<button>Closed shadow button</button>';closed.querySelector('button').onclick=()=>closed.querySelector('button').textContent='Closed shadow clicked';const r=document.querySelector('#shadow').attachShadow({mode:'open'});r.innerHTML='<input id="root-shadow-input" aria-label="Root shadow input"><button id="root-shadow-button">Root shadow button</button>';r.querySelector('button').onclick=()=>r.querySelector('button').textContent='Root shadow clicked';</script>`;
 }
@@ -253,6 +259,163 @@ try {
     checks.push(name);
     console.log('PASS', name);
   };
+  // The test loads sidepanel.html in a tab. Keep it visible like the real side panel
+  // while browser commands focus other tabs. Images still come from real Chrome CDP.
+  await cdp('Emulation.setFocusEmulationEnabled', { enabled: true }, sessionId);
+  const previewPanel = async (expression) => {
+    const result = await cdp(
+      'Runtime.evaluate',
+      { expression, awaitPromise: true, returnByValue: true },
+      sessionId,
+    );
+    if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
+    return result.result.value;
+  };
+  await check(
+    'live preview streams real background-tab frames, stays anchored, and freezes on completion',
+    async () => {
+      await rpc('open', { url: url + 'preview' });
+      await rpc('wait', { condition: 'loaded' });
+      const tab = (await rpc('info')).control.tabId;
+      await eventually(() =>
+        previewPanel("document.querySelector('.live-preview-image')?.naturalWidth > 0"),
+      );
+      const first = await previewPanel(
+        "Number(document.querySelector('.live-preview').dataset.frameSequence)",
+      );
+      await eventually(
+        async () =>
+          (await previewPanel(
+            "Number(document.querySelector('.live-preview').dataset.frameSequence)",
+          )) >
+          first + 2,
+      );
+      const other = await previewPanel(
+        `chrome.tabs.create({url:${JSON.stringify(url + 'next')},active:true})`,
+      );
+      const second = await previewPanel(
+        "Number(document.querySelector('.live-preview').dataset.frameSequence)",
+      );
+      await eventually(
+        async () =>
+          (await previewPanel(
+            "Number(document.querySelector('.live-preview').dataset.frameSequence)",
+          )) >
+          second + 2,
+      );
+      assert.equal(
+        await previewPanel("Number(document.querySelector('.live-preview').dataset.tabId)"),
+        tab,
+      );
+      assert.equal(
+        (await previewPanel(`chrome.tabs.get(${other.id})`)).active,
+        true,
+        'streaming does not steal focus',
+      );
+      const save = async (name) => {
+        if (!process.env.E2E_SCREENSHOT_DIR) return;
+        await fs.mkdir(process.env.E2E_SCREENSHOT_DIR, { recursive: true });
+        const shot = await cdp('Page.captureScreenshot', { format: 'png' }, sessionId);
+        await fs.writeFile(
+          path.join(process.env.E2E_SCREENSHOT_DIR, name + '.png'),
+          Buffer.from(shot.data, 'base64'),
+        );
+      };
+      for (const width of [380, 320]) {
+        await cdp(
+          'Emulation.setDeviceMetricsOverride',
+          { width, height: 820, deviceScaleFactor: 1, mobile: false },
+          sessionId,
+        );
+        await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 4, y: 4 }, sessionId);
+        await sleep(160);
+        const layout = await previewPanel(`(() => {
+        const card=document.querySelector('.live-preview').getBoundingClientRect();
+        const field=document.querySelector('.composer-field').getBoundingClientRect();
+        return { width:card.width,height:card.height,right:card.right,fieldRight:field.right,gap:field.top-card.bottom,
+          x:card.x+card.width/2,y:card.y+50,opacity:getComputedStyle(document.querySelector('.live-preview-actions')).opacity,
+          overflow:document.documentElement.scrollWidth>innerWidth };
+      })()`);
+        assert.equal(layout.width, 240);
+        assert.ok(Math.abs(layout.height - 166) < 1);
+        assert.ok(Math.abs(layout.right - layout.fieldRight) < 2);
+        assert.ok(Math.abs(layout.gap - 8) < 2);
+        assert.equal(layout.overflow, false);
+        assert.equal(layout.opacity, '0');
+        await save('live-preview-default-' + width);
+        await cdp(
+          'Input.dispatchMouseEvent',
+          { type: 'mouseMoved', x: layout.x, y: layout.y },
+          sessionId,
+        );
+        await eventually(
+          async () =>
+            (await previewPanel(
+              "getComputedStyle(document.querySelector('.live-preview-actions')).opacity",
+            )) === '1',
+        );
+        await save('live-preview-hover-' + width);
+        await previewPanel("document.querySelector('.live-preview').focus()");
+        await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 4, y: 4 }, sessionId);
+        assert.equal(
+          await previewPanel(
+            "getComputedStyle(document.querySelector('.live-preview-actions')).opacity",
+          ),
+          '1',
+        );
+        await previewPanel('document.activeElement.blur()');
+      }
+      await rpc('new-tab', { url: url + 'preview?second' });
+      const secondTab = (await rpc('info')).control.tabId;
+      assert.notEqual(secondTab, tab);
+      await eventually(() =>
+        previewPanel(
+          `Number(document.querySelector('.live-preview')?.dataset.tabId) === ${secondTab} && document.querySelector('.live-preview-image')?.naturalWidth > 0`,
+        ),
+      );
+      await rpc('switch-tab', { tabId: tab });
+      await eventually(() =>
+        previewPanel(
+          `Number(document.querySelector('.live-preview')?.dataset.tabId) === ${tab} && document.querySelector('.live-preview-image')?.naturalWidth > 0`,
+        ),
+      );
+      await rpc('finish');
+      await eventually(
+        async () =>
+          (await previewPanel("document.querySelector('.live-preview').dataset.status")) ===
+          'completed',
+      );
+      assert.equal(await previewPanel("!!document.querySelector('.live-preview-completed')"), true);
+      assert.equal(await previewPanel("!!document.querySelector('#stop-task')"), false);
+      await sleep(200);
+      const frozen = await previewPanel(
+        "document.querySelector('.live-preview').dataset.frameSequence",
+      );
+      await sleep(400);
+      assert.equal(
+        await previewPanel("document.querySelector('.live-preview').dataset.frameSequence"),
+        frozen,
+      );
+      await save('live-preview-completed-320');
+      // A final reply releases control but leaves the preview and original tab available.
+      await fetch(rpcUrl + '/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text: 'Preview fixture complete', final: true }),
+      });
+      await eventually(async () => (await rpc('info')).control === null);
+      await previewPanel("document.querySelector('.preview-view').click()");
+      await eventually(async () => (await previewPanel(`chrome.tabs.get(${tab})`)).active);
+      assert.equal(
+        await previewPanel("document.querySelector('.live-preview').dataset.status"),
+        'completed',
+      );
+      await previewPanel(`chrome.tabs.remove([${tab},${other.id},${secondTab}])`);
+      await eventually(() => previewPanel("document.querySelector('.preview-view').disabled"));
+      await previewPanel("chrome.runtime.sendMessage({type:'remote-chat-clear'})");
+      await eventually(() => previewPanel("!document.querySelector('.live-preview')"));
+    },
+  );
   await check(
     'extension supplies its guide and schemas through the unmodified RPC transport',
     async () => {
@@ -355,6 +518,295 @@ try {
         ).result.value,
     );
   });
+  await check(
+    'Markdown replies render, scroll locally at sidebar widths, and survive panel reload',
+    async () => {
+      const markdown = JSON.parse(
+        await fs.readFile(path.join(root, 'tests/fixtures/markdown-message.json'), 'utf8'),
+      ).text;
+      const panel = async (expression) => {
+        const result = await cdp(
+          'Runtime.evaluate',
+          { expression, awaitPromise: true, returnByValue: true },
+          sessionId,
+        );
+        if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
+        return result.result.value;
+      };
+      await panel("chrome.runtime.sendMessage({type:'remote-chat-clear'})");
+      const reply = await fetch(rpcUrl + '/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text: markdown }),
+      });
+      assert.equal((await reply.json()).ok, true);
+      await eventually(() =>
+        panel("document.querySelector('.markdown-body h1')?.textContent === '页面调研报告'"),
+      );
+      for (const width of [320, 380, 480]) {
+        await cdp(
+          'Emulation.setDeviceMetricsOverride',
+          { width, height: 820, deviceScaleFactor: 1, mobile: false },
+          sessionId,
+        );
+        const layout = await panel(`(() => {
+          const md = document.querySelector('.markdown-body');
+          const table = md.querySelector('.markdown-table-scroll');
+          const code = md.querySelector('pre');
+          return {
+            heading: parseFloat(getComputedStyle(md.querySelector('h1')).fontSize),
+            body: parseFloat(getComputedStyle(md).fontSize),
+            list: getComputedStyle(md.querySelector('ol')).listStyleType,
+            tableBounded: table.getBoundingClientRect().right <= innerWidth,
+            codeBounded: code.getBoundingClientRect().right <= innerWidth,
+            tableScroll: getComputedStyle(table).overflowX === 'auto',
+            codeScroll: code.scrollWidth > code.clientWidth && getComputedStyle(code).overflowX === 'auto',
+            overflow: document.documentElement.scrollWidth > innerWidth,
+            columns: md.querySelectorAll('th').length,
+            external: md.querySelector('a[href^="https:"]').target,
+          };
+        })()`);
+        assert.ok(layout.heading > layout.body);
+        assert.equal(layout.list, 'decimal');
+        for (const field of ['tableBounded', 'codeBounded', 'tableScroll', 'codeScroll'])
+          assert.equal(layout[field], true, `${width}: ${field}`);
+        assert.equal(layout.overflow, false);
+        assert.equal(layout.columns, 4);
+        assert.equal(layout.external, '_blank');
+      }
+      await cdp(
+        'Emulation.setDeviceMetricsOverride',
+        { width: 380, height: 820, deviceScaleFactor: 1, mobile: false },
+        sessionId,
+      );
+      if (process.env.E2E_SCREENSHOT_DIR) {
+        await fs.mkdir(process.env.E2E_SCREENSHOT_DIR, { recursive: true });
+        for (const [name, selector] of [
+          ['markdown-report', '.markdown-body h1'],
+          ['markdown-code', '.markdown-body h3'],
+        ]) {
+          await panel(
+            `document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'start'})`,
+          );
+          const shot = await cdp('Page.captureScreenshot', { format: 'png' }, sessionId);
+          await fs.writeFile(
+            path.join(process.env.E2E_SCREENSHOT_DIR, `${name}.png`),
+            Buffer.from(shot.data, 'base64'),
+          );
+        }
+      }
+      await panel("document.querySelector('[data-footnote-ref]').click()");
+      assert.equal(await panel('location.hash'), '');
+      assert.equal(
+        await panel(
+          "chrome.runtime.sendMessage({type:'remote-state'}).then(response => response.ok)",
+        ),
+        true,
+      );
+      await cdp('Page.reload', {}, sessionId);
+      await eventually(() =>
+        panel("document.querySelector('.markdown-body h1')?.textContent === '页面调研报告'"),
+      );
+      assert.equal(
+        await panel("document.querySelectorAll('.markdown-body table tbody tr').length"),
+        2,
+      );
+    },
+  );
+  await check(
+    'inline tool steps show queued/running/results, collapse on final reply, and survive panel reload',
+    async () => {
+      const panel = async (expression) => {
+        const result = await cdp(
+          'Runtime.evaluate',
+          { expression, awaitPromise: true, returnByValue: true },
+          sessionId,
+        );
+        if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
+        return result.result.value;
+      };
+      const screenshot = async (name) => {
+        if (!process.env.E2E_SCREENSHOT_DIR) return;
+        await fs.mkdir(process.env.E2E_SCREENSHOT_DIR, { recursive: true });
+        await panel("document.querySelector('.tool-activity').scrollIntoView({block:'start'})");
+        const shot = await cdp('Page.captureScreenshot', { format: 'png' }, sessionId);
+        await fs.writeFile(
+          path.join(process.env.E2E_SCREENSHOT_DIR, `${name}.png`),
+          Buffer.from(shot.data, 'base64'),
+        );
+      };
+      await panel("chrome.runtime.sendMessage({type:'remote-chat-clear'})");
+      await panel("chrome.storage.local.set({uiLanguage:'zh-CN'})");
+      await panel("document.querySelector('#message').focus()");
+      await cdp('Input.insertText', { text: '打开示例网页，读取内容并查找按钮。' }, sessionId);
+      await panel("document.querySelector('#send').click()");
+      await eventually(() =>
+        chatMessages.some((m) => m.text === '打开示例网页，读取内容并查找按钮。'),
+      );
+      const opened = await rpc('open', { url });
+      await rpc('snapshot');
+      const waiting = rpc('wait', {
+        condition: 'visible',
+        selector: '#never',
+        timeoutMs: 4000,
+      }).catch((e) => e);
+      await eventually(() => panel("!!document.querySelector('.tool-step[data-status=running]')"));
+      const queued = rpc('find', { selector: '#click' });
+      await eventually(() => panel("!!document.querySelector('.tool-step[data-status=queued]')"));
+      assert.equal(
+        await panel(
+          "document.querySelector('.tool-activity-toggle').getAttribute('aria-expanded')",
+        ),
+        'true',
+      );
+      assert.equal(
+        await panel(
+          "getComputedStyle(document.querySelector('.tool-activity-body')).display === 'none'",
+        ),
+        false,
+      );
+      assert.equal(await panel('document.documentElement.scrollWidth > innerWidth'), false);
+      await screenshot('steps-live');
+      assert.equal((await waiting).code, 'WAIT_TIMEOUT');
+      await queued;
+      await eventually(() =>
+        panel(
+          "document.querySelector('.tool-step[data-status=error]')?.textContent.includes('WAIT_TIMEOUT')",
+        ),
+      );
+      const reply = await fetch(rpcUrl + '/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text: '已读取页面并找到按钮。等待条件未出现，相关步骤已记录。' }),
+      });
+      assert.equal((await reply.json()).ok, true);
+      await eventually(() =>
+        panel("document.querySelector('.tool-activity')?.dataset.status === 'completed'"),
+      );
+      assert.equal(
+        await panel(
+          "document.querySelector('.tool-activity-toggle').getAttribute('aria-expanded')",
+        ),
+        'false',
+      );
+      assert.equal(
+        await panel(
+          "getComputedStyle(document.querySelector('.tool-activity-body')).display === 'none'",
+        ),
+        true,
+      );
+      await screenshot('steps-collapsed');
+      await panel("document.querySelector('.tool-activity-toggle').click()");
+      assert.equal(
+        await panel(
+          "getComputedStyle(document.querySelector('.tool-activity-body')).display === 'none'",
+        ),
+        false,
+      );
+      assert.deepEqual(
+        await panel(
+          "[...document.querySelectorAll('.tool-step-detail code')].map((el)=>el.textContent)",
+        ),
+        ['open', 'snapshot', 'wait', 'find'],
+      );
+      await screenshot('steps-expanded');
+      await cdp('Page.reload', {}, sessionId);
+      await eventually(() =>
+        panel(
+          "document.querySelector('.tool-activity-toggle')?.getAttribute('aria-expanded') === 'false'",
+        ),
+      );
+      assert.equal(await panel("document.querySelectorAll('.tool-step').length"), 4);
+      await panel("document.querySelector('.tool-activity-toggle').click()");
+      assert.equal(
+        await panel(
+          "document.querySelector('.tool-activity-body').textContent.includes('WAIT_TIMEOUT')",
+        ),
+        true,
+      );
+      await panel(`chrome.tabs.remove(${opened.tabId})`);
+      await panel("chrome.runtime.sendMessage({type:'remote-chat-clear'})");
+      await panel("chrome.storage.local.set({uiLanguage:'auto'})");
+    },
+  );
+  await check(
+    'each chat shares the live current page and actions borrow that exact tab without reopening',
+    async () => {
+      const panel = async (expression) => {
+        const response = await cdp(
+          'Runtime.evaluate',
+          { expression, awaitPromise: true, returnByValue: true },
+          sessionId,
+        );
+        if (response.exceptionDetails) throw new Error(JSON.stringify(response.exceptionDetails));
+        return response.result.value;
+      };
+      const userTab = await panel(`chrome.tabs.create({url:${JSON.stringify(url)},active:true})`);
+      await eventually(
+        async () => (await panel(`chrome.tabs.get(${userTab.id})`)).status === 'complete',
+      );
+      const originalGroup = await panel(
+        `chrome.tabs.group({tabIds:[${userTab.id}],createProperties:{windowId:${userTab.windowId}}})`,
+      );
+      await panel(
+        `chrome.tabGroups.update(${originalGroup},{title:'Owner research',color:'blue'})`,
+      );
+      const count = (await panel('chrome.tabs.query({})')).length;
+      // Send through the real React composer so it captures its own window and active tab.
+      await panel(
+        `(() => { const input=document.querySelector('#message'); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input,'Read this current page'); input.dispatchEvent(new Event('input',{bubbles:true})); })()`,
+      );
+      await panel("document.querySelector('#send').click()");
+      const message = await eventually(() =>
+        chatMessages.find((m) => m.text === 'Read this current page'),
+      );
+      const context = JSON.parse(message.context);
+      assert.equal(context.tabId, userTab.id);
+      assert.equal(context.status, 'excerpt');
+      assert.match(context.text, /Browser actions fixture/);
+      assert.equal(
+        (await rpc('info')).control,
+        null,
+        'automatic context does not start an action task',
+      );
+      assert.equal((await panel('chrome.tabs.query({})')).length, count);
+      const selected = await rpc('use-current-tab', { contextId: context.contextId });
+      assert.equal(selected.tabId, userTab.id);
+      assert.equal(selected.borrowed, true);
+      await rpc('fill', { ref: await find('#input'), text: 'Keep this live draft' });
+      assert.equal((await state('#input')).value, 'Keep this live draft');
+      // A second message uses the same live page while control already exists.
+      const next = await panel(
+        `chrome.runtime.sendMessage({type:'remote-chat-send',text:'Keep using this page',windowId:${userTab.windowId},tabId:${userTab.id}})`,
+      );
+      assert.equal(next.ok, true);
+      const second = await eventually(() =>
+        chatMessages.find((m) => m.text === 'Keep using this page'),
+      );
+      assert.notEqual(JSON.parse(second.context).contextId, context.contextId);
+      const other = await panel(
+        `chrome.tabs.create({url:${JSON.stringify(url + 'next')},active:true})`,
+      );
+      await rpc('use-current-tab', { contextId: JSON.parse(second.context).contextId });
+      assert.equal(
+        (await state('#input')).value,
+        'Keep this live draft',
+        'focus changes do not redirect the task',
+      );
+      await rpc('click', { ref: await find('#click') });
+      assert.equal((await state('#click')).text, 'Clicked 1');
+      await rpc('stop');
+      const kept = await panel(`chrome.tabs.get(${userTab.id})`);
+      assert.equal(kept.groupId, originalGroup);
+      assert.equal((await panel(`chrome.tabGroups.get(${originalGroup})`)).title, 'Owner research');
+      assert.equal((await panel(`chrome.tabs.get(${other.id})`)).active, true);
+      await assert.rejects(
+        rpc('use-current-tab', { contextId: context.contextId }),
+        (e) => e.code === 'STALE_CONTEXT',
+      );
+      await panel(`chrome.tabs.remove([${userTab.id},${other.id}])`);
+    },
+  );
   await rpc('open', { url });
   await rpc('wait', { condition: 'loaded' });
   const mainTab = (await rpc('tabs')).tabs.find((t) => t.selected).id;
@@ -363,7 +815,7 @@ try {
       await cdp(
         'Runtime.evaluate',
         {
-          expression: "document.querySelector('.task-card')?.dataset.phase",
+          expression: "document.querySelector('.live-preview')?.dataset.phase",
           returnByValue: true,
         },
         sessionId,
@@ -447,7 +899,7 @@ try {
     assert.equal((await rpc('inspect', { ref })).text, 'Closed shadow clicked');
   });
   await check('single, double, right click and hover', async () => {
-    await rpc('click', { ref: await find('#click') });
+    await rpc('click', { ref: (await find('#click')).slice(1) });
     assert.equal((await state('#click')).text, 'Clicked 1');
     await rpc('double-click', { ref: await find('#double') });
     assert.equal((await state('#double')).text, 'Double clicked');
@@ -555,11 +1007,12 @@ try {
     );
   });
   await check('navigation back forward reload and URL wait', async () => {
-    try {
-      await rpc('click', { ref: await find('#next') });
-    } catch (e) {
-      if (e.code !== 'PAGE_CHANGED') throw e;
-    }
+    assert.equal((await rpc('click', { ref: await find('#spa') })).done, true);
+    await rpc('wait', { condition: 'url', url: url + 'spa' });
+    assert.equal((await state('#spa')).text, 'SPA opened');
+    await rpc('back');
+    await rpc('wait', { condition: 'url', url });
+    assert.equal((await rpc('click', { ref: await find('#next') })).done, true);
     await rpc('wait', { condition: 'url', url: url + 'next' });
     await rpc('back');
     await rpc('wait', { condition: 'url', url });
@@ -609,7 +1062,7 @@ try {
     assert.ok((await rpc('tabs')).tabs.length > 0);
   });
   await check(
-    'final answer removes the card, cancels old commands and hands back open pages',
+    'final answer releases control, cancels old commands and hands back open pages',
     async () => {
       await rpc('snapshot');
       const owned = (await rpc('tabs')).tabs.map((tab) => tab.id);

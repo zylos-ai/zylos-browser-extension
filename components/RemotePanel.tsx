@@ -9,6 +9,8 @@ import { useI18n } from './LanguageProvider';
 import { ChatComposer } from './ChatComposer';
 import { Conversation } from './Conversation';
 import { ConnectionSettings } from './ConnectionSettings';
+import { CurrentPage } from './CurrentPage';
+import { LivePreview } from './LivePreview';
 
 /** Owns the sidebar state; all browser operations still run in the background. */
 export function RemotePanel() {
@@ -70,10 +72,22 @@ export function RemotePanel() {
     const submittedDraft = draft;
     sendingRef.current = true;
     setSending(true);
-    const ok = await request({ type: 'remote-chat-send', text });
-    sendingRef.current = false;
-    setSending(false);
-    if (ok) setDraft((current) => (current === submittedDraft ? '' : current));
+    try {
+      const win = await chrome.windows.getCurrent();
+      const [tab] = await chrome.tabs.query({ active: true, windowId: win.id });
+      const ok = await request({
+        type: 'remote-chat-send',
+        text,
+        windowId: win.id,
+        tabId: tab?.id,
+      });
+      if (ok) setDraft((current) => (current === submittedDraft ? '' : current));
+    } catch {
+      setError('ui.error.serviceUnavailable');
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
+    }
   }
 
   async function action(message: RemoteRequest) {
@@ -177,11 +191,17 @@ export function RemotePanel() {
               setDraft(text);
               inputRef.current?.focus();
             }}
-            onReveal={() => void request({ type: 'remote-reveal' })}
-            onStop={() => void action({ type: 'remote-stop' })}
-            stopping={pending === 'remote-stop'}
           />
           <ChatComposer
+            pageContext={<CurrentPage />}
+            preview={
+              <LivePreview
+                task={state.task}
+                onReveal={() => void request({ type: 'remote-preview-reveal' })}
+                onStop={() => void action({ type: 'remote-stop' })}
+                stopping={pending === 'remote-stop'}
+              />
+            }
             draft={draft}
             onDraftChange={setDraft}
             connected={connected}

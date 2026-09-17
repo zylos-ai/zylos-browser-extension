@@ -7,6 +7,7 @@ import instructions from '../agent/browser-guide.md?raw';
 export const remoteParams = {
   ...actionParams,
   info: z.object({}).strict(),
+  'use-current-tab': z.object({ contextId: z.string().uuid() }).strict(),
   start: z.object({ url: z.string().url().max(4000) }).strict(),
   finalize: z.object({ keep: z.array(z.number().int().nonnegative()).max(8).default([]) }).strict(),
   describe: z
@@ -25,7 +26,7 @@ type ToolHelp = {
   examples?: Record<string, unknown>[];
 };
 const targetRule =
-  'Use an exact ref from snapshot/find OR both x and y; never combine ref with coordinates. Coordinates are top-viewport CSS pixels.';
+  'Use the complete ref from snapshot/find (for example @1a2b3c4d-e17) OR both x and y; never combine ref with coordinates. Coordinates are top-viewport CSS pixels.';
 // Adding a method without documentation is a TypeScript error. All browser
 // semantics stay in this extension; the transport has no copy of this table.
 export const toolHelp = {
@@ -41,6 +42,13 @@ export const toolHelp = {
     description:
       'Read extension version, capabilities and current task/tab. Does not start a task.',
   },
+  'use-current-tab': {
+    description:
+      'Select the existing page attached to a user message for reading and actions, without reopening or regrouping it.',
+    constraints: [
+      'Use the exact contextId from that message, never a guessed tab ID. Contexts expire after 30 minutes or a worker restart. A navigated or closed page requires a new user message. Take a fresh snapshot/find after selecting. User-owned tabs are never closed by task cleanup.',
+    ],
+  },
   start: {
     description: 'Create a dedicated browser task at a URL. Fails if a task already exists.',
     examples: [{ url: 'https://example.com/' }],
@@ -54,7 +62,10 @@ export const toolHelp = {
     description:
       'Select a task tab as the automation target using its actual tabId; does not steal foreground focus.',
   },
-  tabs: { description: 'List task-owned tabs and the selected automation target.' },
+  tabs: {
+    description:
+      'List task-owned tabs, the borrowed page if any, and the selected automation target.',
+  },
   frames: { description: 'List permitted frame IDs and URLs for scoped element queries.' },
   snapshot: {
     description:
@@ -74,6 +85,9 @@ export const toolHelp = {
     description:
       'Find elements by CSS selector, traversing open Shadow DOM; return usable refs and state.',
     examples: [{ selector: 'input[type="search"]' }],
+    constraints: [
+      'Quote CSS attribute values containing punctuation: a[href*="/comments/"] is valid; a[href*=/comments/] is not.',
+    ],
   },
   inspect: {
     description:
@@ -148,7 +162,7 @@ export const toolHelp = {
   stop: { description: 'Stop control, cancel queued actions and close temporary task-owned tabs.' },
   finalize: {
     description:
-      'Close task-owned tabs except actual IDs in keep, then release/ungroup retained results. Empty keep closes all task tabs.',
+      'Close task-owned tabs except actual IDs in keep, then release/ungroup retained results. A borrowed user page is always retained with its original group.',
   },
 } satisfies Record<RemoteMethod, ToolHelp>;
 
@@ -175,6 +189,7 @@ export function parameterSchema(schema: z.ZodTypeAny): JsonSchema {
     if (schema.minLength !== null) result.minLength = schema.minLength;
     if (schema.maxLength !== null) result.maxLength = schema.maxLength;
     if (schema.isURL) result.format = 'uri';
+    if (schema.isUUID) result.format = 'uuid';
   } else if (schema instanceof z.ZodNumber) {
     result = { type: schema.isInt ? 'integer' : 'number' };
     if (schema.minValue !== null) result.minimum = schema.minValue;

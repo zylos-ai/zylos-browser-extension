@@ -6,7 +6,7 @@ import { z } from 'zod';
 
 export const REMOTE_SUBPROTOCOL = 'zylos-browser-remote.v2';
 export const REMOTE_KEY_PROTO_PREFIX = 'key.';
-export const REMOTE_VERSION = '1.4.0';
+export const REMOTE_VERSION = '1.5.0';
 export const MAX_CHAT_TEXT = 8000;
 export const CHAT_LOG_CAP = 200;
 export const REPLY_NOTICE_MS = 120_000;
@@ -26,6 +26,31 @@ export const REMOTE_CONFIG_KEY = 'remoteConfig';
 export const REMOTE_CHAT_LOG_KEY = 'remoteChatLog';
 export const REMOTE_CHAT_RECEIPTS_KEY = 'remoteChatReceipts';
 
+// Keep tool history small: never persist raw arguments, page output or images.
+export const TOOL_STEPS_CAP = 200;
+export const toolStepSchema = z.object({
+  id: z.string(),
+  number: z.number().int(),
+  method: z.string().max(128),
+  target: z.string().max(240).optional(),
+  status: z.enum(['queued', 'running', 'success', 'error', 'cancelled', 'interrupted']),
+  queuedAt: z.number(),
+  startedAt: z.number().optional(),
+  endedAt: z.number().optional(),
+  errorCode: z.string().max(64).optional(),
+  replayed: z.boolean().optional(),
+});
+export const toolRunSchema = z.object({
+  status: z.enum(['running', 'completed', 'stopped', 'interrupted']),
+  startedAt: z.number(),
+  endedAt: z.number().optional(),
+  total: z.number().int(),
+  failed: z.number().int(),
+  steps: z.array(toolStepSchema).max(TOOL_STEPS_CAP),
+});
+export type ToolStep = z.infer<typeof toolStepSchema>;
+export type ToolRun = z.infer<typeof toolRunSchema>;
+
 export const chatEntrySchema = z.object({
   id: z.string().max(128).optional(),
   role: z.enum(['user', 'assistant', 'system']),
@@ -34,6 +59,8 @@ export const chatEntrySchema = z.object({
   delivery: z.enum(['sent', 'queued', 'failed', 'unknown']).optional(),
   deliveryError: z.string().optional(),
   final: z.boolean().optional(),
+  page: z.object({ title: z.string(), url: z.string(), status: z.string() }).optional(),
+  toolRun: toolRunSchema.optional(),
 });
 export type ChatEntry = z.infer<typeof chatEntrySchema>;
 
@@ -79,10 +106,16 @@ export const remoteRequestSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('remote-save'), relayUrl: z.string(), key: z.string() }).strict(),
   z.object({ type: z.literal('remote-set-enabled'), enabled: z.boolean() }).strict(),
   z
-    .object({ type: z.literal('remote-chat-send'), text: z.string().min(1).max(MAX_CHAT_TEXT) })
+    .object({
+      type: z.literal('remote-chat-send'),
+      text: z.string().min(1).max(MAX_CHAT_TEXT),
+      windowId: z.number().int().nonnegative().optional(),
+      tabId: z.number().int().nonnegative().optional(),
+    })
     .strict(),
   z.object({ type: z.literal('remote-chat-clear') }).strict(),
   z.object({ type: z.literal('remote-reveal') }).strict(),
+  z.object({ type: z.literal('remote-preview-reveal') }).strict(),
   z.object({ type: z.literal('remote-stop') }).strict(),
 ]);
 export type RemoteRequest = z.infer<typeof remoteRequestSchema>;

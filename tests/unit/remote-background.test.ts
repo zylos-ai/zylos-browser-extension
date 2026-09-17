@@ -24,7 +24,7 @@ vi.mock('../../utils/automation/task-lifecycle', () => ({ recoverTasks: vi.fn(as
 vi.mock('../../utils/messages', () => ({ isPanelSender: () => true }));
 
 import { startRemoteBackground } from '../../entrypoints/background/remote';
-import { REMOTE_SUBPROTOCOL } from '../../utils/remote';
+import { REMOTE_SUBPROTOCOL, type ChatEntry } from '../../utils/remote';
 
 type Handler = (m: unknown, s: unknown, r: (v: unknown) => void) => boolean;
 let internal: Handler;
@@ -99,6 +99,7 @@ beforeEach(() => {
   vi.stubGlobal('chrome', {
     runtime: {
       id: 'x'.repeat(32),
+      onConnect: { addListener: vi.fn() },
       sendMessage: vi.fn(async (m: unknown) => {
         broadcasts.push(m);
       }),
@@ -121,7 +122,11 @@ beforeEach(() => {
     alarms: { create: vi.fn(), onAlarm: { addListener: vi.fn() } },
     sidePanel: { setPanelBehavior: vi.fn(async () => {}) },
     windows: { getLastFocused: vi.fn(async () => ({ id: 1, incognito: false })) },
-    tabs: { query: vi.fn(async () => [{ id: 3, windowId: 1 }]) },
+    debugger: { onEvent: { addListener: vi.fn() }, sendCommand: vi.fn(async () => {}) },
+    tabs: {
+      query: vi.fn(async () => [{ id: 3, windowId: 1 }]),
+      onRemoved: { addListener: vi.fn() },
+    },
   });
 });
 afterEach(() => {
@@ -139,6 +144,110 @@ async function bootConnected() {
 }
 
 describe('remote background', () => {
+  it('records real queue/start/result states and persists a closed trace with the final reply', async () => {
+    const ws = await bootConnected();
+    await ask({ type: 'remote-chat-send', text: 'Read this page' });
+    let resolve!: (value: { ran: string }) => void;
+    executor.execute.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    );
+    ws.receive({ type: 'req', id: 1, method: 'snapshot', params: {} });
+    await flush();
+    ws.receive({ type: 'req', id: 2, method: 'click', params: { x: 20, y: 30 } });
+    await flush();
+    const history = async () => (await ask({ type: 'remote-state' })).value!.chat as ChatEntry[];
+    const run = async () => (await history()).find((m) => m.toolRun)!.toolRun!;
+    expect((await run()).steps.map((s) => [s.method, s.status])).toEqual([
+      ['snapshot', 'running'],
+      ['click', 'queued'],
+    ]);
+    await vi.advanceTimersByTimeAsync(500);
+    executor.execute.mockRejectedValueOnce(
+      Object.assign(new Error('page output must not be stored'), { code: 'STALE_REF' }),
+    );
+    resolve({ ran: 'snapshot' });
+    await flush();
+    expect((await run()).steps.map((s) => s.status)).toEqual(['success', 'error']);
+    expect((await run()).steps[0]!.endedAt! - (await run()).steps[0]!.startedAt!).toBe(500);
+    ws.receive({ type: 'chat', text: 'Recovering', final: false });
+    await flush();
+    expect((await run()).status).toBe('running');
+    ws.receive({ type: 'chat', id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', text: 'Done' });
+    await flush();
+    expect(await run()).toMatchObject({ status: 'completed', total: 2, failed: 1 });
+    expect(
+      (storage.remoteChatLog as ChatEntry[]).map((m) => (m.toolRun ? 'steps' : m.text)),
+    ).toEqual(['Read this page', 'steps', 'Recovering', 'Done']);
+    expect(JSON.stringify(storage.remoteChatLog)).not.toContain('page output must not be stored');
+    ws.receive({ type: 'req', id: 3, method: 'snapshot', params: {} });
+    await flush();
+    ws.receive({ type: 'chat', id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', text: 'Done' });
+    await flush();
+    expect((await history()).filter((m) => m.toolRun).at(-1)!.toolRun!.status).toBe('running');
+  });
+
+  it('clearing history cannot be undone by a late result or a scheduled history write', async () => {
+    const ws = await bootConnected();
+    let resolve!: (value: { ran: string }) => void;
+    executor.execute.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    );
+    ws.receive({ type: 'req', id: 1, method: 'screenshot', params: {} });
+    await flush();
+    await ask({ type: 'remote-chat-clear' });
+    resolve({ ran: 'screenshot' });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(storage.remoteChatLog).toEqual([]);
+    expect((await ask({ type: 'remote-state' })).value!.chat).toEqual([]);
+  });
+
+  it('records interrupted work on disconnect and never restores a running trace after worker restart', async () => {
+    const ws = await bootConnected();
+    let resolve!: (value: { ran: string }) => void;
+    executor.execute.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    );
+    ws.receive({ type: 'req', id: 1, method: 'snapshot', params: {} });
+    await flush();
+    await vi.advanceTimersByTimeAsync(300);
+    const beforeDisconnect = structuredClone(storage.remoteChatLog);
+    ws.serverClose(4001);
+    await vi.advanceTimersByTimeAsync(300);
+    expect((storage.remoteChatLog as ChatEntry[])[0]!.toolRun).toMatchObject({
+      status: 'interrupted',
+      steps: [{ status: 'interrupted' }],
+    });
+    resolve({ ran: 'snapshot' });
+    await flush();
+    storage.remoteChatLog = beforeDisconnect;
+    startRemoteBackground();
+    await flush();
+    expect((storage.remoteChatLog as ChatEntry[])[0]!.toolRun).toMatchObject({
+      status: 'interrupted',
+      steps: [{ status: 'interrupted' }],
+    });
+  });
+
+  it('keeps stop effective when storing tool history fails', async () => {
+    const ws = await bootConnected();
+    ws.receive({ type: 'req', id: 1, method: 'snapshot', params: {} });
+    await flush();
+    vi.mocked(chrome.storage.local.set).mockRejectedValueOnce(new Error('Storage unavailable'));
+    expect((await ask({ type: 'remote-stop' })).ok).toBe(false);
+    expect(executor.release).toHaveBeenCalledOnce();
+    const log = (await ask({ type: 'remote-state' })).value!.chat as ChatEntry[];
+    expect(log[0]!.toolRun!.status).toBe('stopped');
+  });
+
   it('acknowledges a persisted final reply once and does not end a new task on replay', async () => {
     const ws = await bootConnected();
     const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';

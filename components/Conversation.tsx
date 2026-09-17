@@ -3,21 +3,17 @@ import { REPLY_NOTICE_MS, type RemoteState } from '../utils/remote';
 import { Brand } from './Brand';
 import { useI18n } from './LanguageProvider';
 import { formatMessageDate } from '../utils/i18n';
+import { ToolSteps } from './ToolSteps';
+import { MarkdownMessage } from './MarkdownMessage';
 
 const dayKey = (ts: number) => new Date(ts).toDateString();
 
 export function Conversation({
   state,
   onStarter,
-  onReveal,
-  onStop,
-  stopping,
 }: {
   state: RemoteState;
   onStarter: (value: string) => void;
-  onReveal: () => void;
-  onStop: () => void;
-  stopping: boolean;
 }) {
   const { t, locale, errorText } = useI18n();
   const starters = [t('starterResearch'), t('starterCompare'), t('starterForm')];
@@ -26,6 +22,8 @@ export function Conversation({
   const [unread, setUnread] = useState(false);
   const { chat, task } = state;
   const latest = chat.at(-1);
+  const activity = [...chat].reverse().find((message) => message.toolRun)?.toolRun;
+  const activityRevision = activity && JSON.stringify(activity);
   const turn = [...chat]
     .reverse()
     .find(
@@ -36,11 +34,30 @@ export function Conversation({
     .reverse()
     .find((message) => message.role === 'assistant' && message.final === false);
   const hasProgress = !!progress && !!turn && chat.indexOf(progress) > chat.indexOf(turn);
-  const activityTs = hasProgress ? progress!.ts : (turn?.ts ?? 0);
+  const turnActivity =
+    turn &&
+    chat
+      .slice(chat.indexOf(turn) + 1)
+      .flatMap((message) => (message.toolRun ? [message.toolRun] : []));
+  const browserActivityTs = Math.max(
+    0,
+    ...(turnActivity ?? []).flatMap((run) => [
+      run.startedAt,
+      run.endedAt ?? 0,
+      ...run.steps.map((step) => step.endedAt ?? step.startedAt ?? step.queuedAt),
+    ]),
+  );
+  const browserBusy = (turnActivity ?? []).some(
+    (run) =>
+      run.status === 'running' &&
+      run.steps.some((step) => step.status === 'running' || step.status === 'queued'),
+  );
+  const hasBrowserActivity = browserActivityTs > 0;
+  const activityTs = Math.max(hasProgress ? progress!.ts : (turn?.ts ?? 0), browserActivityTs);
   const [now, setNow] = useState(Date.now);
   const awaiting =
     turn?.role === 'user' && turn.delivery !== 'failed' && turn.delivery !== 'unknown';
-  const delayed = awaiting && now - activityTs >= REPLY_NOTICE_MS;
+  const delayed = awaiting && !browserBusy && now - activityTs >= REPLY_NOTICE_MS;
   useEffect(() => {
     setNow(Date.now());
     if (!awaiting) return;
@@ -69,6 +86,7 @@ export function Conversation({
     task?.sessionId,
     task?.phase,
     delayed,
+    activityRevision,
   ]);
 
   return (
@@ -115,86 +133,73 @@ export function Conversation({
             aria-relevant="additions text"
           >
             {chat.map((message, index) => (
-              <Fragment key={`${message.ts}-${index}`}>
+              <Fragment
+                key={message.id ? `${message.role}-${message.id}` : `${message.ts}-${index}`}
+              >
                 {(index === 0 || dayKey(chat[index - 1]!.ts) !== dayKey(message.ts)) && (
                   <p className="message-date text-caption text-muted">
                     {formatMessageDate(message.ts, locale)}
                   </p>
                 )}
-                <article
-                  className={`message ${message.role}`}
-                  aria-label={
-                    message.role === 'user'
-                      ? t('you')
-                      : message.role === 'assistant'
-                        ? 'Zylos'
-                        : t('systemMessage')
-                  }
-                >
-                  {message.role === 'assistant' && (
-                    <div className="message-author">
-                      <Brand />
-                      <span>Zylos</span>
-                    </div>
-                  )}
-                  {message.role === 'system' && <span className="system-label">{t('system')}</span>}
-                  <p className="message-text">{message.text}</p>
-                  {message.role === 'user' && message.deliveryError && (
-                    <p className="message-delivery" role="alert">
-                      {errorText(message.deliveryError)}
-                    </p>
-                  )}
-                </article>
+                {message.toolRun ? (
+                  <ToolSteps run={message.toolRun} />
+                ) : (
+                  <article
+                    className={`message ${message.role}`}
+                    aria-label={
+                      message.role === 'user'
+                        ? t('you')
+                        : message.role === 'assistant'
+                          ? 'Zylos'
+                          : t('systemMessage')
+                    }
+                  >
+                    {message.role === 'assistant' && (
+                      <div className="message-author">
+                        <Brand />
+                        <span>Zylos</span>
+                      </div>
+                    )}
+                    {message.role === 'system' && (
+                      <span className="system-label">{t('system')}</span>
+                    )}
+                    {message.role === 'assistant' ? (
+                      <MarkdownMessage text={message.text} />
+                    ) : (
+                      <p className="message-text">{message.text}</p>
+                    )}
+                    {message.page && (
+                      <p className="message-page" title={message.page.url}>
+                        {t(message.page.status === 'excerpt' ? 'pageAttached' : 'pageMetadataOnly')}{' '}
+                        · {message.page.title || message.page.url}
+                      </p>
+                    )}
+                    {message.role === 'user' && message.deliveryError && (
+                      <p className="message-delivery" role="alert">
+                        {errorText(message.deliveryError)}
+                      </p>
+                    )}
+                  </article>
+                )}
               </Fragment>
             ))}
           </div>
-        )}
-        {task && (
-          <section className="card task-card" data-phase={task.phase} aria-label={t('browserTask')}>
-            <p className="task-status">
-              <span className="status-dot" aria-hidden="true" />
-              {t(
-                task.phase === 'running'
-                  ? 'operatingBrowser'
-                  : task.phase === 'paused'
-                    ? 'browserPaused'
-                    : task.phase === 'finished'
-                      ? 'browserFinished'
-                      : 'browserReady',
-              )}
-            </p>
-            <p className="task-title" title={task.url}>
-              {task.title || t('browserTask')}
-            </p>
-            <p className="text-caption text-muted">
-              {t(task.tabCount === 1 ? 'taskTab' : 'taskTabs', { count: task.tabCount })}
-            </p>
-            <div className="task-buttons">
-              <button className="btn secondary-button" onClick={onReveal}>
-                {t('viewTabs')}
-              </button>
-              <button
-                id="stop-task"
-                className="btn secondary-button danger-button"
-                onClick={onStop}
-                disabled={stopping}
-              >
-                {stopping ? t('stopping') : t('stopTask')}
-              </button>
-            </div>
-          </section>
         )}
         {awaiting && (
           <p className="reply-status" role="status">
             {!state.connected
               ? t('replyDisconnected')
-              : delayed
-                ? t('replyDelayed')
-                : hasProgress
-                  ? t('replyProgress')
-                  : turn?.delivery === 'queued'
-                    ? t('replyQueued')
-                    : t('replyWaiting')}
+              : browserBusy
+                ? t('replyBrowserWorking')
+                : delayed
+                  ? t('replyDelayed')
+                  : hasBrowserActivity
+                    ? t('replyBrowserProgress')
+                    : hasProgress
+                      ? t('replyProgress')
+                      : turn?.delivery === 'queued'
+                        ? t('replyQueued')
+                        : t('replyWaiting')}
           </p>
         )}
       </div>

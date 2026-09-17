@@ -51,13 +51,16 @@ text / url / loaded / new-tab。元素条件需 ref 或 selector；text 条件�
 
 - 工作标签最多 8 个。新标签必须能由 Chrome 的 opener 信息追溯到当前任务；
   不接管用户无关标签。弹出窗口内的任务新页归入任务窗口。
-- frame 中的受限 URL 同样受策略控制。用户当前已有标签仍不提供接管入口。
+- frame 中的受限 URL 同样受策略控制。用户通过侧栏发送消息时关联的已有标签，可通过 `use-current-tab contextId=...` 接管；不能按任意 tabId 接管其他个人标签。
 - CSS 查找穿透 open Shadow DOM；closed root 中暴露到 AX 树的元素可用 snapshot ref 操作。
 - iframe 坐标支持普通布局及轴向缩放；旋转、透视 iframe 不保证可操作，检测到时拒绝坐标推算。
 - 坐标单位是当前顶层视口的 CSS 像素，不是截图的物理像素。窗口缩放或页面变化后需重新观察。
 - `select` 用于原生 select；自定义下拉框组合使用 hover/click/keypress/find。
 - `DIALOG_OPEN` 表示操作可能已经触发弹窗。读取并处理 dialog，**不要重新点击触发按钮**。
 - `PAGE_CHANGED` 后检查 URL/页面结果；不能据此认定刚才的点击没执行。`STALE_ELEMENT` 用新 snapshot/find 获取引用。
+- 普通 `click` 的 mouseReleased 已获 Chrome 确认后，若页面在收尾校验时变化，返回 `done:true,navigating:true,needsObservation:true`，提示等待并观察新页面；不重复点击。点击前的页面变化和控制撤销仍报错。
+- 完整元素引用如 `@1a2b3c4d-e17` 支持省略 `@`，但仍必须匹配当前页面代次中的原始完整 ID；缩短或猜测引用仍无效。
+- CSS 属性值中的 `/` 等标点需要引号，例如 `a[href*="/comments/"]`。
 - 只有明确发生在原生 mousePressed 之前的命中变化才会重新定位，最多 2 次；不会自动重放已提交的点击。
 - requestId 的成功结果缓存及在途合并均限于当前 worker；CLI 每次运行生成新 ID。
   改变参数复用同一 ID 会返回 `REQUEST_ID_CONFLICT`。这不是跨重启的 exactly-once 保证。

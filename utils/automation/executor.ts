@@ -6,6 +6,7 @@ import { cleanupTask, recordTask } from './task-lifecycle';
 import { PointerMotion } from './pointer-motion';
 import type { Command } from '../commands';
 import type { CdpResults, Cursor, GrantedTab, Point, Scope } from './types';
+import { canReadPage, readPageExcerpt } from './page-context';
 
 export const SCREENSHOT_TIMEOUT_MS = 12_000;
 
@@ -65,7 +66,8 @@ const inScope = (tab: chrome.tabs.Tab, session: Scope | null) =>
   !tab.incognito &&
   tab.id !== undefined &&
   session.tabIds.includes(tab.id) &&
-  tab.groupId === session.groupId;
+  (tab.id === session.borrowedTabId ||
+    (session.groupId !== null && tab.groupId === session.groupId));
 let groupUpdates: Promise<unknown> = Promise.resolve();
 function markTask(session: Scope, phase: Scope['phase']) {
   if (control === session) {
@@ -75,7 +77,7 @@ function markTask(session: Scope, phase: Scope['phase']) {
   const next = groupUpdates
     .catch(() => {})
     .then(async () => {
-      if (control !== session) return;
+      if (control !== session || session.groupId === null) return;
       await chrome.tabGroups.update(session.groupId, {
         color: phase === 'ready' ? 'green' : 'grey',
         title: 'zylos',
@@ -90,6 +92,99 @@ function serial<T>(fn: () => Promise<T>): Promise<T> {
   const next = attachmentQueue.catch(() => {}).then(fn);
   attachmentQueue = next.catch(() => {});
   return next;
+}
+
+export function capturePageExcerpt(tab: chrome.tabs.Tab & { id: number }) {
+  return serial(async () => {
+    const fresh = await chrome.tabs.get(tab.id);
+    if (!canReadPage(fresh) || fresh.url !== tab.url || fresh.windowId !== tab.windowId)
+      throw new Error('PAGE_CHANGED');
+    return readPageExcerpt(tab, grant?.id === tab.id);
+  });
+}
+async function groupOwnedTab(session: Scope, tabId: number) {
+  if (control !== session) fail('STOPPED');
+  const groupId = await chrome.tabs.group({
+    tabIds: [tabId],
+    ...(session.groupId === null
+      ? { createProperties: { windowId: session.windowId } }
+      : { groupId: session.groupId }),
+  });
+  if (control !== session) fail('STOPPED');
+  session.groupId = groupId;
+  await recordTask(session.sessionId, session.windowId, groupId, tabId, true);
+}
+
+/** Borrow the page attached to a user message; never navigate, regroup or own it. */
+export async function useExistingTab(
+  expected: { tabId: number; windowId: number; url: string; loaderId?: string },
+  assertActive: () => void,
+) {
+  const tab = await chrome.tabs.get(expected.tabId).catch(() => null);
+  assertActive();
+  if (!tab || tab.windowId !== expected.windowId || !canReadPage(tab))
+    fail('TAB_NOT_GRANTED', 'The shared page is closed, restricted or unavailable');
+  if (tab.url !== expected.url)
+    fail('PAGE_CHANGED', 'The shared page navigated; ask for a new message from the current page');
+  if (!inScope(tab, control)) {
+    // Changing targets hands previous results back instead of closing them.
+    const finishing = completeTask();
+    const revision = consentRevision;
+    await finishing;
+    assertActive();
+    if (revision !== consentRevision) fail('STOPPED');
+    const session: Scope = {
+      scope: 'task',
+      phase: 'ready',
+      windowId: tab.windowId,
+      sessionId: crypto.randomUUID(),
+      groupId: null,
+      borrowedTabId: expected.tabId,
+      tabId: expected.tabId,
+      tabIds: [expected.tabId],
+    };
+    await recordTask(session.sessionId, session.windowId, null, expected.tabId, false);
+    if (revision !== consentRevision) {
+      await cleanupTask(session.sessionId).catch(() => {});
+      fail('STOPPED');
+    }
+    assertActive();
+    control = session;
+  }
+  const session = control!;
+  session.tabId = expected.tabId;
+  parked = false;
+  try {
+    await syncTarget();
+    assertActive();
+    if (control !== session || grant?.id !== expected.tabId) fail('STOPPED');
+    const { frameTree } = (await chrome.debugger.sendCommand(
+      { tabId: expected.tabId },
+      'Page.getFrameTree',
+    )) as { frameTree: { frame: { loaderId?: string; url?: string } } };
+    assertActive();
+    if (control !== session) fail('STOPPED');
+    const fresh = await chrome.tabs.get(expected.tabId);
+    if (control !== session || !inScope(fresh, session)) fail('STOPPED');
+    if (
+      !canReadPage(fresh) ||
+      fresh.url !== expected.url ||
+      (expected.loaderId && frameTree.frame.loaderId !== expected.loaderId)
+    )
+      fail('PAGE_CHANGED');
+    await markTask(session, 'ready');
+    assertActive();
+    if (control !== session) fail('STOPPED');
+    return {
+      selected: true,
+      tabId: expected.tabId,
+      url: expected.url,
+      borrowed: session.borrowedTabId === expected.tabId,
+    };
+  } catch (error) {
+    if (control === session) await completeTask().catch(() => {});
+    throw error;
+  }
 }
 async function detachCurrent(strict = false) {
   const old = grant;
@@ -417,7 +512,7 @@ export function initializeExecutor() {
         await cleanupTask(session.sessionId).catch(() => {});
         return;
       }
-      await chrome.tabs.group({ tabIds: [id], groupId: session.groupId });
+      await groupOwnedTab(session, id);
       if (control !== session) {
         await cleanupTask(session.sessionId).catch(() => {});
         return;
@@ -453,7 +548,8 @@ export async function revealTask() {
   if (!session) fail('CONTROL_NOT_GRANTED');
   const tab = await chrome.tabs.get(session.tabId);
   if (control !== session || !inScope(tab, session)) fail('TASK_TAB_UNAVAILABLE');
-  await chrome.tabGroups.update(session.groupId, { collapsed: false });
+  if (session.groupId !== null && session.tabId !== session.borrowedTabId)
+    await chrome.tabGroups.update(session.groupId, { collapsed: false });
   if (control !== session) fail('STOPPED');
   await chrome.tabs.update(session.tabId, { active: true });
   if (control === session) await chrome.windows.update(session.windowId, { focused: true });
@@ -743,7 +839,7 @@ export async function execute(command: Command, deadline: number) {
       try {
         await recordTask(session.sessionId, session.windowId, session.groupId, target.id, true);
         checkSession();
-        await chrome.tabs.group({ tabIds: [target.id], groupId: session.groupId });
+        await groupOwnedTab(session, target.id);
         checkSession();
         session.tabIds.push(target.id);
       } catch (error) {
@@ -787,6 +883,7 @@ export async function execute(command: Command, deadline: number) {
   checkSession();
   const lease = grant;
   const startGeneration = generation;
+  let clickReleaseAcknowledged = false;
   let screenshotDeadline: number | undefined;
   let screenshotStage = '';
   const check = () => {
@@ -843,10 +940,16 @@ export async function execute(command: Command, deadline: number) {
     if (sessionId && frameSessions().get(sessionId)?.tabId !== lease.id) fail('FRAME_UNAVAILABLE');
     if (dialog) fail('DIALOG_OPEN', `${dialog.type}: ${dialog.message}; use dialog`);
     const target = { tabId: lease.id, ...(sessionId ? { sessionId } : {}) };
-    const result = await boundedCdp(
-      () => chrome.debugger.sendCommand(target, method, params),
-      check,
-    );
+    const result = await boundedCdp(async () => {
+      const value = await chrome.debugger.sendCommand(target, method, params);
+      if (
+        command.op === 'click' &&
+        method === 'Input.dispatchMouseEvent' &&
+        params.type === 'mouseReleased'
+      )
+        clickReleaseAcknowledged = true;
+      return value;
+    }, check);
     check();
     return result;
   }
@@ -998,7 +1101,28 @@ export async function execute(command: Command, deadline: number) {
     }
   }
   dragData = null;
-  return actions.run(command);
+  try {
+    return await actions.run(command);
+  } catch (error) {
+    // A normal link click can navigate before CDP's post-dispatch check runs.
+    // Report the acknowledged click, without replaying input on the new page.
+    // Changes before mouseReleased, unacknowledged input and revoked control
+    // retain their original errors.
+    if (!clickReleaseAcknowledged || (error as { code?: string }).code !== 'PAGE_CHANGED')
+      throw error;
+    checkSession();
+    const tab = await chrome.tabs.get(lease.id);
+    checkSession();
+    if (
+      grant !== lease ||
+      !inScope(tab, session) ||
+      tab.id !== session.tabId ||
+      !inspectable(tab) ||
+      isBlockedUrl(tab.url)
+    )
+      throw error;
+    return { done: true, navigating: true, needsObservation: true, tabId: tab.id, url: tab.url };
+  }
 }
 
 function boundedCdp<T>(work: () => Promise<T>, check: () => void): Promise<T> {

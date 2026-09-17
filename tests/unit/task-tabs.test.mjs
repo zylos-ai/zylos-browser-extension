@@ -137,6 +137,65 @@ async function fixture() {
   return { executor, tabs, groups, attached, calls, command, start };
 }
 
+test.each(['mouseMoved', 'mousePressed', 'mouseReleased'])(
+  'navigation during %s only completes an acknowledged full click',
+  async (event) => {
+    const s = await fixture();
+    await s.start();
+    const tab = s.tabs.get(s.executor.currentControl().tabId);
+    const send = chrome.debugger.sendCommand;
+    let navigated = false;
+    chrome.debugger.sendCommand = async (target, method, params) => {
+      const result = await send(target, method, params);
+      if (!navigated && method === 'Input.dispatchMouseEvent' && params.type === event) {
+        navigated = true;
+        tab.url = 'https://example.com/post';
+        chrome.tabs.onUpdated.emit(tab.id, { url: tab.url }, { ...tab });
+      }
+      return result;
+    };
+    const click = s.command({ op: 'click', x: 100, y: 100 });
+    if (event === 'mouseReleased') {
+      assert.deepEqual(await click, {
+        done: true,
+        navigating: true,
+        needsObservation: true,
+        tabId: tab.id,
+        url: tab.url,
+      });
+      assert.equal(
+        s.calls.filter(
+          (c) => c.method === 'Input.dispatchMouseEvent' && c.params.type === 'mouseReleased',
+        ).length,
+        1,
+      );
+    } else {
+      await assert.rejects(click, (e) => e.code === 'PAGE_CHANGED');
+      assert.equal(
+        s.calls.filter(
+          (c) => c.method === 'Input.dispatchMouseEvent' && c.params.type === 'mouseReleased',
+        ).length,
+        0,
+      );
+    }
+    await s.executor.release();
+  },
+);
+
+test('revoked control after mouse release is still stopped, never turned into navigation success', async () => {
+  const s = await fixture();
+  await s.start();
+  const send = chrome.debugger.sendCommand;
+  chrome.debugger.sendCommand = async (target, method, params) => {
+    const result = await send(target, method, params);
+    if (method === 'Input.dispatchMouseEvent' && params.type === 'mouseReleased')
+      await s.executor.release();
+    return result;
+  };
+  await assert.rejects(s.command({ op: 'click', x: 100, y: 100 }), (e) => e.code === 'STOPPED');
+  assert.equal(s.executor.currentControl(), null);
+});
+
 test('a final answer releases control and retains all result pages across recovery and a new task', async () => {
   const s = await fixture();
   await s.start();
@@ -548,4 +607,68 @@ test('来源窗口不符时首个 open 不回退当前窗口', async () => {
     }),
   );
   assert.equal(s.calls.filter((c) => c.method === 'tabs.create').length, 0);
+});
+
+test('borrowed user tab stays in its original group after stop, final reply, and recovery', async () => {
+  for (const ending of ['stop', 'final', 'recovery', 'browser-restart']) {
+    const s = await fixture();
+    s.tabs.get(1).groupId = 77;
+    s.groups.set(77, { id: 77, title: 'My research', color: 'blue' });
+    await s.executor.useExistingTab({ tabId: 1, windowId: 1, url: s.tabs.get(1).url }, () => {});
+    assert.equal(s.executor.currentGrant().id, 1);
+    assert.equal(s.tabs.size, 2, 'adoption never opens another page');
+    if (ending === 'final') await s.executor.completeTask();
+    else if (ending === 'stop') await s.executor.release();
+    else {
+      if (ending === 'browser-restart')
+        vi.spyOn(chrome.storage.session, 'get').mockResolvedValue({});
+      vi.resetModules();
+      const { recoverTasks } = await import('../../utils/automation/task-lifecycle');
+      await recoverTasks();
+      await s.executor.release();
+    }
+    assert.equal(s.tabs.get(1).groupId, 77);
+    assert.deepEqual(s.groups.get(77), { id: 77, title: 'My research', color: 'blue' });
+    assert.equal(s.tabs.size, 2);
+  }
+});
+
+test('borrowed target stays pinned across focus changes, and only newly created tabs are cleaned', async () => {
+  const s = await fixture();
+  await s.executor.useExistingTab({ tabId: 1, windowId: 1, url: s.tabs.get(1).url }, () => {});
+  s.tabs.get(1).active = false;
+  s.tabs.get(2).active = true;
+  chrome.tabs.onActivated.emit({ tabId: 2, windowId: 1 });
+  assert.equal(s.executor.currentControl().tabId, 1);
+  const next = await s.executor.execute(
+    { op: 'new-tab', url: 'https://example.com/work' },
+    Date.now() + 10000,
+  );
+  assert.notEqual(next.tabId, 1);
+  await s.executor.execute({ op: 'switch-tab', tabId: 1 }, Date.now() + 10000);
+  await s.executor.release();
+  assert.ok(s.tabs.has(1) && s.tabs.has(2));
+  assert.equal(s.tabs.get(1).groupId, -1);
+  assert.equal(s.tabs.has(next.tabId), false);
+});
+
+test('borrowed selection refuses navigation and never falls back to another active tab', async () => {
+  const s = await fixture();
+  await assert.rejects(
+    s.executor.useExistingTab({ tabId: 1, windowId: 1, url: 'https://example.com/old' }, () => {}),
+    (e) => e.code === 'PAGE_CHANGED',
+  );
+  await assert.rejects(
+    s.executor.useExistingTab(
+      { tabId: 1, windowId: 1, url: s.tabs.get(1).url, loaderId: 'old-document' },
+      () => {},
+    ),
+    (e) => e.code === 'PAGE_CHANGED',
+  );
+  await s.executor.useExistingTab({ tabId: 1, windowId: 1, url: s.tabs.get(1).url }, () => {});
+  s.tabs.delete(1);
+  chrome.tabs.onRemoved.emit(1);
+  assert.equal(s.executor.currentControl(), null);
+  assert.equal(s.tabs.has(2), true);
+  await s.executor.release();
 });

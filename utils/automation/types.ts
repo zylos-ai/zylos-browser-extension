@@ -9,7 +9,8 @@ export type Scope = {
   phase: 'ready' | 'paused' | 'finished';
   windowId: number;
   sessionId: string;
-  groupId: number;
+  groupId: number | null;
+  borrowedTabId?: number;
   tabId: number;
   tabIds: number[];
 };

@@ -11,6 +11,8 @@ export function ChatComposer({
   sending,
   onSend,
   inputRef,
+  preview,
+  pageContext,
 }: {
   draft: string;
   onDraftChange: (value: string) => void;
@@ -18,6 +20,8 @@ export function ChatComposer({
   sending: boolean;
   onSend: () => void;
   inputRef: React.RefObject<HTMLTextAreaElement | null>;
+  preview?: React.ReactNode;
+  pageContext?: React.ReactNode;
 }) {
   const { t } = useI18n();
   const composing = useRef(false);
@@ -39,6 +43,8 @@ export function ChatComposer({
       }}
     >
       <div className="composer-field">
+        {preview}
+        {pageContext}
         <textarea
           ref={inputRef}
           id="message"

@@ -3,7 +3,8 @@ import { LANGUAGE_STORAGE_KEY, setWorkerLanguage } from '../../utils/i18n';
 // `relayUrl + key`, answers `req` frames through the executor, and carries the
 // side-panel chat both ways. Nothing here trusts the relay: params are
 // re-validated, URLs are re-screened, and the debugger is only ever attached to
-// tabs this extension created.
+// task-owned tabs or the current page explicitly associated with a panel message.
+import { captureCurrentPage, clearPageContexts, forgetPageContext } from '../../utils/page-context';
 import {
   completeTask,
   currentControl,
@@ -41,6 +42,8 @@ import {
   dispatch,
 } from '../../utils/remote-commands';
 import { z } from 'zod';
+import { ToolActivity } from '../../utils/tool-activity';
+import { LivePreview } from '../../utils/automation/live-preview';
 
 const BACKOFF_MIN_MS = 1000;
 const BACKOFF_MAX_MS = 60_000;
@@ -49,6 +52,7 @@ const MAX_INFLIGHT = 8;
 
 export function startRemoteBackground() {
   initializeExecutor();
+  const preview = new LivePreview();
   const state: RemoteState = { ...initialRemoteState, chat: [] };
   let config: RemoteConfig = remoteConfigSchema.parse({});
   let socket: WebSocket | null = null;
@@ -61,6 +65,7 @@ export function startRemoteBackground() {
   const receivedChats = new Set<string>();
 
   const publish = () => {
+    preview.sync(currentControl(), currentGrant(), state.connected);
     void chrome.runtime.sendMessage({ type: 'remote-updated', state: snapshot() }).catch(() => {});
   };
   function snapshot(): RemoteState {
@@ -93,13 +98,38 @@ export function startRemoteBackground() {
   onState(publish);
 
   // ---------------------------------------------------------------- chat log
+  let saveQueue: Promise<unknown> = Promise.resolve();
+  let activitySaveTimer: ReturnType<typeof setTimeout> | undefined;
+  function persistChat() {
+    clearTimeout(activitySaveTimer);
+    // Serialize writes and capture the current log when the write starts, so a
+    // delayed tool update can never restore history that the user has cleared.
+    const saving = saveQueue
+      .catch(() => {})
+      .then(() => chrome.storage.local.set({ [REMOTE_CHAT_LOG_KEY]: structuredClone(state.chat) }));
+    saveQueue = saving;
+    return saving;
+  }
+  const activity = new ToolActivity(
+    () => state.chat,
+    () => {
+      publish();
+      clearTimeout(activitySaveTimer);
+      activitySaveTimer = setTimeout(() => {
+        void persistChat().catch(() => {
+          state.error = 'ui.error.chatSaveFailed';
+          publish();
+        });
+      }, 250);
+    },
+  );
   async function appendChat(entry: ChatEntry) {
     const existing =
       entry.id && state.chat.findIndex((m) => m.role === entry.role && m.id === entry.id);
     if (typeof existing === 'number' && existing >= 0) state.chat[existing] = entry;
     else state.chat.push(entry);
     if (state.chat.length > CHAT_LOG_CAP) state.chat.splice(0, state.chat.length - CHAT_LOG_CAP);
-    await chrome.storage.local.set({ [REMOTE_CHAT_LOG_KEY]: state.chat });
+    await persistChat();
     publish();
   }
 
@@ -128,7 +158,7 @@ export function startRemoteBackground() {
           : m.state === 'unknown'
             ? 'ui.error.deliveryUnconfirmed'
             : 'ui.error.chatDeliveryFailed';
-    await chrome.storage.local.set({ [REMOTE_CHAT_LOG_KEY]: state.chat });
+    await persistChat();
     publish();
   }
 
@@ -152,6 +182,7 @@ export function startRemoteBackground() {
   }
 
   function disconnect(reason: string) {
+    preview.finish('interrupted');
     clearTimeout(reconnectTimer);
     generation++;
     const old = socket;
@@ -160,6 +191,7 @@ export function startRemoteBackground() {
     state.connecting = false;
     inflight.clear();
     idem.cancel();
+    activity.end('interrupted');
     try {
       old?.close(1000, reason);
     } catch {
@@ -199,11 +231,13 @@ export function startRemoteBackground() {
     };
     ws.onclose = (ev) => {
       if (gen !== generation) return;
+      preview.finish('interrupted');
       socket = null;
       state.connected = false;
       state.connecting = false;
       inflight.clear();
       idem.cancel();
+      activity.end('interrupted');
       // 4001 = superseded by a newer socket of ours (another window / reload); do not fight it.
       if (ev.code === 4001) state.error = 'ui.error.connectionTaken';
       else if (ev.code === 1006 && !state.error) state.error = 'ui.error.connectionRejected';
@@ -239,8 +273,11 @@ export function startRemoteBackground() {
         const receive = async () => {
           let completion: Promise<void> | undefined;
           if (m.role === 'assistant' && m.final) {
+            preview.finish('completed');
             idem.cancel();
+            activity.end('completed');
             completion = completeTask().catch(() => {
+              preview.finish('error');
               state.error = 'ui.error.taskCleanupFailed';
               publish();
             });
@@ -306,14 +343,19 @@ export function startRemoteBackground() {
     const reply = (frame: Record<string, unknown>) => {
       if (gen === generation) send({ id: m.id, ...frame });
     };
-    if (inflight.has(m.id))
+    const step = activity.begin(m.method, m.params);
+    if (inflight.has(m.id)) {
+      step?.finish('DUPLICATE_ID');
       return reply({ type: 'error', code: 'DUPLICATE_ID', message: 'id already in flight' });
-    if (inflight.size >= MAX_INFLIGHT)
+    }
+    if (inflight.size >= MAX_INFLIGHT) {
+      step?.finish('BUSY');
       return reply({
         type: 'error',
         code: 'BUSY',
         message: `more than ${MAX_INFLIGHT} commands in flight`,
       });
+    }
     const active = { method: m.method };
     inflight.set(m.id, active);
     publish();
@@ -327,9 +369,34 @@ export function startRemoteBackground() {
           keyId: state.keyId,
         },
         idem,
+        () => {
+          step?.start();
+          publish();
+        },
+        () => {
+          preview.resume(m.method);
+          publish();
+        },
       );
+      const replayed = !!(
+        result &&
+        typeof result === 'object' &&
+        'replayed' in result &&
+        result.replayed
+      );
+      if (gen === generation && !replayed) preview.result(m.method, false);
+      step?.finish(undefined, replayed);
+      if (m.method === 'stop' && gen === generation) step?.stop();
       reply({ type: 'resp', result });
     } catch (e) {
+      if (gen === generation) preview.result(m.method, true);
+      const code =
+        e instanceof z.ZodError
+          ? 'BAD_PARAMS'
+          : e && typeof e === 'object' && 'code' in e && typeof e.code === 'string'
+            ? e.code
+            : 'EXT_ERROR';
+      step?.finish(code);
       if (e instanceof RemoteError)
         reply({ type: 'error', code: e.code, message: e.message, details: e.details });
       else if (e instanceof z.ZodError)
@@ -363,6 +430,7 @@ export function startRemoteBackground() {
     state.keyId = config.key ? await keyIdOf(config.key) : '';
     snapshot();
     if (!changed) return;
+    clearPageContexts();
     disconnect('config changed');
     backoff = BACKOFF_MIN_MS;
     if (!config.enabled) {
@@ -395,6 +463,7 @@ export function startRemoteBackground() {
     const cfg = remoteConfigSchema.safeParse(saved[REMOTE_CONFIG_KEY] ?? {});
     const log = z.array(chatEntrySchema).safeParse(saved[REMOTE_CHAT_LOG_KEY] ?? []);
     state.chat = log.success ? log.data.slice(-CHAT_LOG_CAP) : [];
+    if (activity.recover()) await persistChat();
     const receipts = z.array(z.string().max(128)).safeParse(saved[REMOTE_CHAT_RECEIPTS_KEY] ?? []);
     if (receipts.success) for (const id of receipts.data.slice(-500)) receivedChats.add(id);
     for (const message of state.chat) {
@@ -455,20 +524,38 @@ export function startRemoteBackground() {
           if (!text) throw new Error('ui.error.emptyMessage');
           const id = crypto.randomUUID();
           const ts = Date.now();
-          if (!send({ type: 'chat', id, text, ts })) throw new Error('ui.error.sendFailed');
-          await appendChat({ id, role: 'user', text, ts, delivery: 'sent' });
+          const gen = generation;
+          const { context, page } = await captureCurrentPage(id, m.windowId, m.tabId);
+          if (gen !== generation || !send({ type: 'chat', id, text, ts, context })) {
+            forgetPageContext(id);
+            throw new Error('ui.error.sendFailed');
+          }
+          await appendChat({ id, role: 'user', text, ts, delivery: 'sent', page });
           return snapshot();
         }
         case 'remote-chat-clear':
+          preview.clear();
           state.chat = [];
-          await chrome.storage.local.set({ [REMOTE_CHAT_LOG_KEY]: [] });
+          await persistChat();
+          publish();
           return snapshot();
         case 'remote-reveal':
           await revealTask();
           return snapshot();
+        case 'remote-preview-reveal':
+          await preview.reveal();
+          return snapshot();
         case 'remote-stop':
+          preview.finish('stopped');
+          clearPageContexts();
           idem.cancel();
-          await release();
+          activity.end('stopped');
+          // Revoking control must not depend on history storage being available.
+          try {
+            await release();
+          } finally {
+            await persistChat();
+          }
           return snapshot();
       }
     })().then(

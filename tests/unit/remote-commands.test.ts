@@ -145,6 +145,23 @@ describe('remote dispatch', () => {
     await expect(call('tabs')).resolves.toBeTruthy();
   });
 
+  it('only actual execution resumes previews; cached and rejected requests do not', async () => {
+    const onExecute = vi.fn();
+    const req = {
+      method: 'click',
+      params: { ref: 'e1' },
+      requestId: 'preview-r1',
+      keyId: 'abcdef012345',
+    };
+    await dispatch(req, idem, undefined, onExecute);
+    await dispatch(req, idem, undefined, onExecute);
+    await rejects(
+      dispatch({ ...req, requestId: 'bad', params: {} }, idem, undefined, onExecute),
+      'BAD_PARAMS',
+    );
+    expect(onExecute).toHaveBeenCalledOnce();
+  });
+
   it('replays a retried mutating call instead of executing it twice', async () => {
     await call('open', { url: 'https://example.com/' });
     const a = await call('click', { ref: 'e1' }, { requestId: 'r1' });
