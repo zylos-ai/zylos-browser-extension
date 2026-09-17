@@ -47,9 +47,21 @@ paths returned by the transport are on the Agent host; use the image tool to
 read them. Do not claim to have seen pixels from JSON metadata alone.
 
 Use memory for concise accumulated findings, not raw old snapshots. Latest
-observation replaces old refs/state. Stop as soon as ALL requested outcomes are
-confirmed: no extra screenshots, repeated play/close clicks, cleanup browsing
-or reassurance checks. For playback, inspect the intended native media state
+observation replaces old refs/state. Before choosing another action, compare
+the latest evidence with the requested outcomes and retain confirmed outcomes
+in memory. Read a toggle/selection's state before changing it; leave an
+already-correct state alone. Uncertainty calls for a targeted read, never a
+click or keyboard toggle as verification. A loading/buffering state is not
+evidence that an input failed. Retry a state-changing action only when fresh
+evidence shows the requested state is unmet and the action can help. If the
+outcome remains unverifiable, report the completed parts and the uncertainty
+instead of alternating inputs. Revisit confirmed outcomes only after relevant
+changes or conflicting evidence.
+
+Stop as soon as ALL requested outcomes are confirmed: no extra screenshots,
+repeated play/close clicks, cleanup browsing or reassurance checks. Dismiss an
+overlay only if it blocks an unmet outcome. For playback, inspect the intended
+native media state
 (paused/ended/seeking/error/readyState/currentTime), not merely a click receipt.
 For searches confirm the query/results; for save/submit confirm the site result.
 Never repeat a submit to verify it. If facts remain uncertain, report uncertainty.

@@ -82,7 +82,7 @@ export const toolHelp = {
     description:
       'Select the existing page attached to a user message for reading and actions, without reopening or regrouping it.',
     constraints: [
-      'Use the exact contextId from that message, never a guessed tab ID. Contexts expire after 30 minutes or a worker restart. A navigated or closed page requires a new user message. Take a fresh snapshot/find after selecting. User-owned tabs are never closed by task cleanup.',
+      'Use the exact contextId from that message, never a guessed tab ID. Contexts expire after 30 minutes or a worker restart. A navigated or closed page requires a new user message. Use fresh evidence after selecting (returned automatically in the browser loop; request snapshot/find with direct RPC). User-owned tabs are never closed by task cleanup.',
     ],
   },
   start: {
@@ -174,12 +174,14 @@ export const toolHelp = {
     description: 'Send a page key, optionally to a referenced element, with modifiers.',
     constraints: [
       'key is one Unicode character or Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, Space. Browser chrome and OS shortcuts are unsupported.',
+      'A ref must identify a focusable element. A video or container is not necessarily focusable; reading it with find/inspect does not make it a keyboard target. A focus failure occurs before key dispatch; do not blindly retry without the ref, because that sends the key to the existing focus.',
+      'Space and site-specific playback shortcuts can toggle state. Read the intended player state first; an already-correct or buffering player needs no toggle. Use a shortcut only when its target and effect are known.',
     ],
     examples: [{ key: 'Enter' }, { key: 'a', modifiers: ['Meta'] }],
   },
-  back: { description: 'Initiate backward history navigation; follow with a loaded/URL wait.' },
-  forward: { description: 'Initiate forward history navigation; follow with a loaded/URL wait.' },
-  reload: { description: 'Reload the current task tab; follow with a loaded/URL wait.' },
+  back: { description: 'Initiate backward history navigation in the current task tab.' },
+  forward: { description: 'Initiate forward history navigation in the current task tab.' },
+  reload: { description: 'Initiate a reload of the current task tab.' },
   dialog: {
     description:
       'Inspect, accept or dismiss an open alert/confirm/prompt/beforeunload dialog. Can run while a browser action is waiting.',

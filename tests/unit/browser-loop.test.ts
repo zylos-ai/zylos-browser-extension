@@ -63,6 +63,33 @@ describe('extension-owned loop', () => {
     expect(() => loop.accept(id, { kind: 'done', text: 'changed' })).toThrow('different contents');
     loop.cancel();
   });
+  it('delivers action constraints with the browser schemas, without resending them every round', async () => {
+    const { loop, requests } = setup();
+    const initial = requests[0]!.payload as { tools: { name: string }[] };
+    expect(initial.tools.map((tool) => tool.name)).toEqual(['use-current-tab', 'open']);
+    loop.accept(requests[0]!.id, action);
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    const payload = requests[1]!.payload as {
+      tools: { name: string; constraints?: string[]; examples?: unknown[] }[];
+    };
+    const constraints = (name: string) =>
+      payload.tools.find((tool) => tool.name === name)?.constraints?.join(' ') || '';
+    expect(constraints('click')).toContain('leave an already-correct state alone');
+    expect(constraints('inspect')).toContain('Buffering does not justify repeatedly toggling');
+    expect(constraints('inspect')).toContain('readyState >= 3');
+    expect(constraints('keypress')).toContain('do not blindly retry without the ref');
+    expect(payload.tools.find((tool) => tool.name === 'find')?.examples).toContainEqual({
+      selector: 'video,audio',
+    });
+    loop.accept(requests[1]!.id, {
+      kind: 'actions',
+      actions: [{ method: 'find', params: { selector: 'video,audio' } }],
+    });
+    await vi.waitFor(() => expect(requests).toHaveLength(3));
+    expect(requests[2]!.payload).not.toHaveProperty('tools');
+    expect(requests[2]!.payload).not.toHaveProperty('instructions');
+    loop.cancel();
+  });
   it('validates the entire batch before consuming the pending decision', () => {
     const { loop, requests, io } = setup();
     const id = requests[0]!.id;
