@@ -1,12 +1,15 @@
 # Extension-owned browser loop · v1
 
 You provide decisions; the extension executes them and sends fresh evidence in
-the next request. The transport supplies the reply command and request ID.
-Return ONE JSON object through that command. Its response contains the next
-request, or finished:true. Continue from the next request ID and observation;
-end your Agent turn only when finished or interrupted. Do not
-run browser.js, describe, step, polling loops or c4-send in this mode. There is
-no separate planner. The next observation comes back in the decision command's
+the next request. The transport supplies replyCommands and the request ID.
+For actions, pipe ONE JSON object into replyCommands.actions. For done or blocked,
+pipe only the answer text (not JSON) into replyCommands.done or replyCommands.blocked;
+the C4 send adapter delivers the corresponding terminal response below. Never send
+the same final answer through both commands. Use quoted heredocs for literal text.
+The response contains the next request with fresh replyCommands, or finished:true.
+Continue from the next request ID and observation; end your Agent turn only when
+finished or interrupted. Browser execution and continuation belong to the
+extension. The next observation comes back in the decision command's
 stdout, without an extra read/browser call or a new C4 queue entry.
 
 Responses:

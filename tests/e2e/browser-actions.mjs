@@ -1,5 +1,5 @@
 // Run against a disposable Chrome profile and the actual sibling thin relay.
-// No user profile, external websites, C4 messages, or installed browser state.
+// No user profile, external websites, live Agent queue, or installed browser state.
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -136,14 +136,12 @@ try {
   await new Promise((resolve) => site.listen(0, resolve));
   const url = `http://127.0.0.1:${site.address().port}/`;
   relay = await start({
-    agentLoop: false, // Legacy RPC compatibility; extension-owned rounds are tested below separately.
     extPort: 0,
     agentPort: 0,
     monitor: true,
     monitorFile: path.join(profile, 'monitor.json'),
     agentMonitorDir: null,
-    outboxFile: path.join(profile, 'chat-outbox.json'),
-    onChat: async (message) => {
+    onRequest: async (message) => {
       chatMessages.push(message);
       if (message.text === 'fixture:fail-delivery')
         return { ok: false, code: 'C4_DELIVERY_FAILED' };
@@ -265,34 +263,7 @@ try {
     async () =>
       Object.keys((await (await fetch(rpcUrl + '/status')).json()).extensions || {}).length,
   );
-  async function rpc(method, params = {}, options = {}) {
-    const response = await fetch(rpcUrl + '/rpc', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        method,
-        params,
-        requestId: crypto.randomUUID(),
-        timeoutMs: 20000,
-        ...options,
-      }),
-    });
-    const body = await response.json();
-    if (!body.ok)
-      throw Object.assign(new Error(`${method}: ${body.code}: ${body.message}`), {
-        code: body.code,
-        details: body.details,
-      });
-    return body.result;
-  }
-  async function find(selector, frameId) {
-    const result = await rpc('find', { selector, ...(frameId ? { frameId } : {}) });
-    assert.equal(result.matches.length, 1, `${selector}: ${JSON.stringify(result)}`);
-    return result.matches[0].ref;
-  }
-  const state = async (selector) => rpc('inspect', { ref: await find(selector) });
   const check = async (name, work) => {
-    if (process.env.BROWSER_LOOP_ONLY === '1' && !name.startsWith('extension loop')) return;
     if (process.env.E2E_FILTER && !name.includes(process.env.E2E_FILTER)) return;
     await work();
     checks.push(name);
@@ -310,12 +281,118 @@ try {
     if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
     return result.result.value;
   };
+  const panelState = async () =>
+    (await previewPanel("chrome.runtime.sendMessage({type:'remote-state'})")).value;
+  await eventually(async () => (await panelState()).connected);
+  const askLoop = async (text, tab) => {
+    const reply = await previewPanel(
+      `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-chat-send', text, ...(tab ? { tabId: tab.id, windowId: tab.windowId } : {}) })})`,
+    );
+    assert.equal(reply.ok, true, JSON.stringify(reply));
+    return eventually(() =>
+      chatMessages.find((message) => message.text === text && message.request),
+    );
+  };
+  const decision = async (request, value) => {
+    const response = await fetch(rpcUrl + '/decision', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: request.request.id, decision: value }),
+    });
+    const body = await response.json();
+    if (!body.ok)
+      throw Object.assign(new Error(`${body.code}: ${body.message}`), { code: body.code });
+    if (body.next && !chatMessages.some((message) => message.request?.id === body.next.id))
+      chatMessages.push({
+        text: body.next.text,
+        chatId: body.next.taskId,
+        request: { id: body.next.id, round: body.next.round, payload: body.next.payload },
+      });
+    return { replayed: false, ...body };
+  };
+  const nextRound = (request) =>
+    eventually(
+      () =>
+        chatMessages.find(
+          (message) =>
+            message.chatId === request.chatId &&
+            message.request?.round === request.request.round + 1,
+        ),
+      18000,
+    );
+  const refIn = (request, label) => {
+    const line = request.request.payload.observation.page.text
+      .split('\n')
+      .find((line) => line.includes(JSON.stringify(label)));
+    assert.ok(line, `Missing ref ${label}: ${JSON.stringify(request.request.payload.observation)}`);
+    return line.split(' ')[0];
+  };
+  const finishLoop = async (request, text) => {
+    // Exercise the standard channel adapter with a real Chrome extension.
+    // When Core is available, also exercise its real sender and isolated SQLite.
+    const coreSend =
+      process.env.ZYLOS_C4_SEND ||
+      path.resolve(root, '../zylos-core/skills/comm-bridge/scripts/c4-send.js');
+    const hasCore = await fs.access(coreSend).then(
+      () => true,
+      () => false,
+    );
+    const isolatedZylos = path.join(profile, 'zylos');
+    const skills = path.join(isolatedZylos, '.claude/skills');
+    await fs.mkdir(skills, { recursive: true });
+    try {
+      await fs.symlink(relayRoot, path.join(skills, 'browser-remote'));
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
+    const endpoint = `${relay.ext.connectedIds()[0]}|req:${request.request.id}|status:done`;
+    const send = () =>
+      new Promise((resolve, reject) => {
+        const child = spawn(
+          process.execPath,
+          hasCore
+            ? [coreSend, 'browser-remote', endpoint]
+            : [path.join(relayRoot, 'scripts/send.js'), endpoint, text],
+          {
+            env: { ...process.env, BROWSER_REMOTE_AGENT_URL: rpcUrl, ZYLOS_DIR: isolatedZylos },
+            stdio: ['pipe', 'pipe', 'pipe'],
+          },
+        );
+        let output = '';
+        child.stdout.on('data', (chunk) => (output += chunk));
+        child.stderr.on('data', (chunk) => (output += chunk));
+        child.on('error', reject);
+        child.on('close', (code) => {
+          if (code !== 0) return reject(new Error(output));
+          try {
+            const result = JSON.parse(output.split('\n').find((line) => line.startsWith('{"ok":')));
+            assert.equal(result.finished, true);
+            assert.equal(result.status, 'done');
+            resolve(result);
+          } catch (error) {
+            reject(error);
+          }
+        });
+        child.stdin.end(hasCore ? text : '');
+      });
+    await send();
+    assert.equal((await send()).replayed, true, 'final reply retry reuses the completion receipt');
+    await eventually(
+      async () =>
+        !(await previewPanel("chrome.runtime.sendMessage({type:'remote-state'})")).value.loopActive,
+    );
+    assert.equal((await panelState()).task, null);
+  };
   await check(
     'live preview streams real background-tab frames, stays anchored, and freezes on completion',
     async () => {
-      await rpc('open', { url: url + 'preview' });
-      await rpc('wait', { condition: 'loaded' });
-      const tab = (await rpc('info')).control.tabId;
+      let request = await askLoop('Preview the research board');
+      const action = async (method, params = {}) => {
+        await decision(request, { kind: 'actions', actions: [{ method, params }] });
+        request = await nextRound(request);
+      };
+      await action('open', { url: url + 'preview' });
+      const tab = (await panelState()).task.tabId;
       await eventually(() =>
         previewPanel("document.querySelector('.live-preview-image')?.naturalWidth > 0"),
       );
@@ -404,15 +481,15 @@ try {
         );
         await previewPanel('document.activeElement.blur()');
       }
-      const controlledSession = (await rpc('info')).control.sessionId;
+      const controlledSession = (await panelState()).task.sessionId;
       await previewPanel("document.querySelector('.preview-close').click()");
       await eventually(() => previewPanel("!document.querySelector('.live-preview')"));
       assert.equal(await previewPanel("!!document.querySelector('.preview-restore')"), true);
       assert.equal(await previewPanel("!!document.querySelector('#stop-task')"), true);
-      assert.equal((await rpc('info')).control.sessionId, controlledSession);
+      assert.equal((await panelState()).task.sessionId, controlledSession);
       await save('live-preview-closed-320');
-      await rpc('new-tab', { url: url + 'preview?second' });
-      const secondTab = (await rpc('info')).control.tabId;
+      await action('new-tab', { url: url + 'preview?second' });
+      const secondTab = (await panelState()).task.tabId;
       assert.notEqual(secondTab, tab);
       assert.equal(await previewPanel("!!document.querySelector('.live-preview')"), false);
       await previewPanel("document.querySelector('.preview-restore').click()");
@@ -421,13 +498,13 @@ try {
           `Number(document.querySelector('.live-preview')?.dataset.tabId) === ${secondTab} && document.querySelector('.live-preview-image')?.naturalWidth > 0`,
         ),
       );
-      await rpc('switch-tab', { tabId: tab });
+      await action('switch-tab', { tabId: tab });
       await eventually(() =>
         previewPanel(
           `Number(document.querySelector('.live-preview')?.dataset.tabId) === ${tab} && document.querySelector('.live-preview-image')?.naturalWidth > 0`,
         ),
       );
-      await rpc('finish');
+      await finishLoop(request, 'Preview fixture complete');
       await eventually(
         async () =>
           (await previewPanel("document.querySelector('.live-preview').dataset.status")) ===
@@ -445,13 +522,6 @@ try {
         frozen,
       );
       await save('live-preview-completed-320');
-      // A final reply releases control but leaves the preview and original tab available.
-      await fetch(rpcUrl + '/chat', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ text: 'Preview fixture complete', final: true }),
-      });
-      await eventually(async () => (await rpc('info')).control === null);
       await previewPanel("document.querySelector('.preview-view').click()");
       await eventually(async () => (await previewPanel(`chrome.tabs.get(${tab})`)).active);
       assert.equal(
@@ -464,1230 +534,6 @@ try {
       await eventually(() => previewPanel("!document.querySelector('.live-preview')"));
     },
   );
-  await check(
-    'extension supplies its guide and schemas through the unmodified RPC transport',
-    async () => {
-      const catalog = await rpc('describe');
-      assert.equal(catalog.schemaVersion, 1);
-      assert(catalog.instructions.includes('Browser operation guide'));
-      assert(catalog.tools.some((tool) => tool.name === 'observe'));
-      const details = await rpc('describe', { methods: ['fill', 'wait'] });
-      assert.deepEqual(details.tools[0].parameters.required, ['ref', 'text']);
-      assert.equal(details.tools[1].parameters.properties.timeoutMs.maximum, 60000);
-      assert.equal((await rpc('info')).control, null, 'discovery does not create a browser task');
-      await assert.rejects(
-        rpc('describe', { method: 'not-in-extension' }),
-        (error) => error.code === 'UNKNOWN_METHOD',
-      );
-    },
-  );
-  await check('one round trip opens, waits and observes; child steps remain visible', async () => {
-    await previewPanel("chrome.runtime.sendMessage({type:'remote-chat-clear'})");
-    const separateStart = performance.now();
-    await rpc('open', { url });
-    await rpc('wait', { condition: 'loaded' });
-    const separate = await rpc('snapshot', { interactive: true });
-    const separateMs = performance.now() - separateStart;
-    const combinedStart = performance.now();
-    const combined = await rpc('step', {
-      action: { op: 'open', url },
-      read: { op: 'snapshot', interactive: true },
-    });
-    const combinedMs = performance.now() - combinedStart;
-    assert.equal(combined.completed, true);
-    assert.deepEqual(
-      combined.steps.map((s) => [s.method, s.status]),
-      [
-        ['open', 'success'],
-        ['wait', 'success'],
-        ['snapshot', 'success'],
-      ],
-    );
-    assert(separate.text.includes('Browser actions fixture'));
-    assert(combined.steps.at(-1).result.text.includes('Browser actions fixture'));
-    await eventually(() => previewPanel("document.querySelectorAll('.tool-log-step').length >= 6"));
-    assert.deepEqual(
-      await previewPanel(
-        "[...document.querySelectorAll('.tool-step-detail code')].slice(-3).map(e=>e.textContent)",
-      ),
-      ['open', 'wait', 'snapshot'],
-    );
-    console.log(
-      'COMPARISON',
-      JSON.stringify({
-        workflow: 'open/wait/snapshot',
-        separate: { rpcCalls: 3, ms: Math.round(separateMs) },
-        combined: { rpcCalls: 1, ms: Math.round(combinedMs) },
-        includesAgentInference: false,
-      }),
-    );
-  });
-  await check(
-    'composite input reads its result and delayed navigation needs no destination URL',
-    async () => {
-      const input = await find('#input');
-      const filled = await rpc('step', {
-        action: { op: 'fill', ref: input, text: 'one call' },
-        read: { op: 'inspect', ref: input },
-      });
-      assert.equal(filled.steps.at(-1).result.value, 'one call');
-      const result = await rpc('step', {
-        action: { op: 'click', ref: await find('#delayed-next') },
-        wait: { condition: 'navigation', timeoutMs: 5000 },
-        read: { op: 'find', selector: '#next' },
-      });
-      assert.equal(result.steps.at(-1).result.matches[0].state.text, 'Next page');
-      assert.equal(result.steps[1].result.url, url + 'next');
-      assert.equal(result.steps[1].result.navigated, true);
-    },
-  );
-  await check(
-    'navigation wait follows the actual redirect and observes its destination',
-    async () => {
-      await rpc('step', { action: { op: 'open', url }, read: { op: 'snapshot' } });
-      const result = await rpc('step', {
-        action: { op: 'click', ref: await find('#redirect-next') },
-        wait: { condition: 'navigation', timeoutMs: 5000 },
-        read: { op: 'snapshot' },
-      });
-      assert.equal(result.steps[1].result.url, url + 'next?actual=redirected');
-      assert(result.steps.at(-1).result.text.includes('Title: Next page'));
-    },
-  );
-  await check('navigation wait recognizes SPA changes and same-URL document reloads', async () => {
-    await rpc('step', { action: { op: 'open', url }, read: { op: 'snapshot' } });
-    const spa = await rpc('step', {
-      action: { op: 'click', ref: await find('#spa') },
-      wait: { condition: 'navigation', timeoutMs: 3000 },
-      read: { op: 'find', selector: '#spa' },
-    });
-    assert.equal(spa.steps[1].result.url, url + 'spa');
-    assert.equal(spa.steps.at(-1).result.matches[0].state.text, 'SPA opened');
-    const reload = await rpc('step', {
-      action: { op: 'click', ref: await find('#same-url-reload') },
-      wait: { condition: 'navigation', timeoutMs: 3000 },
-      read: { op: 'find', selector: '#spa' },
-    });
-    assert.equal(reload.steps[1].result.url, url + 'spa');
-    assert.equal(reload.steps.at(-1).result.matches[0].state.text, 'Open SPA');
-  });
-  await check(
-    'Enter submission waits for its real destination without predicting a query',
-    async () => {
-      const result = await rpc('step', {
-        action: { op: 'keypress', ref: await find('#submit-input'), key: 'Enter' },
-        wait: { condition: 'navigation', timeoutMs: 3000 },
-        read: { op: 'find', selector: '#next' },
-      });
-      assert.equal(result.steps[1].result.url, url + 'next?q=');
-      assert.equal(result.steps.at(-1).result.matches[0].state.text, 'Next page');
-    },
-  );
-  await check(
-    'an unchanged loaded page and child-frame navigation cannot satisfy navigation wait',
-    async () => {
-      await rpc('step', { action: { op: 'open', url }, read: { op: 'snapshot' } });
-      for (const selector of ['#click', '#frame-only']) {
-        const failure = await rpc('step', {
-          action: { op: 'click', ref: await find(selector) },
-          wait: { condition: 'navigation', timeoutMs: 500 },
-          read: { op: 'snapshot' },
-        }).catch((e) => e);
-        assert.equal(failure.code, 'STEP_INCOMPLETE');
-        assert.deepEqual(
-          failure.details.steps.map((s) => s.status),
-          ['success', 'error', 'skipped'],
-        );
-        assert.equal(failure.details.steps[1].error.code, 'WAIT_TIMEOUT');
-      }
-      assert.equal((await state('#click')).text, 'Clicked 1');
-    },
-  );
-  await check(
-    'navigation wait still enforces destination guards and can be interrupted',
-    async () => {
-      const blocked = await rpc('step', {
-        action: { op: 'click', ref: await find('#delayed-blocked') },
-        wait: { condition: 'navigation', timeoutMs: 3000 },
-        read: { op: 'snapshot' },
-      }).catch((e) => e);
-      assert.equal(blocked.code, 'STEP_INCOMPLETE');
-      assert.equal(blocked.details.steps[1].error.code, 'BLOCKED_URL');
-      assert.equal(blocked.details.steps[2].status, 'skipped');
-      await rpc('stop');
-      await rpc('step', { action: { op: 'open', url }, read: { op: 'snapshot' } });
-      const active = rpc('step', {
-        action: { op: 'click', ref: await find('#click') },
-        wait: { condition: 'navigation', timeoutMs: 10000 },
-        read: { op: 'snapshot' },
-      }).catch((e) => e);
-      await eventually(() =>
-        previewPanel(
-          "[...document.querySelectorAll('.tool-log-step[data-status=running] .tool-step-detail code')].some(e=>e.textContent==='wait')",
-        ),
-      );
-      await rpc('pause');
-      const stopped = await active;
-      assert.equal(stopped.code, 'STEP_INCOMPLETE');
-      assert.equal(stopped.details.steps[1].error.code, 'STOPPED');
-      assert.equal(stopped.details.steps[2].status, 'skipped');
-    },
-  );
-  await check(
-    'a failed wait preserves its click and retries never duplicate the completed action',
-    async () => {
-      await rpc('step', { action: { op: 'open', url }, read: { op: 'snapshot' } });
-      const ref = await find('#click');
-      const params = {
-        action: { op: 'click', ref },
-        wait: { condition: 'visible', selector: '#never', timeoutMs: 250 },
-        read: { op: 'snapshot' },
-      };
-      const options = { requestId: 'e2e-composite-partial' };
-      const failed = await rpc('step', params, options).catch((e) => e);
-      assert.equal(failed.code, 'STEP_INCOMPLETE');
-      assert.deepEqual(
-        failed.details.steps.map((s) => s.status),
-        ['success', 'error', 'skipped'],
-      );
-      assert.equal(failed.details.steps[1].error.code, 'WAIT_TIMEOUT');
-      const retry = await rpc('step', params, options).catch((e) => e);
-      assert.equal(retry.details.replayed, true);
-      assert.equal((await state('#click')).text, 'Clicked 1');
-      const valid = { action: { op: 'click', ref }, read: { op: 'inspect', ref } };
-      const first = await rpc('step', valid, { requestId: 'e2e-composite-success' });
-      assert.equal(first.steps.at(-1).result.text, 'Clicked 2');
-      assert.equal(
-        (await rpc('step', valid, { requestId: 'e2e-composite-success' })).replayed,
-        true,
-      );
-      assert.equal((await state('#click')).text, 'Clicked 2');
-    },
-  );
-  await check('stopping a composite wait cancels the observation and queued writes', async () => {
-    const input = await find('#input');
-    const active = rpc('step', {
-      action: { op: 'fill', ref: input, text: 'before stop' },
-      wait: { condition: 'visible', selector: '#never', timeoutMs: 10000 },
-      read: { op: 'snapshot' },
-    }).catch((e) => e);
-    await eventually(() =>
-      previewPanel(
-        "!!document.querySelector('.tool-log-step[data-status=running] .tool-step-detail code') && [...document.querySelectorAll('.tool-log-step[data-status=running] .tool-step-detail code')].some(e=>e.textContent==='wait')",
-      ),
-    );
-    const queued = rpc('fill', { ref: input, text: 'must not execute' }).catch((e) => e);
-    await eventually(() =>
-      previewPanel("!!document.querySelector('.tool-log-step[data-status=queued]')"),
-    );
-    await rpc('pause');
-    const stopped = await active;
-    assert.equal(stopped.code, 'STEP_INCOMPLETE');
-    assert.equal(stopped.details.steps[1].error.code, 'STOPPED');
-    assert.equal(stopped.details.steps[2].status, 'skipped');
-    assert.equal((await queued).code, 'STOPPED');
-    assert.equal((await state('#input')).value, 'before stop');
-    const tab = (await rpc('info')).control.tabId;
-    await rpc('finish');
-    await previewPanel(`chrome.tabs.remove(${tab})`);
-    await previewPanel("chrome.runtime.sendMessage({type:'remote-chat-clear'})");
-  });
-  await check(
-    'Monitor expands composite stages including executed, failed and skipped parts',
-    async () => {
-      const { targetId: monitorTarget } = await cdp('Target.createTarget', {
-        url: rpcUrl + '/monitor/',
-      });
-      const { sessionId: monitorSession } = await cdp('Target.attachToTarget', {
-        targetId: monitorTarget,
-        flatten: true,
-      });
-      await eventually(
-        async () =>
-          (
-            await cdp(
-              'Runtime.evaluate',
-              {
-                expression: `[...document.querySelectorAll('.compound-parts')].some(list=>list.textContent.includes('wait · 失败') && list.textContent.includes('snapshot · 未执行'))`,
-                returnByValue: true,
-              },
-              monitorSession,
-            )
-          ).result.value,
-      );
-      await cdp(
-        'Runtime.evaluate',
-        {
-          expression:
-            "for (const list of document.querySelectorAll('.compound-parts')) list.closest('details').open=true",
-        },
-        monitorSession,
-      );
-      await cdp('Target.closeTarget', { targetId: monitorTarget });
-    },
-  );
-  await check(
-    'native media can be verified without repeated toggles and keeps playing after the final reply',
-    async () => {
-      const opened = await rpc('open', { url: url + 'media' });
-      await rpc('wait', { condition: 'loaded' });
-      const initial = (await rpc('find', { selector: '#player' })).matches[0];
-      assert.equal(initial.state.media.paused, true);
-      const toggle = await find('#play-toggle');
-      await rpc('click', { ref: toggle });
-      const playing = await eventually(async () => {
-        const match = (await rpc('find', { selector: 'video,audio' })).matches[0];
-        return !match.state.media.paused && match.state.media.readyState >= 3 && match;
-      });
-      assert.equal(playing.state.media.ended, false);
-      assert.equal(playing.state.media.error, null);
-      assert.equal(playing.state.media.duration, null, 'live streams have unbounded duration');
-      await eventually(async () => {
-        const next = await rpc('inspect', { ref: playing.ref });
-        return next.media.currentTime > playing.state.media.currentTime;
-      });
-      assert.equal((await rpc('inspect', { ref: toggle })).ariaLabel, 'Pause');
-      const target = (await cdp('Target.getTargets')).targetInfos.find(
-        (t) => t.type === 'page' && t.url === url + 'media',
-      );
-      const { sessionId: mediaSession } = await cdp('Target.attachToTarget', {
-        targetId: target.targetId,
-        flatten: true,
-      });
-      const mediaFacts = async () =>
-        (
-          await cdp(
-            'Runtime.evaluate',
-            {
-              expression: `({paused:document.querySelector('#player').paused,
-            time:document.querySelector('#player').currentTime,
-            clicks:Number(document.querySelector('#play-toggle').dataset.clicks)})`,
-              returnByValue: true,
-            },
-            mediaSession,
-          )
-        ).result.value;
-      const before = await mediaFacts();
-      const response = await fetch(rpcUrl + '/chat', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ text: 'Playback verified', final: true }),
-      });
-      assert.equal((await response.json()).ok, true);
-      await eventually(async () => (await rpc('info')).control === null);
-      const after = await eventually(async () => {
-        const facts = await mediaFacts();
-        return facts.time > before.time && facts;
-      });
-      assert.equal(after.paused, false);
-      assert.equal(after.clicks, 1, 'observations and task completion never toggle playback');
-      await cdp('Target.detachFromTarget', { sessionId: mediaSession });
-      await previewPanel(`chrome.tabs.remove(${opened.tabId})`);
-      await previewPanel("chrome.runtime.sendMessage({type:'remote-chat-clear'})");
-    },
-  );
-  await check('sidebar renders and sends/receives chat through the relay', async () => {
-    await eventually(
-      async () =>
-        (
-          await cdp(
-            'Runtime.evaluate',
-            {
-              expression:
-                "!!document.querySelector('#message') && !document.querySelector('#message').disabled",
-              returnByValue: true,
-            },
-            sessionId,
-          )
-        ).result.value,
-    );
-    // Validate the built CSS in Chrome: DaisyUI must not override our theme/layout.
-    await cdp(
-      'Emulation.setDeviceMetricsOverride',
-      { width: 380, height: 820, deviceScaleFactor: 1, mobile: false },
-      sessionId,
-    );
-    await eventually(async () => {
-      const result = await cdp(
-        'Runtime.evaluate',
-        {
-          expression: `(() => {
-          const button = getComputedStyle(document.querySelector('.starter'));
-          const body = getComputedStyle(document.body);
-          return { background: button.backgroundColor, alignment: button.justifyContent, height: button.height,
-            font: body.fontFamily, fontSize: body.fontSize,
-            header: document.querySelector('.sidebar-header').getBoundingClientRect().height,
-            composerBottom: document.querySelector('.composer').getBoundingClientRect().bottom,
-            overflow: document.documentElement.scrollWidth > innerWidth };
-        })()`,
-          returnByValue: true,
-        },
-        sessionId,
-      );
-      assert.deepEqual(result.result.value, {
-        background: 'rgb(247, 247, 250)',
-        alignment: 'space-between',
-        height: '44px',
-        font: 'system-ui, sans-serif',
-        fontSize: '14px',
-        header: 64,
-        composerBottom: 820,
-        overflow: false,
-      });
-      return true;
-    });
-    await cdp(
-      'Runtime.evaluate',
-      { expression: "document.querySelector('#message').focus()" },
-      sessionId,
-    );
-    await cdp('Input.insertText', { text: 'Sidebar fixture message' }, sessionId);
-    await cdp(
-      'Runtime.evaluate',
-      { expression: "document.querySelector('#send').click()" },
-      sessionId,
-    );
-    await eventually(() =>
-      chatMessages.some((message) => message.text === 'Sidebar fixture message'),
-    );
-    const reply = await fetch(rpcUrl + '/chat', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text: 'Sidebar fixture reply' }),
-    });
-    assert.equal((await reply.json()).ok, true);
-    await eventually(
-      async () =>
-        (
-          await cdp(
-            'Runtime.evaluate',
-            {
-              expression:
-                "document.querySelector('#history').textContent.includes('Sidebar fixture reply')",
-              returnByValue: true,
-            },
-            sessionId,
-          )
-        ).result.value,
-    );
-  });
-  await check(
-    'Markdown replies render, scroll locally at sidebar widths, and survive panel reload',
-    async () => {
-      const markdown = JSON.parse(
-        await fs.readFile(path.join(root, 'tests/fixtures/markdown-message.json'), 'utf8'),
-      ).text;
-      const panel = async (expression) => {
-        const result = await cdp(
-          'Runtime.evaluate',
-          { expression, awaitPromise: true, returnByValue: true },
-          sessionId,
-        );
-        if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
-        return result.result.value;
-      };
-      await panel("chrome.runtime.sendMessage({type:'remote-chat-clear'})");
-      const reply = await fetch(rpcUrl + '/chat', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ text: markdown }),
-      });
-      assert.equal((await reply.json()).ok, true);
-      await eventually(() =>
-        panel("document.querySelector('.markdown-body h1')?.textContent === '页面调研报告'"),
-      );
-      for (const width of [320, 380, 480]) {
-        await cdp(
-          'Emulation.setDeviceMetricsOverride',
-          { width, height: 820, deviceScaleFactor: 1, mobile: false },
-          sessionId,
-        );
-        const layout = await panel(`(() => {
-          const md = document.querySelector('.markdown-body');
-          const table = md.querySelector('.markdown-table-scroll');
-          const code = md.querySelector('pre');
-          return {
-            heading: parseFloat(getComputedStyle(md.querySelector('h1')).fontSize),
-            body: parseFloat(getComputedStyle(md).fontSize),
-            list: getComputedStyle(md.querySelector('ol')).listStyleType,
-            tableBounded: table.getBoundingClientRect().right <= innerWidth,
-            codeBounded: code.getBoundingClientRect().right <= innerWidth,
-            tableScroll: getComputedStyle(table).overflowX === 'auto',
-            codeScroll: code.scrollWidth > code.clientWidth && getComputedStyle(code).overflowX === 'auto',
-            overflow: document.documentElement.scrollWidth > innerWidth,
-            columns: md.querySelectorAll('th').length,
-            external: md.querySelector('a[href^="https:"]').target,
-          };
-        })()`);
-        assert.ok(layout.heading > layout.body);
-        assert.equal(layout.list, 'decimal');
-        for (const field of ['tableBounded', 'codeBounded', 'tableScroll', 'codeScroll'])
-          assert.equal(layout[field], true, `${width}: ${field}`);
-        assert.equal(layout.overflow, false);
-        assert.equal(layout.columns, 4);
-        assert.equal(layout.external, '_blank');
-      }
-      await cdp(
-        'Emulation.setDeviceMetricsOverride',
-        { width: 380, height: 820, deviceScaleFactor: 1, mobile: false },
-        sessionId,
-      );
-      if (process.env.E2E_SCREENSHOT_DIR) {
-        await fs.mkdir(process.env.E2E_SCREENSHOT_DIR, { recursive: true });
-        for (const [name, selector] of [
-          ['markdown-report', '.markdown-body h1'],
-          ['markdown-code', '.markdown-body h3'],
-        ]) {
-          await panel(
-            `document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'start'})`,
-          );
-          const shot = await cdp('Page.captureScreenshot', { format: 'png' }, sessionId);
-          await fs.writeFile(
-            path.join(process.env.E2E_SCREENSHOT_DIR, `${name}.png`),
-            Buffer.from(shot.data, 'base64'),
-          );
-        }
-      }
-      await panel("document.querySelector('[data-footnote-ref]').click()");
-      assert.equal(await panel('location.hash'), '');
-      assert.equal(
-        await panel(
-          "chrome.runtime.sendMessage({type:'remote-state'}).then(response => response.ok)",
-        ),
-        true,
-      );
-      await cdp('Page.reload', {}, sessionId);
-      await eventually(() =>
-        panel("document.querySelector('.markdown-body h1')?.textContent === '页面调研报告'"),
-      );
-      assert.equal(
-        await panel("document.querySelectorAll('.markdown-body table tbody tr').length"),
-        2,
-      );
-    },
-  );
-  await check(
-    'compact progress groups tools, preserves diagnostics, flags unresolved errors and survives reload',
-    async () => {
-      const panel = async (expression) => {
-        const result = await cdp(
-          'Runtime.evaluate',
-          { expression, awaitPromise: true, returnByValue: true },
-          sessionId,
-        );
-        if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
-        return result.result.value;
-      };
-      const screenshot = async (name) => {
-        if (!process.env.E2E_SCREENSHOT_DIR) return;
-        await fs.mkdir(process.env.E2E_SCREENSHOT_DIR, { recursive: true });
-        await panel("document.querySelector('.tool-activity').scrollIntoView({block:'start'})");
-        const shot = await cdp('Page.captureScreenshot', { format: 'png' }, sessionId);
-        await fs.writeFile(
-          path.join(process.env.E2E_SCREENSHOT_DIR, `${name}.png`),
-          Buffer.from(shot.data, 'base64'),
-        );
-      };
-      await panel("chrome.runtime.sendMessage({type:'remote-chat-clear'})");
-      await panel("chrome.storage.local.set({uiLanguage:'zh-CN'})");
-      await panel("document.querySelector('#message').focus()");
-      await cdp('Input.insertText', { text: '打开示例网页，读取内容并查找按钮。' }, sessionId);
-      await panel("document.querySelector('#send').click()");
-      await eventually(() =>
-        chatMessages.some((m) => m.text === '打开示例网页，读取内容并查找按钮。'),
-      );
-      const opened = await rpc('open', { url });
-      await rpc('info');
-      await rpc('describe');
-      await rpc('snapshot');
-      await rpc('snapshot');
-      const waiting = rpc('wait', {
-        condition: 'visible',
-        selector: '#never',
-        timeoutMs: 4000,
-      }).catch((e) => e);
-      await eventually(() =>
-        panel("!!document.querySelector('.tool-log-step[data-status=running]')"),
-      );
-      const queued = rpc('find', { selector: '#click' });
-      await eventually(() =>
-        panel("!!document.querySelector('.tool-log-step[data-status=queued]')"),
-      );
-      assert.equal(
-        await panel(
-          "document.querySelector('.tool-activity-toggle').getAttribute('aria-expanded')",
-        ),
-        'false',
-      );
-      assert.equal(
-        await panel(
-          "getComputedStyle(document.querySelector('.tool-activity-body')).display === 'none'",
-        ),
-        true,
-      );
-      assert.equal(await panel('document.documentElement.scrollWidth > innerWidth'), false);
-      await eventually(() =>
-        panel(
-          "document.querySelector('.tool-activity-title').textContent.includes('等待页面响应')",
-        ),
-      );
-      assert.equal(await panel("document.querySelector('.tool-diagnostics').open"), false);
-      await screenshot('steps-live');
-      await panel("document.querySelector('.tool-activity-toggle').click()");
-      await eventually(() => panel("!document.querySelector('.tool-activity-body').hidden"));
-      assert.equal(
-        await panel("document.querySelector('.tool-stage-list').textContent.includes('snapshot')"),
-        false,
-      );
-      await screenshot('steps-live-expanded');
-      assert.equal((await waiting).code, 'WAIT_TIMEOUT');
-      await queued;
-      await eventually(() =>
-        panel(
-          "document.querySelector('.tool-log-step[data-status=error]')?.textContent.includes('WAIT_TIMEOUT')",
-        ),
-      );
-      const reply = await fetch(rpcUrl + '/chat', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ text: '已读取页面并找到按钮。等待条件未出现，相关步骤已记录。' }),
-      });
-      assert.equal((await reply.json()).ok, true);
-      await eventually(() =>
-        panel("document.querySelector('.tool-activity')?.dataset.status === 'completed'"),
-      );
-      assert.equal(
-        await panel(
-          "document.querySelector('.tool-activity-toggle').getAttribute('aria-expanded')",
-        ),
-        'false',
-      );
-      assert.equal(
-        await panel(
-          "getComputedStyle(document.querySelector('.tool-activity-body')).display === 'none'",
-        ),
-        true,
-      );
-      await eventually(() =>
-        panel("document.querySelector('.live-preview')?.dataset.status === 'error'"),
-      );
-      await screenshot('steps-collapsed');
-      await panel("document.querySelector('.tool-activity-toggle').click()");
-      assert.equal(
-        await panel(
-          "getComputedStyle(document.querySelector('.tool-activity-body')).display === 'none'",
-        ),
-        false,
-      );
-      assert.deepEqual(
-        await panel(
-          "[...document.querySelectorAll('.tool-step-detail code')].map((el)=>el.textContent)",
-        ),
-        ['open', 'info', 'describe', 'snapshot', 'snapshot', 'wait', 'find'],
-      );
-      assert.equal(await panel("document.querySelectorAll('.tool-stage').length"), 4);
-      assert.equal(
-        await panel("document.querySelector('.tool-activity').dataset.outcome"),
-        'attention',
-      );
-      assert.equal(
-        await panel(
-          "document.querySelector('.tool-stage-list').textContent.includes('WAIT_TIMEOUT')",
-        ),
-        false,
-      );
-      assert.equal(await panel("document.querySelector('.tool-diagnostics').open"), false);
-      await screenshot('steps-expanded');
-      await panel("document.querySelector('.tool-diagnostics summary').click()");
-      assert.equal(await panel("document.querySelector('.tool-diagnostics').open"), true);
-      await screenshot('steps-diagnostics');
-      await cdp('Page.reload', {}, sessionId);
-      await eventually(() =>
-        panel(
-          "document.querySelector('.tool-activity-toggle')?.getAttribute('aria-expanded') === 'false'",
-        ),
-      );
-      assert.equal(await panel("document.querySelectorAll('.tool-log-step').length"), 7);
-      assert.equal(await panel("document.querySelector('.tool-diagnostics').open"), false);
-      await panel("document.querySelector('.tool-activity-toggle').click()");
-      assert.equal(
-        await panel(
-          "document.querySelector('.tool-activity-body').textContent.includes('WAIT_TIMEOUT')",
-        ),
-        true,
-      );
-      await panel(`chrome.tabs.remove(${opened.tabId})`);
-      await panel("chrome.runtime.sendMessage({type:'remote-chat-clear'})");
-      await panel("chrome.storage.local.set({uiLanguage:'auto'})");
-    },
-  );
-  await check(
-    'a confirmed retry clears the progress warning and retains the original failure in diagnostics',
-    async () => {
-      await previewPanel("chrome.runtime.sendMessage({type:'remote-chat-clear'})");
-      const opened = await rpc('open', { url });
-      await rpc('wait', { condition: 'loaded' });
-      const params = { condition: 'visible', selector: '#late', timeoutMs: 200 };
-      await assert.rejects(rpc('wait', params), (error) => error.code === 'WAIT_TIMEOUT');
-      await eventually(() =>
-        previewPanel("document.querySelector('.tool-activity')?.dataset.outcome === 'attention'"),
-      );
-      await rpc('click', { ref: await find('#schedule') });
-      // The fixture inserts the element after 300 ms; retry the exact same request.
-      await sleep(350);
-      await rpc('wait', params);
-      await eventually(() =>
-        previewPanel("document.querySelector('.tool-activity')?.dataset.outcome !== 'attention'"),
-      );
-      await fetch(rpcUrl + '/chat', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ text: 'Retry fixture completed', final: true }),
-      });
-      await eventually(() =>
-        previewPanel("document.querySelector('.tool-activity')?.dataset.outcome === 'success'"),
-      );
-      await previewPanel("document.querySelector('.tool-activity-toggle').click()");
-      await previewPanel("document.querySelector('.tool-diagnostics summary').click()");
-      assert.equal(
-        await previewPanel(
-          "!!document.querySelector('.tool-log-step[data-status=error] .tool-step-error')",
-        ),
-        true,
-      );
-      assert.equal(
-        await previewPanel(
-          "document.querySelector('.tool-log-step[data-status=error] .tool-step-status').textContent.includes('成功') || document.querySelector('.tool-log-step[data-status=error] .tool-step-status').textContent.includes('succeeded')",
-        ),
-        true,
-      );
-      await previewPanel(`chrome.tabs.remove(${opened.tabId})`);
-      await previewPanel("chrome.runtime.sendMessage({type:'remote-chat-clear'})");
-    },
-  );
-  await check(
-    'each chat shares the live current page and actions borrow that exact tab without reopening',
-    async () => {
-      const panel = async (expression) => {
-        const response = await cdp(
-          'Runtime.evaluate',
-          { expression, awaitPromise: true, returnByValue: true },
-          sessionId,
-        );
-        if (response.exceptionDetails) throw new Error(JSON.stringify(response.exceptionDetails));
-        return response.result.value;
-      };
-      const userTab = await panel(`chrome.tabs.create({url:${JSON.stringify(url)},active:true})`);
-      await eventually(
-        async () => (await panel(`chrome.tabs.get(${userTab.id})`)).status === 'complete',
-      );
-      const originalGroup = await panel(
-        `chrome.tabs.group({tabIds:[${userTab.id}],createProperties:{windowId:${userTab.windowId}}})`,
-      );
-      await panel(
-        `chrome.tabGroups.update(${originalGroup},{title:'Owner research',color:'blue'})`,
-      );
-      const count = (await panel('chrome.tabs.query({})')).length;
-      // Send through the real React composer so it captures its own window and active tab.
-      await panel(
-        `(() => { const input=document.querySelector('#message'); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input,'Read this current page'); input.dispatchEvent(new Event('input',{bubbles:true})); })()`,
-      );
-      await panel("document.querySelector('#send').click()");
-      const message = await eventually(() =>
-        chatMessages.find((m) => m.text === 'Read this current page'),
-      );
-      const context = JSON.parse(message.context);
-      assert.equal(context.tabId, userTab.id);
-      assert.equal(context.status, 'excerpt');
-      assert.match(context.text, /Browser actions fixture/);
-      assert.equal(
-        (await rpc('info')).control,
-        null,
-        'automatic context does not start an action task',
-      );
-      assert.equal((await panel('chrome.tabs.query({})')).length, count);
-      const selected = await rpc('use-current-tab', { contextId: context.contextId });
-      assert.equal(selected.tabId, userTab.id);
-      assert.equal(selected.borrowed, true);
-      await rpc('fill', { ref: await find('#input'), text: 'Keep this live draft' });
-      assert.equal((await state('#input')).value, 'Keep this live draft');
-      // A second message uses the same live page while control already exists.
-      const next = await panel(
-        `chrome.runtime.sendMessage({type:'remote-chat-send',text:'Keep using this page',windowId:${userTab.windowId},tabId:${userTab.id}})`,
-      );
-      assert.equal(next.ok, true);
-      const second = await eventually(() =>
-        chatMessages.find((m) => m.text === 'Keep using this page'),
-      );
-      assert.notEqual(JSON.parse(second.context).contextId, context.contextId);
-      const other = await panel(
-        `chrome.tabs.create({url:${JSON.stringify(url + 'next')},active:true})`,
-      );
-      await rpc('use-current-tab', { contextId: JSON.parse(second.context).contextId });
-      assert.equal(
-        (await state('#input')).value,
-        'Keep this live draft',
-        'focus changes do not redirect the task',
-      );
-      await rpc('click', { ref: await find('#click') });
-      assert.equal((await state('#click')).text, 'Clicked 1');
-      await rpc('stop');
-      const kept = await panel(`chrome.tabs.get(${userTab.id})`);
-      assert.equal(kept.groupId, originalGroup);
-      assert.equal((await panel(`chrome.tabGroups.get(${originalGroup})`)).title, 'Owner research');
-      assert.equal((await panel(`chrome.tabs.get(${other.id})`)).active, true);
-      await assert.rejects(
-        rpc('use-current-tab', { contextId: context.contextId }),
-        (e) => e.code === 'STALE_CONTEXT',
-      );
-      await panel(`chrome.tabs.remove([${userTab.id},${other.id}])`);
-    },
-  );
-  await rpc('open', { url });
-  await rpc('wait', { condition: 'loaded' });
-  const mainTab = (await rpc('tabs')).tabs.find((t) => t.selected).id;
-  const panelPhase = async () =>
-    (
-      await cdp(
-        'Runtime.evaluate',
-        {
-          expression: "document.querySelector('.live-preview')?.dataset.phase",
-          returnByValue: true,
-        },
-        sessionId,
-      )
-    ).result.value;
-  await check(
-    'sidebar shows actual command activity and explicit progress preserves the task',
-    async () => {
-      await eventually(async () => (await panelPhase()) === 'ready');
-      const waiting = rpc('wait', {
-        condition: 'visible',
-        selector: '#never',
-        timeoutMs: 800,
-      }).catch((e) => e);
-      await eventually(async () => (await panelPhase()) === 'running');
-      assert.equal((await waiting).code, 'WAIT_TIMEOUT');
-      await eventually(async () => (await panelPhase()) === 'ready');
-      await rpc('finish');
-      await eventually(async () => (await panelPhase()) === 'finished');
-      const reply = await fetch(rpcUrl + '/chat', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ text: 'Browser fixture progress', final: false }),
-      });
-      assert.equal((await reply.json()).ok, true);
-      assert.equal((await rpc('info')).control.phase, 'finished');
-      assert.equal(await panelPhase(), 'finished');
-      await rpc('snapshot');
-      await eventually(async () => (await panelPhase()) === 'ready');
-    },
-  );
-  await check('a failed C4 delivery is visible in the real sidebar', async () => {
-    await cdp(
-      'Runtime.evaluate',
-      {
-        expression:
-          "chrome.runtime.sendMessage({type:'remote-chat-send',text:'fixture:fail-delivery'})",
-        awaitPromise: true,
-        returnByValue: true,
-      },
-      sessionId,
-    );
-    await eventually(
-      async () =>
-        (
-          await cdp(
-            'Runtime.evaluate',
-            {
-              expression:
-                "!!document.querySelector('.message-delivery[role=alert]') && !document.querySelector('.reply-status')",
-              returnByValue: true,
-            },
-            sessionId,
-          )
-        ).result.value,
-    );
-    assert.equal(await panelPhase(), 'ready');
-  });
-  await check('snapshot includes iframe and Shadow DOM controls', async () => {
-    const snapshot = await rpc('snapshot', { interactive: true });
-    assert.match(snapshot.text, /Frame button/);
-    assert.match(snapshot.text, /Root shadow button/);
-  });
-  await check('coordinates click canvas and drag pointer controls', async () => {
-    await rpc('click', { x: 1150, y: 45 });
-    assert.equal((await state('#canvas-result')).text, 'Canvas clicked');
-    await rpc('drag', { from: { x: 1050, y: 120 }, to: { x: 1170, y: 120 } });
-    assert.equal((await state('#slider')).text, '1170');
-    await assert.rejects(
-      rpc('click', { x: 99999, y: 99999 }),
-      (e) => e.code === 'MOUSE_OUTSIDE_VIEWPORT',
-    );
-  });
-  await check('closed Shadow DOM works through accessibility refs', async () => {
-    const snapshot = await rpc('snapshot', { interactive: true });
-    const ref = snapshot.text
-      .split('\n')
-      .find((line) => line.includes('"Closed shadow button"'))
-      .split(' ')[0];
-    await rpc('click', { ref });
-    assert.equal((await rpc('inspect', { ref })).text, 'Closed shadow clicked');
-  });
-  await check('single, double, right click and hover', async () => {
-    await rpc('click', { ref: (await find('#click')).slice(1) });
-    assert.equal((await state('#click')).text, 'Clicked 1');
-    await rpc('double-click', { ref: await find('#double') });
-    assert.equal((await state('#double')).text, 'Double clicked');
-    await rpc('right-click', { ref: await find('#right') });
-    assert.equal((await state('#right')).text, 'Right clicked');
-    await rpc('hover', { ref: await find('#hover') });
-    await rpc('wait', { condition: 'visible', selector: '#hover-menu' });
-  });
-  await check('fill, keyboard shortcut, select, checkbox states', async () => {
-    const ref = await find('#input');
-    await rpc('fill', { ref, text: 'before' });
-    await rpc('keypress', { ref, key: 'a', modifiers: ['Meta'] });
-    await rpc('type', { ref, text: 'after' });
-    assert.equal((await rpc('inspect', { ref })).value, 'after');
-    await rpc('select', { ref: await find('#select'), values: ['b'] });
-    assert.equal((await state('#select')).value, 'b');
-    const cb = await find('#check');
-    await rpc('check', { ref: cb, checked: true });
-    await rpc('check', { ref: cb, checked: true });
-    assert.equal((await rpc('inspect', { ref: cb })).checked, true);
-    await rpc('check', { ref: cb, checked: false });
-    assert.equal((await rpc('inspect', { ref: cb })).checked, false);
-  });
-  await check('targeted container scrolling', async () => {
-    const ref = await find('#panel');
-    await rpc('scroll', { ref, direction: 'down', pixels: 200 });
-    assert.equal((await rpc('inspect', { ref })).scroll.y, 200);
-  });
-  await check('same-origin, cross-origin iframe and shadow input/click', async () => {
-    const { frames } = await rpc('frames');
-    console.log('FRAMES', JSON.stringify(frames));
-    const embedded = frames.filter((f) => f.url?.includes('/frame'));
-    assert.equal(embedded.length, 3);
-    for (const frame of embedded) {
-      await rpc('click', { ref: await find('#frame-button', frame.id) });
-      assert.equal(
-        (await rpc('inspect', { ref: await find('#frame-button', frame.id) })).text,
-        'Frame clicked',
-      );
-      await rpc('fill', { ref: await find('#shadow-input', frame.id), text: 'shadow text' });
-      assert.equal(
-        (await rpc('inspect', { ref: await find('#shadow-input', frame.id) })).value,
-        'shadow text',
-      );
-    }
-    await rpc('fill', { ref: await find('#root-shadow-input'), text: 'root shadow' });
-    assert.equal((await state('#root-shadow-input')).value, 'root shadow');
-  });
-  await check('HTML drag and drop', async () => {
-    await rpc('drag', { from: { ref: await find('#drag') }, to: { ref: await find('#drop') } });
-    assert.equal((await state('#drop')).text, 'Dropped fixture');
-  });
-  await check('native confirm and prompt can be inspected and handled', async () => {
-    try {
-      await rpc('click', { ref: await find('#dialog') });
-    } catch (e) {
-      if (e.code !== 'DIALOG_OPEN') throw e;
-    }
-    assert.equal((await rpc('dialog')).dialog.type, 'confirm');
-    await rpc('dialog', { action: 'accept' });
-    assert.equal((await state('#dialog-result')).text, 'Accepted');
-    try {
-      await rpc('click', { ref: await find('#prompt') });
-    } catch (e) {
-      if (e.code !== 'DIALOG_OPEN') throw e;
-    }
-    await rpc('dialog', { action: 'accept', promptText: 'entered' });
-    assert.equal((await state('#dialog-result')).text, 'entered');
-  });
-  await check('wait conditions and bounded timeout', async () => {
-    await rpc('wait', { condition: 'text', text: 'Root shadow button' });
-    await rpc('wait', { condition: 'checked', selector: '#check', checked: false });
-    await rpc('wait', { condition: 'hidden', selector: '#missing' });
-    await rpc('click', { ref: await find('#schedule') });
-    await rpc('wait', { condition: 'clickable', selector: '#late' });
-    await assert.rejects(
-      rpc('wait', { condition: 'visible', selector: '#missing', timeoutMs: 200 }),
-      (e) => e.code === 'WAIT_TIMEOUT',
-    );
-  });
-  await check('popup joins task and can be selected', async () => {
-    await rpc('click', { ref: await find('#popup') });
-    const popup = await rpc('wait', { condition: 'new-tab', timeoutMs: 3000 });
-    await rpc('switch-tab', { tabId: popup.tabId });
-    await rpc('wait', { condition: 'loaded' });
-    await rpc('click', { ref: await find('#popup-button') });
-    assert.equal((await state('#popup-button')).text, 'Popup clicked');
-    await rpc('switch-tab', { tabId: mainTab });
-  });
-  await check('identical in-flight request IDs execute one mutation', async () => {
-    const ref = await find('#click');
-    const requestId = crypto.randomUUID();
-    const [a, b] = await Promise.all([
-      rpc('click', { ref }, { requestId }),
-      rpc('click', { ref }, { requestId }),
-    ]);
-    assert.ok(a.done && b.done);
-    // Concurrent HTTP calls can reach the relay in either order.
-    assert.equal([a, b].filter((result) => result.replayed === true).length, 1);
-    assert.equal((await rpc('click', { ref }, { requestId })).replayed, true);
-    assert.equal((await state('#click')).text, 'Clicked 2');
-    await assert.rejects(
-      rpc('hover', { ref }, { requestId }),
-      (e) => e.code === 'REQUEST_ID_CONFLICT',
-    );
-  });
-  await check('navigation back forward reload and URL wait', async () => {
-    assert.equal((await rpc('click', { ref: await find('#spa') })).done, true);
-    await rpc('wait', { condition: 'url', url: url + 'spa' });
-    assert.equal((await state('#spa')).text, 'SPA opened');
-    await rpc('back');
-    await rpc('wait', { condition: 'url', url });
-    assert.equal((await rpc('click', { ref: await find('#next') })).done, true);
-    await rpc('wait', { condition: 'url', url: url + 'next' });
-    await rpc('back');
-    await rpc('wait', { condition: 'url', url });
-    await rpc('forward');
-    await rpc('wait', { condition: 'url', url: url + 'next' });
-    await rpc('reload');
-    await rpc('wait', { condition: 'loaded' });
-  });
-  await check('old refs expire on reload and invalid history is reported', async () => {
-    const old = await find('#next');
-    await rpc('reload');
-    await rpc('wait', { condition: 'loaded' });
-    await assert.rejects(rpc('inspect', { ref: old }), (e) => e.code === 'STALE_ELEMENT');
-    await assert.rejects(rpc('forward'), (e) => e.code === 'NO_HISTORY_ENTRY');
-  });
-  await check('offscreen cross-origin frame is scrolled into view before input', async () => {
-    await rpc('open', { url: url + 'far-frame' });
-    await rpc('wait', { condition: 'loaded' });
-    const snapshot = await rpc('snapshot');
-    assert.ok(
-      !snapshot.text.includes('987654') && !snapshot.text.includes('fixture-password'),
-      snapshot.text,
-    );
-    const otp = await find('#otp');
-    assert.equal((await rpc('inspect', { ref: otp })).value, '[redacted]');
-    await assert.rejects(
-      rpc('fill', { ref: otp, text: 'blocked' }),
-      (e) => e.code === 'SENSITIVE_INPUT',
-    );
-    await rpc('click', { ref: await find('#frame-button') });
-    assert.equal((await state('#frame-button')).text, 'Frame clicked');
-    await rpc('fill', { ref: await find('#shadow-input'), text: 'offscreen frame' });
-    assert.equal((await state('#shadow-input')).value, 'offscreen frame');
-  });
-  await check('pause interrupts a wait and cancels queued writes', async () => {
-    const waiting = rpc('wait', {
-      condition: 'visible',
-      selector: '#never',
-      timeoutMs: 10000,
-    }).catch((e) => e);
-    await sleep(100);
-    const queued = rpc('click', { x: 10, y: 10 }).catch((e) => e);
-    await sleep(100);
-    await rpc('pause');
-    assert.equal((await waiting).code, 'STOPPED');
-    assert.equal((await queued).code, 'STOPPED');
-    assert.ok((await rpc('tabs')).tabs.length > 0);
-  });
-  await check(
-    'final answer releases control, cancels old commands and hands back open pages',
-    async () => {
-      await rpc('snapshot');
-      const owned = (await rpc('tabs')).tabs.map((tab) => tab.id);
-      const waiting = rpc('wait', {
-        condition: 'visible',
-        selector: '#never',
-        timeoutMs: 10000,
-      }).catch((e) => e);
-      await eventually(async () => (await panelPhase()) === 'running');
-      const queued = rpc('click', { x: 10, y: 10 }).catch((e) => e);
-      await sleep(100);
-      const reply = await fetch(rpcUrl + '/chat', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ text: 'Final answer; keep the result pages' }),
-      });
-      assert.equal((await reply.json()).ok, true);
-      await eventually(async () => (await rpc('info')).control === null);
-      await eventually(async () => (await panelPhase()) === undefined);
-      assert.equal((await waiting).code, 'STOPPED');
-      assert.equal((await queued).code, 'STOPPED');
-      await eventually(async () => {
-        const browser = (
-          await cdp(
-            'Runtime.evaluate',
-            {
-              expression: `(async () => ({
-          tabs: await chrome.tabs.query({}),
-          targets: await chrome.debugger.getTargets(),
-          badge: await chrome.action.getBadgeText({}),
-          reply: document.querySelector('#history').textContent.includes('Final answer; keep the result pages'),
-          waiting: !!document.querySelector('.reply-status')
-        }))()`,
-              awaitPromise: true,
-              returnByValue: true,
-            },
-            sessionId,
-          )
-        ).result.value;
-        return (
-          browser.reply &&
-          !browser.waiting &&
-          browser.badge === '' &&
-          owned.every((id) => browser.tabs.some((tab) => tab.id === id && tab.groupId === -1)) &&
-          !browser.targets.some((target) => owned.includes(target.tabId) && target.attached)
-        );
-      });
-    },
-  );
-  await check(
-    'a final reply queued while disconnected is delivered on reconnect and removes the task',
-    async () => {
-      await rpc('open', { url });
-      await rpc('wait', { condition: 'loaded' });
-      const owned = (await rpc('tabs')).tabs.map((tab) => tab.id);
-      const keyId = relay.ext.connectedIds()[0];
-      const waiting = rpc('wait', {
-        condition: 'visible',
-        selector: '#never',
-        timeoutMs: 10000,
-      }).catch((e) => e);
-      await eventually(async () => (await panelPhase()) === 'running');
-      relay.ext.conns.get(keyId).ws.terminate();
-      await eventually(() => !relay.ext.isConnected(keyId));
-      assert.equal((await waiting).code, 'EXT_OFFLINE');
-      const response = await fetch(rpcUrl + '/chat', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ endpoint: keyId, text: 'Recovered final answer after disconnect' }),
-      });
-      const receipt = await response.json();
-      assert.equal(response.status, 202);
-      assert.equal(receipt.queued, true);
-      await eventually(
-        async () => relay.ext.isConnected(keyId) && !relay.ext.outbox.first(keyId),
-        15000,
-      );
-      assert.equal((await rpc('info')).control, null);
-      assert.equal(await panelPhase(), undefined);
-      const page = (
-        await cdp(
-          'Runtime.evaluate',
-          {
-            expression: `(async () => ({ tabs: await chrome.tabs.query({}), replies: [...document.querySelectorAll('.message-text')].filter((el) => el.textContent === 'Recovered final answer after disconnect').length }))()`,
-            awaitPromise: true,
-            returnByValue: true,
-          },
-          sessionId,
-        )
-      ).result.value;
-      assert.equal(page.replies, 1);
-      assert.ok(owned.every((id) => page.tabs.some((tab) => tab.id === id && tab.groupId === -1)));
-    },
-  );
-  await check('sidebar stop button revokes control and cleans task tabs', async () => {
-    await rpc('open', { url });
-    await rpc('wait', { condition: 'loaded' });
-    const owned = (await rpc('tabs')).tabs.map((tab) => tab.id);
-    await eventually(
-      async () =>
-        (
-          await cdp(
-            'Runtime.evaluate',
-            {
-              expression: "!!document.querySelector('#stop-task')",
-              returnByValue: true,
-            },
-            sessionId,
-          )
-        ).result.value,
-    );
-    await cdp(
-      'Runtime.evaluate',
-      {
-        expression: "document.querySelector('#stop-task').click()",
-      },
-      sessionId,
-    );
-    await eventually(async () => (await rpc('info')).control === null);
-    await eventually(async () => {
-      const tabs = await cdp(
-        'Runtime.evaluate',
-        {
-          expression: 'chrome.tabs.query({})',
-          awaitPromise: true,
-          returnByValue: true,
-        },
-        sessionId,
-      );
-      return !tabs.result.value.some((tab) => owned.includes(tab.id));
-    });
-  });
-  // Negotiate the new mode over a fresh real connection. The preceding checks
-  // exercise legacy compatibility; the following ones use only model decisions.
-  relay.ext.agentLoop = true;
-  await previewPanel("chrome.runtime.sendMessage({type:'remote-set-enabled',enabled:false})");
-  await previewPanel("chrome.runtime.sendMessage({type:'remote-set-enabled',enabled:true})");
-  await eventually(() => relay.ext.connectedIds().length > 0);
-  const askLoop = async (text, tab) => {
-    const reply = await previewPanel(
-      `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-chat-send', text, ...(tab ? { tabId: tab.id, windowId: tab.windowId } : {}) })})`,
-    );
-    assert.equal(reply.ok, true, JSON.stringify(reply));
-    return eventually(() =>
-      chatMessages.find((message) => message.text === text && message.request),
-    );
-  };
-  const decision = async (request, value) => {
-    const response = await fetch(rpcUrl + '/decision', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: request.request.id, decision: value }),
-    });
-    const body = await response.json();
-    if (!body.ok)
-      throw Object.assign(new Error(`${body.code}: ${body.message}`), { code: body.code });
-    if (body.next && !chatMessages.some((message) => message.request?.id === body.next.id))
-      chatMessages.push({
-        text: body.next.text,
-        chatId: body.next.taskId,
-        request: { id: body.next.id, round: body.next.round, payload: body.next.payload },
-      });
-    return { replayed: false, ...body };
-  };
-  const nextRound = (request) =>
-    eventually(
-      () =>
-        chatMessages.find(
-          (message) =>
-            message.chatId === request.chatId &&
-            message.request?.round === request.request.round + 1,
-        ),
-      18000,
-    );
-  const refIn = (request, label) => {
-    const line = request.request.payload.observation.page.text
-      .split('\n')
-      .find((line) => line.includes(JSON.stringify(label)));
-    assert.ok(line, `Missing ref ${label}: ${JSON.stringify(request.request.payload.observation)}`);
-    return line.split(' ')[0];
-  };
-  const finishLoop = async (request, text) => {
-    await decision(request, { kind: 'done', text });
-    await eventually(
-      async () =>
-        !(await previewPanel("chrome.runtime.sendMessage({type:'remote-state'})")).value.loopActive,
-    );
-    assert.equal((await rpc('info')).control, null);
-  };
   await check(
     'extension loop answers ordinary chat without opening or controlling tabs',
     async () => {
@@ -1739,16 +585,18 @@ try {
         }),
         (error) => error.code === 'BAD_DECISION',
       );
-      await assert.rejects(
-        rpc('click', { x: 10, y: 10 }),
-        (error) => error.code === 'LOOP_OWNS_BROWSER',
-      );
-      const legacy = await fetch(rpcUrl + '/chat', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ text: 'wrong reply route' }),
-      });
-      assert.equal((await legacy.json()).code, 'DECISION_REQUIRED');
+      for (const route of ['/rpc', '/chat']) {
+        assert.equal(
+          (
+            await fetch(rpcUrl + route, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: '{}',
+            })
+          ).status,
+          404,
+        );
+      }
       const unrelated = await previewPanel(
         `chrome.tabs.create({url:${JSON.stringify(url + 'next?personal=1')},active:true})`,
       );
@@ -1879,10 +727,73 @@ try {
         }),
         (error) => error.code === 'STALE_DECISION',
       );
-      assert.equal((await rpc('info')).control, null);
+      assert.equal((await panelState()).task, null);
       assert.ok(await previewPanel(`chrome.tabs.get(${tab.id})`), 'borrowed tab remains open');
     },
   );
+  await check(
+    'extension loop edits forms and reads state while retaining the original page group',
+    async () => {
+      const tab = await previewPanel(
+        `chrome.tabs.create({url:${JSON.stringify(url)},active:true})`,
+      );
+      await eventually(
+        async () => (await previewPanel(`chrome.tabs.get(${tab.id})`)).status === 'complete',
+      );
+      const group = await previewPanel(
+        `chrome.tabs.group({tabIds:[${tab.id}],createProperties:{windowId:${tab.windowId}}})`,
+      );
+      let request = await askLoop('Loop: edit form in the original page', tab);
+      const action = async (method, params = {}) => {
+        await decision(request, { kind: 'actions', actions: [{ method, params }] });
+        request = await nextRound(request);
+        assert.equal(
+          request.request.payload.failed,
+          false,
+          JSON.stringify(request.request.payload),
+        );
+        return request.request.payload.observation.page;
+      };
+      await action('use-current-tab', { contextId: request.request.payload.initialPage.contextId });
+      const find = async (selector) => (await action('find', { selector })).matches[0].ref;
+      const inspect = async (selector) => action('inspect', { ref: await find(selector) });
+      await action('fill', { ref: await find('#input'), text: 'A retained draft' });
+      assert.equal((await inspect('#input')).value, 'A retained draft');
+      await action('check', { ref: await find('#check'), checked: true });
+      assert.equal((await inspect('#check')).checked, true);
+      await action('select', { ref: await find('#select'), values: ['b'] });
+      assert.equal((await inspect('#select')).value, 'b');
+      await action('click', { ref: await find('#click') });
+      assert.equal((await inspect('#click')).text, 'Clicked 1');
+      await finishLoop(request, 'Form updated');
+      assert.equal((await previewPanel(`chrome.tabs.get(${tab.id})`)).groupId, group);
+      await previewPanel(`chrome.tabs.remove(${tab.id})`);
+    },
+  );
+  await check('extension loop reads iframe elements and refuses sensitive input', async () => {
+    let request = await askLoop('Loop: read frame and check sensitive input');
+    const action = async (method, params = {}) => {
+      await decision(request, { kind: 'actions', actions: [{ method, params }] });
+      request = await nextRound(request);
+      return request.request.payload;
+    };
+    await action('open', { url: url + 'far-frame' });
+    const field = (await action('find', { selector: 'input[type=password]' })).observation.page
+      .matches[0];
+    const denied = await action('fill', { ref: field.ref, text: 'must not type' });
+    assert.equal(denied.failed, true);
+    assert.ok(denied.results.some((result) => result.error?.code === 'SENSITIVE_INPUT'));
+    const frameData = (await action('frames')).observation.page;
+    const frames = Array.isArray(frameData) ? frameData : frameData.frames;
+    const frame = frames.find((frame) => frame.url.includes('/frame'));
+    assert.ok(frame, JSON.stringify(frameData));
+    const matches = (
+      await action('find', { selector: '#frame-button', frameId: frame.frameId || frame.id })
+    ).observation.page.matches;
+    assert.equal(matches.length, 1);
+    assert.ok(matches[0].ref);
+    await finishLoop(request, 'Frame read; sensitive input left to the user');
+  });
   console.log(
     JSON.stringify(
       { passed: checks.length, checks, browser: await cdp('Browser.getVersion') },

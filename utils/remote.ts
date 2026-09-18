@@ -24,7 +24,6 @@ export const remoteConfigSchema = z.object({
 export type RemoteConfig = z.infer<typeof remoteConfigSchema>;
 export const REMOTE_CONFIG_KEY = 'remoteConfig';
 export const REMOTE_CHAT_LOG_KEY = 'remoteChatLog';
-export const REMOTE_CHAT_RECEIPTS_KEY = 'remoteChatReceipts';
 
 // Keep tool history small: never persist raw arguments, page output or images.
 export const TOOL_STEPS_CAP = 200;
@@ -141,25 +140,6 @@ export const relayFrameSchema = z.discriminatedUnion('type', [
     params: z.record(z.unknown()).default({}),
     requestId: z.string().max(128).optional(),
     deadline: z.number().int().optional(),
-  }),
-  z.object({
-    type: z.literal('chat'),
-    id: z
-      .string()
-      .regex(/^[a-f0-9-]{36}$/)
-      .optional(),
-    role: z.enum(['assistant', 'system']).default('assistant'),
-    text: z.string().max(MAX_CHAT_TEXT),
-    final: z.boolean().default(true),
-    ts: z.number().int().optional(),
-  }),
-  z.object({
-    type: z.literal('chat-status'),
-    state: z.string(),
-    chatId: z.string().max(128).optional(),
-    code: z.string().optional(),
-    error: z.string().optional(),
-    ts: z.number().optional(),
   }),
 ]);
 export type RelayFrame = z.infer<typeof relayFrameSchema>;

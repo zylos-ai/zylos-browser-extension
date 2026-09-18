@@ -2,19 +2,9 @@ import type { TranslationKey } from './i18n';
 import type { ToolRun, ToolStep } from './remote';
 
 export const LONG_WAIT_MS = 2000;
-const hidden = new Set([
-  'info',
-  'describe',
-  'tabs',
-  'frames',
-  'pause',
-  'finish',
-  'stop',
-  'finalize',
-]);
+const hidden = new Set(['tabs', 'frames', 'pause', 'finish', 'stop', 'finalize']);
 const reads = new Set(['snapshot', 'observe', 'screenshot', 'find', 'inspect']);
 const navigation = {
-  start: 'opening',
   open: 'opening',
   'new-tab': 'opening',
   'switch-tab': 'switching',

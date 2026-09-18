@@ -1,9 +1,6 @@
 import { LANGUAGE_STORAGE_KEY, setWorkerLanguage } from '../../utils/i18n';
-// zylos-remote transport. Dials out to a zylos-browser-remote relay with
-// `relayUrl + key`, answers `req` frames through the executor, and carries the
-// side-panel chat both ways. Nothing here trusts the relay: params are
-// re-validated, URLs are re-screened, and the debugger is only ever attached to
-// task-owned tabs or the current page explicitly associated with a panel message.
+// Extension-owned conversations: request Agent decisions, execute locally, and
+// return observations over the authenticated Remote connection.
 import { captureCurrentPage, clearPageContexts, forgetPageContext } from '../../utils/page-context';
 import {
   completeTask,
@@ -19,7 +16,6 @@ import { isPanelSender } from '../../utils/messages';
 import {
   CHAT_LOG_CAP,
   REMOTE_CHAT_LOG_KEY,
-  REMOTE_CHAT_RECEIPTS_KEY,
   REMOTE_CONFIG_KEY,
   REMOTE_KEY_PROTO_PREFIX,
   REMOTE_SUBPROTOCOL,
@@ -35,12 +31,7 @@ import {
   type RemoteConfig,
   type RemoteState,
 } from '../../utils/remote';
-import {
-  IdempotencyCache,
-  REMOTE_CAPABILITIES,
-  RemoteError,
-  dispatch,
-} from '../../utils/remote-commands';
+import { IdempotencyCache, REMOTE_CAPABILITIES, dispatch } from '../../utils/browser-actions';
 import { z } from 'zod';
 import { ToolActivity } from '../../utils/tool-activity';
 import { LivePreview } from '../../utils/automation/live-preview';
@@ -50,7 +41,7 @@ import { runBrowserRound } from '../../utils/browser-round';
 const BACKOFF_MIN_MS = 1000;
 const BACKOFF_MAX_MS = 60_000;
 const KEEPALIVE_ALARM = 'remote-keepalive';
-const MAX_INFLIGHT = 8;
+const HANDSHAKE_TIMEOUT_MS = 10000;
 
 export function startRemoteBackground() {
   initializeExecutor();
@@ -62,9 +53,7 @@ export function startRemoteBackground() {
   let backoff = BACKOFF_MIN_MS;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   const idem = new IdempotencyCache();
-  const inflight = new Map<number, { method: string }>();
-  const receivingChats = new Map<string, Promise<void>>();
-  const receivedChats = new Set<string>();
+  let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
   let loopReady = false;
   let sendingChat = false;
   let loop: BrowserLoop;
@@ -81,12 +70,7 @@ export function startRemoteBackground() {
       state.task?.sessionId === control?.sessionId && state.task?.tabId === control?.tabId
         ? state.task
         : null;
-    const running =
-      loop?.active ||
-      [...inflight.values()].some(
-        ({ method }) =>
-          !['info', 'describe', 'tabs', 'pause', 'finish', 'stop', 'finalize'].includes(method),
-      );
+    const running = loop?.active;
     state.task = control
       ? {
           sessionId: control.sessionId,
@@ -310,6 +294,7 @@ export function startRemoteBackground() {
       void completeTask().catch(() => {});
     }
     loopReady = false;
+    clearTimeout(handshakeTimer);
     preview.finish('interrupted');
     clearTimeout(reconnectTimer);
     generation++;
@@ -317,7 +302,6 @@ export function startRemoteBackground() {
     socket = null;
     state.connected = false;
     state.connecting = false;
-    inflight.clear();
     idem.cancel();
     activity.end('interrupted');
     try {
@@ -351,10 +335,15 @@ export function startRemoteBackground() {
     ws.onopen = () => {
       if (gen !== generation) return;
       backoff = BACKOFF_MIN_MS;
-      state.connected = true;
-      state.connecting = false;
+      state.connected = false;
+      state.connecting = true;
       state.error = '';
       send({ type: 'hello', version: REMOTE_VERSION, capabilities: REMOTE_CAPABILITIES });
+      handshakeTimer = setTimeout(() => {
+        if (gen !== generation || loopReady) return;
+        state.error = 'ui.error.protocolMismatch';
+        ws.close(4002, 'agent-loop-v1 required');
+      }, HANDSHAKE_TIMEOUT_MS);
       publish();
     };
     ws.onclose = (ev) => {
@@ -364,18 +353,19 @@ export function startRemoteBackground() {
         void completeTask().catch(() => {});
       }
       loopReady = false;
+      clearTimeout(handshakeTimer);
       preview.finish('interrupted');
       socket = null;
       state.connected = false;
       state.connecting = false;
-      inflight.clear();
       idem.cancel();
       activity.end('interrupted');
       // 4001 = superseded by a newer socket of ours (another window / reload); do not fight it.
-      if (ev.code === 4001) state.error = 'ui.error.connectionTaken';
+      if (ev.code === 4002) state.error = 'ui.error.protocolMismatch';
+      else if (ev.code === 4001) state.error = 'ui.error.connectionTaken';
       else if (ev.code === 1006 && !state.error) state.error = 'ui.error.connectionRejected';
       publish();
-      if (ev.code !== 4001) scheduleReconnect();
+      if (![4001, 4002].includes(ev.code)) scheduleReconnect();
     };
     ws.onerror = () => {
       if (gen !== generation) return;
@@ -400,70 +390,27 @@ export function startRemoteBackground() {
     const m = frame.data;
     switch (m.type) {
       case 'ready':
-        loopReady = m.capabilities.includes('agent-loop-v1');
+        clearTimeout(handshakeTimer);
+        if (!m.capabilities.includes('agent-loop-v1')) {
+          state.error = 'ui.error.protocolMismatch';
+          socket?.close(4002, 'agent-loop-v1 required');
+          return;
+        }
+        loopReady = true;
+        state.connected = true;
+        state.connecting = false;
+        publish();
         return;
       case 'agent-status':
         if (loop.pendingId !== m.requestId) return;
         if (m.state === 'queued') await updateDelivery({ state: 'queued', chatId: loop.taskId });
-        else loop.fail(m.requestId, m.code || 'AGENT_UNAVAILABLE');
+        else {
+          await updateDelivery({ state: m.state, chatId: loop.taskId, code: m.code });
+          loop.fail(m.requestId, m.code || 'AGENT_UNAVAILABLE');
+        }
         return;
       case 'ping':
         send({ type: 'pong', ts: m.ts ?? Date.now() });
-        return;
-      case 'chat': {
-        const receive = async () => {
-          let completion: Promise<void> | undefined;
-          if (m.role === 'assistant' && m.final && !loop.active) {
-            preview.finish(activity.hasUnresolvedErrors() ? 'error' : 'completed');
-            idem.cancel();
-            activity.end('completed');
-            completion = completeTask().catch(() => {
-              preview.finish('error');
-              state.error = 'ui.error.taskCleanupFailed';
-              publish();
-            });
-          }
-          await appendChat({
-            id: m.id,
-            role: m.role,
-            text: m.text,
-            ts: m.ts ?? Date.now(),
-            final: loop.active ? false : m.final,
-          });
-          await completion;
-          if (m.id) {
-            const receipts = [...receivedChats, m.id].slice(-500);
-            await chrome.storage.local.set({ [REMOTE_CHAT_RECEIPTS_KEY]: receipts });
-            receivedChats.clear();
-            receipts.forEach((id) => receivedChats.add(id));
-          }
-        };
-        try {
-          const pending = m.id && receivingChats.get(m.id);
-          if (pending) await pending;
-          else if (!m.id || !receivedChats.has(m.id)) {
-            const work = receive();
-            if (m.id) receivingChats.set(m.id, work);
-            try {
-              await work;
-            } finally {
-              if (m.id) receivingChats.delete(m.id);
-            }
-          }
-          // A duplicate after a lost acknowledgement must not end a newer task.
-          if (state.error === 'ui.error.chatSaveFailed') {
-            state.error = '';
-            publish();
-          }
-          if (m.id && gen === generation) send({ type: 'chat-ack', id: m.id });
-        } catch {
-          state.error = 'ui.error.chatSaveFailed';
-          publish();
-        }
-        return;
-      }
-      case 'chat-status':
-        await updateDelivery(m);
         return;
       case 'req':
         await onRequest(m, gen);
@@ -501,105 +448,11 @@ export function startRemoteBackground() {
       }
       return;
     }
-    if (loop.active && m.method === 'stop') cancelLoop('stopped');
-    if (loop.active && !['info', 'describe'].includes(m.method)) {
-      reply({
-        type: 'error',
-        code: 'LOOP_OWNS_BROWSER',
-        message:
-          'The extension is executing this turn. Submit a structured decision for the pending request instead of calling browser tools.',
-      });
-      return;
-    }
-    // Composite calls record their real child operations, avoiding a duplicate
-    // wrapper stage. Rejections/replays still get a diagnostic wrapper entry.
-    let step = m.method === 'step' ? undefined : activity.begin(m.method, m.params);
-    let hadParts = false;
-    if (inflight.has(m.id)) {
-      step?.finish('DUPLICATE_ID');
-      return reply({ type: 'error', code: 'DUPLICATE_ID', message: 'id already in flight' });
-    }
-    if (inflight.size >= MAX_INFLIGHT) {
-      step?.finish('BUSY');
-      return reply({
-        type: 'error',
-        code: 'BUSY',
-        message: `more than ${MAX_INFLIGHT} commands in flight`,
-      });
-    }
-    const active = { method: m.method };
-    inflight.set(m.id, active);
-    publish();
-    try {
-      const result = await dispatch(
-        {
-          method: m.method,
-          params: m.params,
-          requestId: m.requestId,
-          deadline: m.deadline,
-          keyId: state.keyId,
-        },
-        idem,
-        () => {
-          step?.start();
-          publish();
-        },
-        () => {
-          preview.resume(m.method);
-          publish();
-        },
-        (method, params) => {
-          hadParts = true;
-          const child = activity.begin(method, params);
-          child?.start();
-          return child;
-        },
-      );
-      const replayed = !!(
-        result &&
-        typeof result === 'object' &&
-        'replayed' in result &&
-        result.replayed
-      );
-      if (!step && !hadParts) step = activity.begin(m.method, m.params);
-      step?.finish(undefined, replayed);
-      if (gen === generation && !replayed)
-        preview.result(m.method, false, activity.hasUnresolvedErrors());
-      if (m.method === 'stop' && gen === generation) step?.stop();
-      reply({ type: 'resp', result });
-    } catch (e) {
-      const replayed =
-        e instanceof RemoteError && !!(e.details as { replayed?: boolean })?.replayed;
-      if (gen === generation && !replayed) preview.result(m.method, true);
-      const code =
-        e instanceof z.ZodError
-          ? 'BAD_PARAMS'
-          : e && typeof e === 'object' && 'code' in e && typeof e.code === 'string'
-            ? e.code
-            : 'EXT_ERROR';
-      if (!step && !hadParts) step = activity.begin(m.method, m.params);
-      step?.finish(code, replayed);
-      if (e instanceof RemoteError)
-        reply({ type: 'error', code: e.code, message: e.message, details: e.details });
-      else if (e instanceof z.ZodError)
-        reply({
-          type: 'error',
-          code: 'BAD_PARAMS',
-          message: e.issues.map((i) => i.message).join('; '),
-        });
-      else {
-        const err = e as { code?: string; message?: string };
-        reply({
-          type: 'error',
-          code: typeof err?.code === 'string' ? err.code : 'EXT_ERROR',
-          message: err?.message || 'extension error',
-        });
-      }
-    } finally {
-      // A previous socket's late result must not clear a new request with the same id.
-      if (inflight.get(m.id) === active) inflight.delete(m.id);
-      publish();
-    }
+    reply({
+      type: 'error',
+      code: 'UNKNOWN_METHOD',
+      message: 'Only correlated Agent decisions are accepted',
+    });
   }
 
   // ---------------------------------------------------------------- config
@@ -638,7 +491,6 @@ export function startRemoteBackground() {
     const saved = await chrome.storage.local.get([
       REMOTE_CONFIG_KEY,
       REMOTE_CHAT_LOG_KEY,
-      REMOTE_CHAT_RECEIPTS_KEY,
       LANGUAGE_STORAGE_KEY,
     ]);
     setWorkerLanguage(saved[LANGUAGE_STORAGE_KEY]);
@@ -649,11 +501,6 @@ export function startRemoteBackground() {
       if (message.loopStatus === 'active') message.loopStatus = 'interrupted';
     await persistChat();
     if (activity.recover()) await persistChat();
-    const receipts = z.array(z.string().max(128)).safeParse(saved[REMOTE_CHAT_RECEIPTS_KEY] ?? []);
-    if (receipts.success) for (const id of receipts.data.slice(-500)) receivedChats.add(id);
-    for (const message of state.chat) {
-      if (message.role === 'assistant' && message.id) receivedChats.add(message.id);
-    }
     await applyConfig(cfg.success ? cfg.data : remoteConfigSchema.parse({}));
     if (config.enabled && state.configured) void connect();
     publish();
@@ -670,7 +517,13 @@ export function startRemoteBackground() {
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name !== KEEPALIVE_ALARM) return;
     void boot.then(() => {
-      if (!socket && config.enabled && state.configured) void connect();
+      if (
+        !socket &&
+        config.enabled &&
+        state.configured &&
+        !['ui.error.protocolMismatch', 'ui.error.connectionTaken'].includes(state.error)
+      )
+        void connect();
     });
   });
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
@@ -704,7 +557,7 @@ export function startRemoteBackground() {
           return snapshot();
         }
         case 'remote-chat-send': {
-          if (!state.connected) throw new Error('ui.error.messageNotSent');
+          if (!state.connected || !loopReady) throw new Error('ui.error.messageNotSent');
           const text = m.text.trim();
           if (!text) throw new Error('ui.error.emptyMessage');
           if (sendingChat) throw new Error('ui.error.messageNotSent');
@@ -719,10 +572,7 @@ export function startRemoteBackground() {
             const ts = Date.now();
             const gen = generation;
             const { context, page } = await captureCurrentPage(id, m.windowId, m.tabId);
-            if (
-              gen !== generation ||
-              (!loopReady && !send({ type: 'chat', id, text, ts, context }))
-            ) {
+            if (gen !== generation || !loopReady) {
               forgetPageContext(id);
               throw new Error('ui.error.sendFailed');
             }
@@ -733,9 +583,9 @@ export function startRemoteBackground() {
               ts,
               delivery: 'sent',
               page,
-              ...(loopReady ? { loopStatus: 'active' } : {}),
+              loopStatus: 'active',
             });
-            if (loopReady) loop.start(id, text, context);
+            loop.start(id, text, context);
             return snapshot();
           } finally {
             sendingChat = false;

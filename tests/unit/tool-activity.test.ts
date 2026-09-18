@@ -88,12 +88,12 @@ test('navigation and missing context prevent speculative error recovery', () => 
   call('reload');
   call('snapshot');
   expect(chat[0]!.toolRun!.steps[0]!.recovered).toBeUndefined();
-  const legacy: ChatEntry[] = [];
-  const noContext = new ToolActivity(() => legacy, vi.fn());
+  const withoutContext: ChatEntry[] = [];
+  const noContext = new ToolActivity(() => withoutContext, vi.fn());
   for (const error of ['TIMEOUT', undefined]) {
     const s = noContext.begin('snapshot', {})!;
     s.start();
     s.finish(error);
   }
-  expect(legacy[0]!.toolRun!.steps[0]!.recovered).toBeUndefined();
+  expect(withoutContext[0]!.toolRun!.steps[0]!.recovered).toBeUndefined();
 });

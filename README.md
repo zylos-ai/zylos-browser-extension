@@ -103,7 +103,7 @@ https://github.com/zylos-ai/zylos-browser-remote/blob/main/README.md
 2. 使用你现有的公网 HTTPS 域名，配置 WebSocket 转发路由。
 3. 启动服务，检查 Relay 和公网入口是否可用。
 4. 为我的 Chrome 插件生成一个连接 Key。
-5. 读取组件 SKILL.md 了解传输入口；连接后通过 describe 读取插件提供的工具和操作指南。
+5. 读取组件 SKILL.md，按插件请求附带的工具契约，通过 decision.js 返回动作决策；最终回答使用当前请求附带的 C4 回复命令。
 
 完成后，请直接在当前对话返回：
 地址：wss://你的真实域名/browser-remote/ext
@@ -155,7 +155,7 @@ flowchart LR
 
 支持 `agent-loop-v1` 的 Remote 连接后，侧边栏默认使用插件任务循环：插件发送当前页面摘要及动作契约 → Agent 返回决策 → 插件执行、等待页面稳定、读取实际状态 → 请求下一轮决策。普通聊天直接返回文字，不创建浏览器任务。插件会跟随选中任务页新开的单个子 Tab；多个新 Tab 交由 Agent 根据实际列表选择。不会猜目标网址，也不会自动重复已执行的点击。
 
-工具定义和循环指南只有插件这一份。Remote 只做请求关联、首次 C4 投递、图片附件转换和诊断记录。后续页面状态直接作为决策命令的返回值交给 Agent，不再逐轮经过 C4 队列。老版本 Remote 仍使用 `describe` + 直接 RPC；升级后重启 Remote 并重新加载插件即可使用新循环。详见 [决策协议](agent/decision-guide.md)。实际速度仍取决于模型响应和网页加载。
+工具定义和循环指南只有插件这一份。Remote 只做请求关联、首次 C4 投递、图片附件转换和诊断记录。后续页面状态直接作为决策命令的返回值交给 Agent，不再逐轮经过 C4 队列。插件和 Remote 需同时支持决策协议；更新后重启 Remote 并重新加载插件。详见 [决策协议](agent/decision-guide.md)。实际速度仍取决于模型响应和网页加载。
 
 插件使用 `webNavigation` 权限确认新页面的来源，只将当前任务页创建的子 Tab 纳入任务，避免用户切换前台页面后错误关联。
 
@@ -183,7 +183,7 @@ npm run zip         # 生成插件压缩包
 | ------------------------ | --------------------------------------------------------------------------------------------------- |
 | 无法连接                 | 检查完整 `wss://` 地址、`/browser-remote/ext` 路径和完整 Key；由 Agent 检查证书、代理路由与 Relay。 |
 | 已连接，但聊天无回复     | 由 Agent 检查 C4 消息通道、Agent 运行状态与 Remote 的回复脚本。                                     |
-| 聊天正常，但无法操作网页 | 由 Agent 检查 `info` 和动作错误，并按插件 `describe` 返回的指南调用工具。                           |
+| 聊天正常，但无法操作网页 | 检查决策返回的错误和任务状态，按请求附带的工具契约继续。                                            |
 | 更新后仍显示旧能力       | 重新构建，在 Chrome 扩展管理页重新加载，并核对加载的是当前仓库的 `.output/chrome-mv3`。             |
 
 ## 文档
@@ -192,7 +192,7 @@ npm run zip         # 生成插件压缩包
 | ------------------------------------------------------------------------------------------ | -------------------------------------------------- |
 | [开发指南](docs/DEVELOPMENT.md)                                                            | 项目架构、执行链路、目录地图、界面开发与本地验证。 |
 | [浏览器动作](docs/BROWSER-ACTIONS.md)                                                      | 动作参数、执行边界与验证记录。                     |
-| [Agent 操作指南](agent/browser-guide.md)                                                   | 随插件提供的浏览器工作流程与错误恢复说明。         |
+| [Agent 决策指南](agent/decision-guide.md)                                                  | 随插件提供的浏览器工作流程与错误恢复说明。         |
 | [工具目录源码](utils/tool-catalog.ts)                                                      | 工具用途、约束、例子与动态参数描述。               |
 | [Remote 安装与部署](https://github.com/zylos-ai/zylos-browser-remote#readme)               | 连接服务的安装、配置与 Agent 接入。                |
 | [Remote 协议](https://github.com/zylos-ai/zylos-browser-remote/blob/main/docs/PROTOCOL.md) | 消息格式、传输接口与错误响应。                     |

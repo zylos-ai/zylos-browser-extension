@@ -21,6 +21,17 @@ const executor = vi.hoisted(() => ({
 }));
 vi.mock('../../utils/automation/executor', () => executor);
 vi.mock('../../utils/automation/task-lifecycle', () => ({ recoverTasks: vi.fn(async () => {}) }));
+vi.mock('../../utils/browser-round', () => ({
+  runBrowserRound: async (actions: any[], call: any, active: () => void, id: string) => {
+    const results = [];
+    for (const action of actions) {
+      active();
+      results.push(await call(action.method, action.params, id));
+    }
+    active();
+    return { results, observation: { page: 'fresh state' }, failed: false };
+  },
+}));
 vi.mock('../../utils/messages', () => ({ isPanelSender: () => true }));
 
 import { startRemoteBackground } from '../../entrypoints/background/remote';
@@ -92,8 +103,9 @@ beforeEach(() => {
   });
   executor.execute.mockImplementation(async (c: { op: string }) => ({ ran: c.op }));
   vi.stubGlobal('WebSocket', Socket);
+  let id = 0;
   vi.stubGlobal('crypto', {
-    randomUUID: () => '11111111-1111-4111-8111-111111111111',
+    randomUUID: () => `11111111-1111-4111-8111-${String(++id).padStart(12, '0')}`,
     subtle: { digest: async () => new Uint8Array(32).fill(0xab).buffer },
   });
   vi.stubGlobal('chrome', {
@@ -139,508 +151,228 @@ async function bootConnected() {
   await flush();
   const ws = sockets[0]!;
   ws.open();
+  ws.receive({ type: 'ready', capabilities: ['agent-loop-v1'] });
   await flush();
   return ws;
 }
 
-describe('remote background', () => {
-  it('records real queue/start/result states and persists a closed trace with the final reply', async () => {
+const selectPage = async (ws: Socket) => {
+  const request = await begin(ws);
+  await respond(ws, request, {
+    kind: 'actions',
+    actions: [{ method: 'open', params: { url: 'https://example.com' } }],
+  });
+  return ws.last('agent-request')!;
+};
+const state = async () => (await ask({ type: 'remote-state' })).value!;
+const begin = async (ws: Socket, text = 'Read this page') => {
+  expect((await ask({ type: 'remote-chat-send', text })).ok).toBe(true);
+  return ws.last('agent-request')!;
+};
+const respond = async (ws: Socket, request: Record<string, unknown>, decision: unknown, id = 1) => {
+  ws.receive({ type: 'req', id, method: 'agent-decision', params: { id: request.id, decision } });
+  await flush();
+};
+
+describe('decision transport background', () => {
+  it('authenticates, negotiates and answers ordinary chat without browser actions', async () => {
     const ws = await bootConnected();
-    await ask({ type: 'remote-chat-send', text: 'Read this page' });
-    let resolve!: (value: { ran: string }) => void;
-    executor.execute.mockImplementationOnce(
-      () =>
-        new Promise((r) => {
-          resolve = r;
-        }),
-    );
-    ws.receive({ type: 'req', id: 1, method: 'snapshot', params: {} });
-    await flush();
-    ws.receive({ type: 'req', id: 2, method: 'click', params: { x: 20, y: 30 } });
-    await flush();
-    const history = async () => (await ask({ type: 'remote-state' })).value!.chat as ChatEntry[];
-    const run = async () => (await history()).find((m) => m.toolRun)!.toolRun!;
-    expect((await run()).steps.map((s) => [s.method, s.status])).toEqual([
-      ['snapshot', 'running'],
-      ['click', 'queued'],
+    expect(ws.protocols).toEqual([REMOTE_SUBPROTOCOL, `key.${KEY}`]);
+    expect(ws.last('hello')!.capabilities).toEqual(['agent-loop-v1']);
+    const request = await begin(ws, 'Hello');
+    expect(ws.last('chat')).toBeUndefined();
+    await respond(ws, request, { kind: 'done', text: 'Hello back' });
+    expect(executor.execute).not.toHaveBeenCalled();
+    expect((await state()).chat).toEqual([
+      expect.objectContaining({ role: 'user', loopStatus: 'done' }),
+      expect.objectContaining({ role: 'assistant', text: 'Hello back' }),
     ]);
-    await vi.advanceTimersByTimeAsync(500);
-    executor.execute.mockRejectedValueOnce(
-      Object.assign(new Error('page output must not be stored'), { code: 'STALE_REF' }),
-    );
-    resolve({ ran: 'snapshot' });
-    await flush();
-    expect((await run()).steps.map((s) => s.status)).toEqual(['success', 'error']);
-    expect((await run()).steps[0]!.endedAt! - (await run()).steps[0]!.startedAt!).toBe(500);
-    ws.receive({ type: 'chat', text: 'Recovering', final: false });
-    await flush();
-    expect((await run()).status).toBe('running');
-    ws.receive({ type: 'chat', id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', text: 'Done' });
-    await flush();
-    expect(await run()).toMatchObject({ status: 'completed', total: 2, failed: 1 });
-    expect(
-      (storage.remoteChatLog as ChatEntry[]).map((m) => (m.toolRun ? 'steps' : m.text)),
-    ).toEqual(['Read this page', 'steps', 'Recovering', 'Done']);
-    expect(JSON.stringify(storage.remoteChatLog)).not.toContain('page output must not be stored');
-    ws.receive({ type: 'req', id: 3, method: 'snapshot', params: {} });
-    await flush();
-    ws.receive({ type: 'chat', id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', text: 'Done' });
-    await flush();
-    expect((await history()).filter((m) => m.toolRun).at(-1)!.toolRun!.status).toBe('running');
+    expect(ws.last('agent-turn-end')).toMatchObject({ taskId: request.taskId, status: 'done' });
+    expect((await state()).loopActive).toBe(false);
   });
 
-  it('clearing history cannot be undone by a late result or a scheduled history write', async () => {
+  it('refuses direct commands and unsolicited chat without executing or storing them', async () => {
     const ws = await bootConnected();
-    let resolve!: (value: { ran: string }) => void;
-    executor.execute.mockImplementationOnce(
-      () =>
-        new Promise((r) => {
-          resolve = r;
-        }),
-    );
-    ws.receive({ type: 'req', id: 1, method: 'screenshot', params: {} });
+    for (const method of ['open', 'describe', 'step', 'stop']) {
+      ws.receive({ type: 'req', id: 2, method, params: { url: 'https://example.com' } });
+      await flush();
+      expect(ws.last('error')).toMatchObject({ code: 'UNKNOWN_METHOD' });
+    }
+    ws.receive({ type: 'chat', text: 'Unexpected answer' });
     await flush();
-    await ask({ type: 'remote-chat-clear' });
-    resolve({ ran: 'screenshot' });
-    await vi.advanceTimersByTimeAsync(500);
-    expect(storage.remoteChatLog).toEqual([]);
-    expect((await ask({ type: 'remote-state' })).value!.chat).toEqual([]);
-  });
-
-  it('records interrupted work on disconnect and never restores a running trace after worker restart', async () => {
-    const ws = await bootConnected();
-    let resolve!: (value: { ran: string }) => void;
-    executor.execute.mockImplementationOnce(
-      () =>
-        new Promise((r) => {
-          resolve = r;
-        }),
-    );
-    ws.receive({ type: 'req', id: 1, method: 'snapshot', params: {} });
-    await flush();
-    await vi.advanceTimersByTimeAsync(300);
-    const beforeDisconnect = structuredClone(storage.remoteChatLog);
-    ws.serverClose(4001);
-    await vi.advanceTimersByTimeAsync(300);
-    expect((storage.remoteChatLog as ChatEntry[])[0]!.toolRun).toMatchObject({
-      status: 'interrupted',
-      steps: [{ status: 'interrupted' }],
-    });
-    resolve({ ran: 'snapshot' });
-    await flush();
-    storage.remoteChatLog = beforeDisconnect;
-    startRemoteBackground();
-    await flush();
-    expect((storage.remoteChatLog as ChatEntry[])[0]!.toolRun).toMatchObject({
-      status: 'interrupted',
-      steps: [{ status: 'interrupted' }],
-    });
-  });
-
-  it('keeps stop effective when storing tool history fails', async () => {
-    const ws = await bootConnected();
-    ws.receive({ type: 'req', id: 1, method: 'snapshot', params: {} });
-    await flush();
-    vi.mocked(chrome.storage.local.set).mockRejectedValueOnce(new Error('Storage unavailable'));
-    expect((await ask({ type: 'remote-stop' })).ok).toBe(false);
-    expect(executor.release).toHaveBeenCalledOnce();
-    const log = (await ask({ type: 'remote-state' })).value!.chat as ChatEntry[];
-    expect(log[0]!.toolRun!.status).toBe('stopped');
-  });
-
-  it('acknowledges a persisted final reply once and does not end a new task on replay', async () => {
-    const ws = await bootConnected();
-    const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-    let save!: () => void;
-    vi.mocked(chrome.storage.local.set).mockImplementationOnce(
-      () =>
-        new Promise<void>((resolve) => {
-          save = resolve;
-        }),
-    );
-    ws.receive({ type: 'chat', id, text: 'Done' });
-    ws.receive({ type: 'chat', id, text: 'Done' });
-    await flush();
-    expect(ws.last('chat-ack')).toBeUndefined();
-    save();
-    await flush();
-    expect(ws.last('chat-ack')).toMatchObject({ id });
-    expect(executor.completeTask).toHaveBeenCalledOnce();
-    expect(storage.remoteChatReceipts).toContain(id);
-    const next = { sessionId: 'next', tabId: 4, tabIds: [4], phase: 'ready' as const };
-    executor.currentControl.mockReturnValue(next);
-    await ask({ type: 'remote-chat-clear' });
-    ws.receive({ type: 'chat', id, text: 'Done' });
-    await flush();
-    expect(executor.completeTask).toHaveBeenCalledOnce();
-    expect(executor.currentControl()).toEqual(next);
-    expect(storage.remoteChatLog).toEqual([]);
-  });
-
-  it('keeps acknowledgement history after clearing chat and restarting the worker', async () => {
-    const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-    storage.remoteChatReceipts = [id];
-    const ws = await bootConnected();
-    ws.receive({ type: 'chat', id, text: 'Already received' });
-    await flush();
-    expect(ws.last('chat-ack')).toMatchObject({ id });
-    expect(executor.completeTask).not.toHaveBeenCalled();
-    expect((await ask({ type: 'remote-state' })).value?.chat).toEqual([]);
-  });
-
-  it('does not acknowledge failed persistence and retries without duplicating the bubble', async () => {
-    const ws = await bootConnected();
-    const message = { type: 'chat', id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', text: 'Result' };
-    vi.mocked(chrome.storage.local.set).mockRejectedValueOnce(new Error('storage unavailable'));
-    ws.receive(message);
-    await flush();
-    expect(ws.last('chat-ack')).toBeUndefined();
-    expect((await ask({ type: 'remote-state' })).value?.error).toBe('ui.error.chatSaveFailed');
-    ws.receive(message);
-    await flush();
-    expect(ws.last('chat-ack')).toMatchObject({ id: message.id });
-    expect(storage.remoteChatLog).toHaveLength(1);
-  });
-
-  it('answers heartbeats while a screenshot promise is still pending', async () => {
-    const ws = await bootConnected();
-    let resolve!: (value: { ran: string }) => void;
-    executor.execute.mockImplementationOnce(
-      () =>
-        new Promise((r) => {
-          resolve = r;
-        }),
-    );
-    ws.receive({ type: 'req', id: 1, method: 'screenshot', params: {} });
-    await flush();
-    ws.receive({ type: 'ping', ts: 123 });
-    await flush();
-    expect(ws.last('pong')).toEqual({ type: 'pong', ts: 123 });
-    expect(ws.last('resp')).toBeUndefined();
-    resolve({ ran: 'screenshot' });
-    await flush();
-  });
-
-  it('shows command activity and removes the task when the final answer arrives', async () => {
-    const ws = await bootConnected();
-    const task = { sessionId: 'task', tabId: 3, tabIds: [3], phase: 'ready' as const };
-    executor.currentControl.mockReturnValue(task);
-    executor.currentGrant.mockReturnValue({ url: 'https://example.com', title: 'Video' });
-    expect((await ask({ type: 'remote-state' })).value?.task).toMatchObject({ phase: 'ready' });
-    let resolve!: (value: { ran: string }) => void;
-    executor.execute.mockImplementationOnce(
-      () =>
-        new Promise((r) => {
-          resolve = r;
-        }),
-    );
-    ws.receive({ type: 'req', id: 1, method: 'click', params: { x: 10, y: 10 } });
-    await flush();
-    expect((await ask({ type: 'remote-state' })).value?.task).toMatchObject({ phase: 'running' });
-    resolve({ ran: 'click' });
-    await flush();
-    expect((await ask({ type: 'remote-state' })).value?.task).toMatchObject({ phase: 'ready' });
-    executor.execute.mockImplementationOnce(async () => {
-      executor.currentControl.mockReturnValue({ ...task, phase: 'finished' });
-      executor.currentGrant.mockReturnValue(null);
-      return { ran: 'finish' };
-    });
-    ws.receive({ type: 'req', id: 2, method: 'finish', params: {} });
-    await flush();
-    expect((await ask({ type: 'remote-state' })).value?.task).toMatchObject({
-      phase: 'finished',
-      title: 'Video',
-    });
-    ws.receive({ type: 'chat', text: 'Done' });
-    await flush();
-    expect(executor.completeTask).toHaveBeenCalledOnce();
-    expect((await ask({ type: 'remote-state' })).value?.task).toBeNull();
-  });
-
-  it('keeps explicit progress and system messages active; a final reply cancels queued commands', async () => {
-    const ws = await bootConnected();
-    executor.currentControl.mockReturnValue({
-      sessionId: 'task',
-      tabId: 3,
-      tabIds: [3],
-      phase: 'ready',
-    });
-    ws.receive({ type: 'chat', text: 'Searching', final: false });
-    ws.receive({ type: 'chat', role: 'system', text: 'Notice' });
-    await flush();
-    expect(executor.completeTask).not.toHaveBeenCalled();
-    expect((storage.remoteChatLog as unknown[])[0]).toMatchObject({ final: false });
-    let resolve!: (value: { ran: string }) => void;
-    executor.execute.mockImplementationOnce(
-      () =>
-        new Promise((r) => {
-          resolve = r;
-        }),
-    );
-    ws.receive({ type: 'req', id: 1, method: 'click', params: { x: 10, y: 10 } });
-    await flush();
-    ws.receive({ type: 'req', id: 2, method: 'click', params: { x: 20, y: 20 } });
-    ws.receive({ type: 'chat', text: 'Done', final: true });
-    await flush();
-    expect((await ask({ type: 'remote-state' })).value?.task).toBeNull();
-    resolve({ ran: 'click' });
-    await flush();
-    expect(executor.execute).toHaveBeenCalledTimes(1);
-    expect(ws.last('error')).toMatchObject({ id: 2, code: 'STOPPED' });
-    expect((await ask({ type: 'remote-state' })).value?.task).toBeNull();
-  });
-
-  it('a final reply prevents a pending source lookup from creating a new task', async () => {
-    const ws = await bootConnected();
-    let resolve!: (tabs: unknown[]) => void;
-    vi.mocked(chrome.tabs.query).mockImplementationOnce(
-      () =>
-        new Promise((r) => {
-          resolve = r as never;
-        }),
-    );
-    ws.receive({ type: 'req', id: 1, method: 'open', params: { url: 'https://example.com' } });
-    await flush();
-    ws.receive({ type: 'chat', text: 'Done' });
-    await flush();
-    resolve([{ id: 3, windowId: 1 }]);
-    await flush();
-    expect(ws.last('error')).toMatchObject({ id: 1, code: 'STOPPED' });
+    expect((await state()).chat).toEqual([]);
+    expect(executor.execute).not.toHaveBeenCalled();
     expect(executor.createTask).not.toHaveBeenCalled();
   });
 
-  it('still displays the final answer if browser cleanup fails', async () => {
-    const ws = await bootConnected();
-    executor.completeTask.mockRejectedValueOnce(new Error('detach failed'));
-    ws.receive({ type: 'chat', text: 'Result' });
+  it('requires a successful handshake before sending, with no protocol fallback', async () => {
+    startRemoteBackground();
     await flush();
-    const state = (await ask({ type: 'remote-state' })).value!;
-    expect(state.error).toBe('ui.error.taskCleanupFailed');
-    expect(state.chat).toEqual([expect.objectContaining({ text: 'Result', final: true })]);
+    const ws = sockets[0]!;
+    ws.open();
+    await flush();
+    expect((await ask({ type: 'remote-chat-send', text: 'Hello' })).ok).toBe(false);
+    ws.receive({ type: 'ready', capabilities: [] });
+    await flush();
+    expect(ws.readyState).toBe(3);
+    expect((await state()).error).toBe('ui.error.protocolMismatch');
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(sockets).toHaveLength(1);
+    expect(ws.last('chat')).toBeUndefined();
   });
 
-  it('records queue receipts and failures on the matching message, including persisted delivery errors', async () => {
+  it('times out a missing handshake and retains a useful error', async () => {
+    startRemoteBackground();
+    await flush();
+    sockets[0]!.open();
+    await vi.advanceTimersByTimeAsync(10001);
+    expect((await state()).error).toBe('ui.error.protocolMismatch');
+    expect((await state()).connected).toBe(false);
+  });
+
+  it('records actions, returns observations, and completes once for an identical decision retry', async () => {
     const ws = await bootConnected();
-    await ask({ type: 'remote-chat-send', text: 'Check stocks' });
-    const chatId = ws.last('chat')!.id;
-    ws.receive({ type: 'chat-status', chatId: 'unrelated', state: 'failed' });
+    const request = await selectPage(ws);
+    const decision = { kind: 'actions', actions: [{ method: 'click', params: { x: 10, y: 10 } }] };
+    await respond(ws, request, decision);
+    expect(executor.execute).toHaveBeenCalledTimes(1);
+    expect(ws.last('agent-request')).toMatchObject({ round: 3 });
+    await respond(ws, request, decision, 2);
+    expect(executor.execute).toHaveBeenCalledTimes(1);
+    const next = ws.last('agent-request')!;
+    await respond(ws, next, { kind: 'done', text: 'Done' }, 3);
+    expect((await state()).task).toBeNull();
+    const history = (await state()).chat as ChatEntry[];
+    expect(history.find((m) => m.toolRun)?.toolRun).toMatchObject({
+      status: 'completed',
+      total: 2,
+    });
+    expect(ws.frames.some((f) => f.type === 'agent-event' && f.phase === 'end')).toBe(true);
+    expect(JSON.stringify(storage.remoteChatLog)).not.toContain('fresh state');
+  });
+
+  it('keeps heartbeats responsive during an action and stops late continuation', async () => {
+    const ws = await bootConnected();
+    const request = await selectPage(ws);
+    let resolve!: (v: { ran: string }) => void;
+    executor.execute.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    );
+    await respond(ws, request, {
+      kind: 'actions',
+      actions: [{ method: 'click', params: { x: 1, y: 2 } }],
+    });
+    ws.receive({ type: 'ping', ts: 123 });
     await flush();
-    expect((storage.remoteChatLog as { delivery: string }[])[0]!.delivery).toBe('sent');
-    ws.receive({ type: 'chat-status', chatId, state: 'queued' });
+    expect(ws.last('pong')).toEqual({ type: 'pong', ts: 123 });
+    await ask({ type: 'remote-stop' });
+    expect(executor.release).toHaveBeenCalledOnce();
+    resolve({ ran: 'click' });
     await flush();
-    expect((storage.remoteChatLog as { delivery: string }[])[0]!.delivery).toBe('queued');
-    ws.receive({ type: 'chat-status', chatId, state: 'failed', code: 'C4_DELIVERY_FAILED' });
+    expect(ws.last('agent-request')!.id).toBe(request.id);
+    expect(ws.last('agent-turn-end')).toMatchObject({ status: 'stopped' });
+    await respond(ws, request, { kind: 'done', text: 'Too late' }, 2);
+    expect(ws.last('error')).toMatchObject({ code: 'DECISION_CONFLICT' });
+  });
+
+  it('clearing history cannot be undone by a late action or scheduled write', async () => {
+    const ws = await bootConnected();
+    const request = await selectPage(ws);
+    let resolve!: (v: { ran: string }) => void;
+    executor.execute.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    );
+    await respond(ws, request, {
+      kind: 'actions',
+      actions: [{ method: 'click', params: { x: 1, y: 2 } }],
+    });
+    await ask({ type: 'remote-chat-clear' });
+    resolve({ ran: 'click' });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(storage.remoteChatLog).toEqual([]);
+  });
+
+  it('shows correlated delivery failures and ignores stale receipts', async () => {
+    const ws = await bootConnected();
+    const request = await begin(ws);
+    ws.receive({ type: 'agent-status', requestId: 'other', state: 'failed' });
     await flush();
-    expect((storage.remoteChatLog as unknown[])[0]).toMatchObject({
-      text: 'Check stocks',
+    expect((storage.remoteChatLog as ChatEntry[])[0]!.delivery).toBe('sent');
+    ws.receive({ type: 'agent-status', requestId: request.id, state: 'queued' });
+    await flush();
+    expect((storage.remoteChatLog as ChatEntry[])[0]!.delivery).toBe('queued');
+    ws.receive({
+      type: 'agent-status',
+      requestId: request.id,
+      state: 'failed',
+      code: 'AGENT_UNAVAILABLE',
+    });
+    await flush();
+    expect((storage.remoteChatLog as ChatEntry[])[0]).toMatchObject({
       delivery: 'failed',
-      deliveryError: 'ui.error.chatDeliveryFailed',
-    });
-    expect((await ask({ type: 'remote-state' })).value?.connected).toBe(true);
-    ws.receive({ type: 'chat-status', chatId, state: 'unknown', code: 'C4_DELIVERY_TIMEOUT' });
-    await flush();
-    expect((storage.remoteChatLog as unknown[])[0]).toMatchObject({
-      delivery: 'unknown',
-      deliveryError: 'ui.error.deliveryUnconfirmed',
-    });
-    ws.receive({ type: 'chat-status', chatId, state: 'failed', code: 'AGENT_UNAVAILABLE' });
-    await flush();
-    expect((storage.remoteChatLog as unknown[])[0]).toMatchObject({
       deliveryError: 'ui.error.agentUnavailable',
     });
   });
 
-  it('a late result from an old socket cannot clear a new command with the same id', async () => {
+  it('disconnect ends the turn, reconnect negotiates again, and a replaced connection stays closed', async () => {
     const ws = await bootConnected();
-    executor.currentControl.mockReturnValue({
-      sessionId: 'task',
-      tabId: 3,
-      tabIds: [3],
-      phase: 'ready',
-    });
-    let oldResolve!: (value: { ran: string }) => void;
-    executor.execute.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          oldResolve = resolve;
-        }),
-    );
-    ws.receive({ type: 'req', id: 1, method: 'click', params: { x: 10, y: 10 } });
-    await flush();
+    await begin(ws);
     ws.serverClose(1006);
     await vi.advanceTimersByTimeAsync(2000);
-    const next = sockets[1]!;
-    next.open();
-    let newResolve!: (value: { ran: string }) => void;
-    // dialog bypasses the previous request's serial queue, as it must for waits.
-    executor.execute.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          newResolve = resolve;
-        }),
-    );
-    next.receive({ type: 'req', id: 1, method: 'dialog', params: { action: 'get' } });
+    expect((storage.remoteChatLog as ChatEntry[])[0]!.loopStatus).toBe('interrupted');
+    expect(sockets).toHaveLength(2);
+    sockets[1]!.open();
+    sockets[1]!.receive({ type: 'ready', capabilities: ['agent-loop-v1'] });
     await flush();
-    oldResolve({ ran: 'click' });
-    await flush();
-    expect((await ask({ type: 'remote-state' })).value?.task).toMatchObject({ phase: 'running' });
-    expect(next.last('resp')).toBeUndefined();
-    newResolve({ ran: 'dialog' });
-    await flush();
-    expect((await ask({ type: 'remote-state' })).value?.task).toMatchObject({ phase: 'ready' });
+    expect(sockets[1]!.last('agent-request')).toBeUndefined();
+    sockets[1]!.serverClose(4001);
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(sockets).toHaveLength(2);
+    expect((await state()).error).toBe('ui.error.connectionTaken');
   });
 
-  it('dials the relay with the key in the subprotocol and says hello', async () => {
+  it('persists the final answer even when task cleanup fails', async () => {
     const ws = await bootConnected();
-    expect(ws.url).toBe('wss://agent.example/browser-remote/ext');
-    expect(ws.protocols).toEqual([REMOTE_SUBPROTOCOL, `key.${KEY}`]);
-    const hello = ws.last('hello') as { version: string; capabilities: string[] };
-    expect(hello.capabilities).toContain('open');
-    const st = await ask({ type: 'remote-state' });
-    expect(st.value).toMatchObject({ connected: true, configured: true, keyId: 'abababababab' });
+    const request = await begin(ws);
+    executor.completeTask.mockRejectedValueOnce(new Error('detach failed'));
+    await respond(ws, request, { kind: 'done', text: 'Result' });
+    expect((await state()).error).toBe('ui.error.taskCleanupFailed');
+    expect((storage.remoteChatLog as ChatEntry[]).at(-1)!.text).toBe('Result');
   });
 
-  it('does not dial when unconfigured or disabled', async () => {
+  it('does not report completed delivery when final answer persistence fails', async () => {
+    const ws = await bootConnected();
+    const request = await begin(ws);
+    vi.mocked(chrome.storage.local.set).mockRejectedValueOnce(new Error('full'));
+    await respond(ws, request, { kind: 'done', text: 'Result' });
+    expect(ws.last('agent-turn-end')).toMatchObject({ status: 'interrupted' });
+    expect((await state()).error).toBe('ui.error.chatSaveFailed');
+  });
+
+  it('kill switch releases the task and saving new settings connects with the new key', async () => {
+    const ws = await bootConnected();
+    await begin(ws);
+    await ask({ type: 'remote-set-enabled', enabled: false });
+    expect(ws.readyState).toBe(3);
+    expect(executor.release).toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(sockets).toHaveLength(1);
+    await ask({ type: 'remote-save', relayUrl: 'wss://other.example/ext', key: 'b'.repeat(64) });
+    await ask({ type: 'remote-set-enabled', enabled: true });
+    await flush();
+    expect(sockets[1]!.protocols[1]).toBe(`key.${'b'.repeat(64)}`);
+  });
+
+  it('does not dial without configuration', async () => {
     storage = {};
     startRemoteBackground();
     await flush();
     expect(sockets).toHaveLength(0);
-    const st = await ask({ type: 'remote-state' });
-    expect(st.value).toMatchObject({ configured: false, connected: false });
-  });
-
-  it('answers ping and dispatches req to the executor', async () => {
-    const ws = await bootConnected();
-    ws.receive({ type: 'ping', ts: 5 });
-    expect(ws.last('pong')).toEqual({ type: 'pong', ts: 5 });
-
-    ws.receive({
-      type: 'req',
-      id: 1,
-      method: 'open',
-      params: { url: 'https://example.com/' },
-      requestId: 'r1',
-    });
-    await flush();
-    expect(executor.createTask).toHaveBeenCalled();
-    const resp = ws.frames.find((f) => f.id === 1) as {
-      type: string;
-      result: { started: boolean };
-    };
-    expect(resp.type).toBe('resp');
-    expect(resp.result.started).toBe(true);
-
-    ws.receive({ type: 'req', id: 2, method: 'Runtime.evaluate', params: {} });
-    await flush();
-    expect(ws.frames.find((f) => f.id === 2)).toMatchObject({
-      type: 'error',
-      code: 'UNKNOWN_METHOD',
-    });
-
-    ws.receive({ type: 'req', id: 3, method: 'open', params: { url: 'https://paypal.com/' } });
-    await flush();
-    expect(ws.frames.find((f) => f.id === 3)).toMatchObject({ type: 'error', code: 'BLOCKED_URL' });
-  });
-
-  it('records composite child progress and partial errors without persisting nested inputs', async () => {
-    const ws = await bootConnected();
-    executor.currentControl.mockReturnValue({
-      sessionId: 'task',
-      tabId: 7,
-      tabIds: [7],
-      phase: 'ready',
-    });
-    executor.execute.mockImplementation(async (command) => {
-      if (command.op === 'wait') throw Object.assign(new Error('unmet'), { code: 'WAIT_TIMEOUT' });
-      return { ran: command.op };
-    });
-    const params = {
-      action: { op: 'fill', ref: '@input', text: 'private composite input' },
-      wait: { condition: 'visible', selector: '#later', timeoutMs: 100 },
-      read: { op: 'snapshot' },
-    };
-    ws.receive({ type: 'req', id: 91, method: 'step', params, requestId: 'composite' });
-    await flush();
-    expect(ws.frames.find((f) => f.id === 91)).toMatchObject({
-      type: 'error',
-      code: 'STEP_INCOMPLETE',
-      details: { steps: [{ status: 'success' }, { status: 'error' }, { status: 'skipped' }] },
-    });
-    const chat = (await ask({ type: 'remote-state' })).value!.chat as ChatEntry[];
-    const run = chat.find((e) => e.toolRun)!.toolRun!;
-    expect(run.steps.map((s) => [s.method, s.status])).toEqual([
-      ['fill', 'success'],
-      ['wait', 'error'],
-    ]);
-    expect(run.failed).toBe(1);
-    expect(JSON.stringify(chat)).not.toContain('private composite input');
-    ws.receive({ type: 'req', id: 92, method: 'step', params, requestId: 'composite' });
-    await flush();
-    expect(ws.frames.find((f) => f.id === 92)).toMatchObject({ details: { replayed: true } });
-    expect(run.failed).toBe(1);
-    expect(executor.execute).toHaveBeenCalledTimes(2);
-  });
-
-  it('carries chat both ways and persists the log', async () => {
-    const ws = await bootConnected();
-    ws.receive({ type: 'chat', role: 'assistant', text: '好的，我来搜', ts: 10 });
-    await flush();
-    expect((storage.remoteChatLog as unknown[]).length).toBe(1);
-
-    const r = await ask({ type: 'remote-chat-send', text: '  帮我搜蜘蛛侠  ' });
-    expect(r.ok).toBe(true);
-    expect(ws.last('chat')).toMatchObject({ type: 'chat', text: '帮我搜蜘蛛侠' });
-    const chat = (r.value as { chat: { role: string; text: string }[] }).chat;
-    expect(chat.map((c) => c.role)).toEqual(['assistant', 'user']);
-    expect(broadcasts.some((b) => (b as { type: string }).type === 'remote-updated')).toBe(true);
-  });
-
-  it('refuses to send chat while offline', async () => {
-    const ws = await bootConnected();
-    ws.serverClose(1006);
-    await flush();
-    const r = await ask({ type: 'remote-chat-send', text: 'hi' });
-    expect(r.ok).toBe(false);
-  });
-
-  it('reconnects with backoff after a drop, but not after being superseded', async () => {
-    const ws = await bootConnected();
-    ws.serverClose(1006);
-    await vi.advanceTimersByTimeAsync(2000);
-    expect(sockets).toHaveLength(2);
-
-    sockets[1]!.open();
-    await flush();
-    sockets[1]!.serverClose(4001);
-    await vi.advanceTimersByTimeAsync(120_000);
-    expect(sockets).toHaveLength(2);
-    const st = await ask({ type: 'remote-state' });
-    expect(st.value?.error).toBe('ui.error.connectionTaken');
-  });
-
-  it('kill switch closes the socket and releases the task', async () => {
-    const ws = await bootConnected();
-    const r = await ask({ type: 'remote-set-enabled', enabled: false });
-    expect(r.ok).toBe(true);
-    expect(ws.readyState).toBe(3);
-    expect(executor.release).toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(120_000);
-    expect(sockets).toHaveLength(1);
-    expect((storage.remoteConfig as { enabled: boolean }).enabled).toBe(false);
-  });
-
-  it('saving new settings redials with the new key', async () => {
-    await bootConnected();
-    const r = await ask({
-      type: 'remote-save',
-      relayUrl: 'wss://other.example/ext',
-      key: 'b'.repeat(64),
-    });
-    expect(r.ok).toBe(true);
-    await flush();
-    expect(sockets).toHaveLength(2);
-    expect(sockets[1]!.protocols[1]).toBe(`key.${'b'.repeat(64)}`);
-    const bad = await ask({ type: 'remote-save', relayUrl: 'http://nope', key: 'zzz' });
-    expect(bad.ok).toBe(false);
   });
 });

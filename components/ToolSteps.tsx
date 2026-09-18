@@ -2,15 +2,11 @@ import { useEffect, useId, useState } from 'react';
 import { LONG_WAIT_MS, stageLabels, summarizeTools } from '../utils/tool-progress';
 import type { TranslationKey } from '../utils/i18n';
 import type { ToolRun, ToolStep } from '../utils/remote';
-import type { RemoteMethod } from '../utils/tool-catalog';
+import type { BrowserMethod } from '../utils/tool-catalog';
 import { useI18n } from './LanguageProvider';
 
 const labels = {
-  step: 'toolStep',
-  info: 'toolInfo',
-  describe: 'toolDescribe',
   'use-current-tab': 'toolUseCurrentTab',
-  start: 'toolStart',
   open: 'toolOpen',
   'new-tab': 'toolNewTab',
   'switch-tab': 'toolSwitchTab',
@@ -18,7 +14,6 @@ const labels = {
   frames: 'toolFrames',
   snapshot: 'toolSnapshot',
   observe: 'toolObserve',
-  screenshot: 'toolScreenshot',
   find: 'toolFind',
   inspect: 'toolInspect',
   click: 'toolClick',
@@ -36,12 +31,7 @@ const labels = {
   forward: 'toolForward',
   reload: 'toolReload',
   dialog: 'toolDialog',
-  wait: 'toolWait',
-  pause: 'toolPause',
-  finish: 'toolFinish',
-  stop: 'toolStop',
-  finalize: 'toolFinalize',
-} satisfies Record<RemoteMethod, TranslationKey>;
+} satisfies Record<BrowserMethod, TranslationKey>;
 const statuses: Record<ToolStep['status'], TranslationKey> = {
   queued: 'stepQueued',
   running: 'stepRunning',
@@ -174,7 +164,7 @@ export function ToolSteps({ run }: { run: ToolRun }) {
                   <div className="tool-step-heading">
                     <span className="tool-step-label">
                       {Object.hasOwn(labels, step.method)
-                        ? t(labels[step.method as RemoteMethod])
+                        ? t(labels[step.method as BrowserMethod])
                         : step.method}
                     </span>
                     <span className="tool-step-status">

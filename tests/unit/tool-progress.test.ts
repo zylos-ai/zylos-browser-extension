@@ -22,8 +22,8 @@ const run = (steps: ToolStep[], more: Partial<ToolRun> = {}): ToolRun => ({
 
 test('groups page work without surfacing setup, refs, tiny waits, or cleanup', () => {
   const methods = [
-    'info',
-    'describe',
+    'tabs',
+    'frames',
     'open',
     'snapshot',
     'find',
@@ -96,7 +96,7 @@ test('a live wait crosses the threshold without being a step during a short paus
 });
 
 test('hidden-tool errors and brief failed waits remain visible while proven recoveries do not warn', () => {
-  const r = run([step('describe', 1, { status: 'error' }), step('wait', 2, { status: 'error' })], {
+  const r = run([step('frames', 1, { status: 'error' }), step('wait', 2, { status: 'error' })], {
     status: 'completed',
   });
   expect(summarizeTools(r).stages.map((s) => s.kind)).toEqual(['preparing', 'waiting']);
@@ -127,7 +127,7 @@ test('unrelated successes, omitted failures and unconfirmed in-flight work canno
 });
 
 test('idle, queued, stopped and preparation states reflect observed activity, never invented thinking', () => {
-  expect(summarizeTools(run([step('info', 1, { status: 'running' })])).label).toBe(
+  expect(summarizeTools(run([step('tabs', 1, { status: 'running' })])).label).toBe(
     'activityPreparing',
   );
   expect(summarizeTools(run([step('click', 1, { status: 'queued' })])).label).toBe(

@@ -46,11 +46,14 @@ test('bundle contains Remote commands and no former protocol entrypoints', () =>
     'zylos-browser-remote.v2',
     'remote-chat-send',
     'remote-save',
-    'tool-catalog-v1',
-    'Browser operation guide',
+    'agent-loop-v1',
+    'browser-decision-v1',
   ])
     assert.ok(scripts.includes(message), message);
   for (const message of [
+    'chat-ack-v1',
+    'STEP_INCOMPLETE',
+    'tool-catalog-v1',
     'platform-login',
     'browser-binding-confirm',
     'cdp-command',
