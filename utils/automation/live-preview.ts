@@ -221,8 +221,10 @@ export class LivePreview {
     this.post(client, { type: 'preview-frame', frame: this.frame });
   }
   private publish() {
+    // A dismissed preview still needs task/completion metadata so its Stop
+    // control stays accurate and a new task can show the preview again.
     for (const client of this.clients)
-      if (client.visible) this.post(client, { type: 'preview-state', preview: this.state });
+      this.post(client, { type: 'preview-state', preview: this.state });
   }
   private flushFrames() {
     const delay = MIN_FRAME_MS - (Date.now() - this.lastSent);

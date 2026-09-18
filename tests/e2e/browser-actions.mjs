@@ -293,6 +293,7 @@ try {
   const state = async (selector) => rpc('inspect', { ref: await find(selector) });
   const check = async (name, work) => {
     if (process.env.BROWSER_LOOP_ONLY === '1' && !name.startsWith('extension loop')) return;
+    if (process.env.E2E_FILTER && !name.includes(process.env.E2E_FILTER)) return;
     await work();
     checks.push(name);
     console.log('PASS', name);
@@ -403,9 +404,18 @@ try {
         );
         await previewPanel('document.activeElement.blur()');
       }
+      const controlledSession = (await rpc('info')).control.sessionId;
+      await previewPanel("document.querySelector('.preview-close').click()");
+      await eventually(() => previewPanel("!document.querySelector('.live-preview')"));
+      assert.equal(await previewPanel("!!document.querySelector('.preview-restore')"), true);
+      assert.equal(await previewPanel("!!document.querySelector('#stop-task')"), true);
+      assert.equal((await rpc('info')).control.sessionId, controlledSession);
+      await save('live-preview-closed-320');
       await rpc('new-tab', { url: url + 'preview?second' });
       const secondTab = (await rpc('info')).control.tabId;
       assert.notEqual(secondTab, tab);
+      assert.equal(await previewPanel("!!document.querySelector('.live-preview')"), false);
+      await previewPanel("document.querySelector('.preview-restore').click()");
       await eventually(() =>
         previewPanel(
           `Number(document.querySelector('.live-preview')?.dataset.tabId) === ${secondTab} && document.querySelector('.live-preview-image')?.naturalWidth > 0`,

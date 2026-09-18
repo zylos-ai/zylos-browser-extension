@@ -24,7 +24,28 @@ export function LivePreview({
   const { t } = useI18n();
   const [preview, setPreview] = useState<PreviewState | null | undefined>();
   const [frame, setFrame] = useState<PreviewFrame | null>(null);
+  const [dismissedSession, setDismissedSession] = useState<string | null>(null);
   const portRef = useRef<chrome.runtime.Port | null>(null);
+
+  // Keep View/Stop usable even when the preview service is starting or unavailable.
+  const state =
+    preview ??
+    (task
+      ? ({
+          targetKey: '',
+          sessionId: task.sessionId,
+          title: task.title,
+          url: task.url,
+          tabId: task.tabId,
+          status: task.phase === 'paused' || task.phase === 'finished' ? 'paused' : 'running',
+          availability: 'connecting',
+          canReveal: true,
+          canStop: true,
+        } as const)
+      : null);
+  const hidden = !!state && state.sessionId === dismissedSession;
+  const hiddenRef = useRef(hidden);
+  hiddenRef.current = hidden;
 
   useEffect(() => {
     let disposed = false;
@@ -33,7 +54,7 @@ export function LivePreview({
       try {
         portRef.current?.postMessage({
           type: 'visibility',
-          visible: document.visibilityState !== 'hidden',
+          visible: !hiddenRef.current && document.visibilityState !== 'hidden',
         });
       } catch {
         /* The disconnect listener reconnects after the worker restarts. */
@@ -84,6 +105,17 @@ export function LivePreview({
   }, []);
 
   useEffect(() => {
+    try {
+      portRef.current?.postMessage({
+        type: 'visibility',
+        visible: !hidden && document.visibilityState !== 'hidden',
+      });
+    } catch {
+      /* Reconnect publishes current visibility. */
+    }
+  }, [hidden]);
+
+  useEffect(() => {
     if (!frame) return;
     const id = requestAnimationFrame(() => {
       try {
@@ -95,22 +127,33 @@ export function LivePreview({
     return () => cancelAnimationFrame(id);
   }, [frame]);
 
-  // Keep View/Stop usable even when the preview service is starting or unavailable.
-  const state =
-    preview ??
-    (task
-      ? ({
-          targetKey: '',
-          title: task.title,
-          url: task.url,
-          tabId: task.tabId,
-          status: task.phase === 'paused' || task.phase === 'finished' ? 'paused' : 'running',
-          availability: 'connecting',
-          canReveal: true,
-          canStop: true,
-        } as const)
-      : null);
   if (!state) return null;
+  if (hidden)
+    return (
+      <div className="live-preview-collapsed" aria-label={t('previewLabel')}>
+        <button
+          type="button"
+          className="btn preview-restore"
+          onClick={() => setDismissedSession(null)}
+          aria-expanded={false}
+          autoFocus
+        >
+          {t('previewShow')}
+        </button>
+        {state.canStop && (
+          <button
+            type="button"
+            id="stop-task"
+            className="btn preview-stop"
+            onClick={onStop}
+            disabled={stopping}
+            aria-label={stopping ? t('stopping') : t('stopTask')}
+          >
+            {stopping ? t('stopping') : t('previewStop')}
+          </button>
+        )}
+      </div>
+    );
   const image = frame?.targetKey === state.targetKey ? frame : null;
   const done = state.status === 'completed';
   const label = done
@@ -141,6 +184,22 @@ export function LivePreview({
       tabIndex={0}
     >
       <div className="live-preview-viewport">
+        <button
+          type="button"
+          className="btn preview-close"
+          onClick={() => setDismissedSession(state.sessionId)}
+          aria-label={t('previewClose')}
+          title={t('previewCloseHint')}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path
+              d="m4 4 8 8M12 4l-8 8"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+            />
+          </svg>
+        </button>
         {image ? (
           <img
             className="live-preview-image"

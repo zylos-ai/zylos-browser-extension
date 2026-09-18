@@ -685,9 +685,48 @@ html[data-theme='zylos'] > body {
   .live-preview-completed {
     position: absolute;
     top: 8px;
-    right: 8px;
+    left: 8px;
     z-index: 1;
     pointer-events: none;
+  }
+  .preview-close {
+    position: absolute;
+    z-index: 2;
+    top: 6px;
+    right: 6px;
+    width: 28px;
+    height: 28px;
+    min-height: 28px;
+    padding: 0;
+    border: 1px solid rgb(31 10 41 / 10%);
+    border-radius: 8px;
+    background: rgb(255 255 255 / 94%);
+    color: #241b26;
+    box-shadow: 0 1px 4px rgb(31 10 41 / 10%);
+  }
+  .preview-close:hover {
+    background: white;
+  }
+  .live-preview-collapsed {
+    position: absolute;
+    z-index: 5;
+    right: 0;
+    bottom: calc(100% + 8px);
+    display: flex;
+    gap: 6px;
+  }
+  .live-preview-collapsed .btn {
+    min-height: 28px;
+    height: 28px;
+    padding: 0 10px;
+    border-radius: 8px;
+    font-size: 12px;
+    box-shadow: 0 1px 4px rgb(31 10 41 / 10%);
+  }
+  .preview-restore {
+    background: var(--color-base-100);
+    border-color: var(--color-control-border);
+    color: var(--color-base-content);
   }
   .live-preview-actions {
     position: absolute;
@@ -770,6 +809,12 @@ html[data-theme='zylos'] > body {
   }
   .chat-panel:has(.live-preview) .new-message-button {
     bottom: 182px;
+  }
+  .chat-panel:has(.live-preview-collapsed) #history {
+    padding-bottom: 48px;
+  }
+  .chat-panel:has(.live-preview-collapsed) .new-message-button {
+    bottom: 40px;
   }
   @media (hover: none) {
     .live-preview-actions {

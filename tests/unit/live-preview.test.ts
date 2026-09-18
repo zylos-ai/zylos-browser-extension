@@ -162,6 +162,30 @@ test('acks CDP promptly, bounds client backlog and delivers the last throttled f
   expect(b.state().canStop).toBe(false);
 });
 
+test('hidden previews receive completion and new-task state without restarting capture', async () => {
+  const a = client();
+  a.visible(true);
+  service.sync(scope(), grant(), true);
+  await tick();
+  frame();
+  a.visible(false);
+  await tick();
+  command.mockClear();
+  service.finish('completed');
+  await tick();
+  expect(a.state().status).toBe('completed');
+  expect(a.state().canStop).toBe(false);
+  service.sync(scope(4, 'new-task'), grant(4), true);
+  await tick();
+  expect(a.state().sessionId).toBe('new-task');
+  expect(a.state().canStop).toBe(true);
+  expect(a.frames()).toHaveLength(1);
+  expect(command.mock.calls.some((call) => call[1] === 'Page.startScreencast')).toBe(false);
+  a.visible(true);
+  await tick();
+  expect(command.mock.calls.some((call) => call[1] === 'Page.startScreencast')).toBe(true);
+});
+
 test('target changes discard old frames, stop old capture and never follow unrelated tabs', async () => {
   const a = client();
   a.visible(true);

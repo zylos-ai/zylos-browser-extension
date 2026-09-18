@@ -627,3 +627,56 @@ test('preview failure retains controls; stopped and interrupted tasks do not sho
   await act(async () => previewListener({ type: 'preview-state', preview: null }));
   expect(container.querySelector('.live-preview')).toBeNull();
 });
+
+test('closing preview suspends frames without stopping the task and keeps lifecycle controls accurate', async () => {
+  await mount();
+  const preview = {
+    targetKey: 'task:3:1',
+    sessionId: 'task',
+    tabId: 3,
+    windowId: 1,
+    title: 'Current page',
+    url: 'https://example.com',
+    status: 'running',
+    availability: 'live',
+    canReveal: true,
+    canStop: true,
+  };
+  await act(async () => previewListener({ type: 'preview-state', preview }));
+  send.mockClear();
+  await click('.preview-close');
+  expect(container.querySelector('.live-preview')).toBeNull();
+  expect(container.querySelector('.preview-restore')?.textContent).toBe('显示预览');
+  expect(container.querySelector('#stop-task')).not.toBeNull();
+  expect(send).not.toHaveBeenCalled();
+  expect(previewPost).toHaveBeenLastCalledWith({ type: 'visibility', visible: false });
+  await act(async () =>
+    previewListener({
+      type: 'preview-state',
+      preview: { ...preview, tabId: 4, targetKey: 'task:4:2' },
+    }),
+  );
+  expect(container.querySelector('.live-preview')).toBeNull();
+  await click('.preview-restore');
+  expect(container.querySelector('.live-preview')?.getAttribute('data-tab-id')).toBe('4');
+  expect(previewPost).toHaveBeenLastCalledWith({ type: 'visibility', visible: true });
+  await click('.preview-close');
+  await click('#stop-task');
+  expect(send).toHaveBeenLastCalledWith({ type: 'remote-stop' });
+  await act(async () =>
+    previewListener({
+      type: 'preview-state',
+      preview: { ...preview, status: 'completed', canStop: false, availability: 'paused' },
+    }),
+  );
+  expect(container.querySelector('.live-preview')).toBeNull();
+  expect(container.querySelector('#stop-task')).toBeNull();
+  await act(async () =>
+    previewListener({
+      type: 'preview-state',
+      preview: { ...preview, sessionId: 'next-task', targetKey: 'next-task:3:1' },
+    }),
+  );
+  expect(container.querySelector('.live-preview')).not.toBeNull();
+  expect(previewPost).toHaveBeenLastCalledWith({ type: 'visibility', visible: true });
+});
