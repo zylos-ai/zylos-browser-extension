@@ -5,7 +5,16 @@ import type { GrantedTab, Scope } from './types';
 type Client = { port: chrome.runtime.Port; visible: boolean; pending: number | null; sent: number };
 type Capture = { key: string; tabId: number };
 const MIN_FRAME_MS = 100; // At most 10 thumbnail updates/sec; Chrome still pushes the frames.
-const PASSIVE = new Set(['info', 'describe', 'tabs', 'finish', 'pause', 'stop', 'finalize']);
+const PASSIVE = new Set([
+  'read-page',
+  'info',
+  'describe',
+  'tabs',
+  'finish',
+  'pause',
+  'stop',
+  'finalize',
+]);
 
 /** Shares the executor's existing debugger attachment; never attaches or selects a tab. */
 export class LivePreview {

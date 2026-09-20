@@ -13,6 +13,7 @@ const labels = {
   tabs: 'toolTabs',
   frames: 'toolFrames',
   snapshot: 'toolSnapshot',
+  'read-page': 'toolSnapshot',
   observe: 'toolObserve',
   find: 'toolFind',
   inspect: 'toolInspect',

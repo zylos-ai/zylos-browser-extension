@@ -36,6 +36,33 @@ export async function runBrowserRound(
   assertActive: () => void,
   requestId: string,
 ): Promise<RoundResult> {
+  // A standalone DOM read is already its own observation. In particular, it
+  // must not fall through to CDP snapshot/settle/tabs or establish task control.
+  if (actions.length === 1 && actions[0]!.method === 'read-page') {
+    const action = actions[0]!;
+    assertActive();
+    try {
+      const page = await call(action.method, action.params, `${requestId}:0`);
+      assertActive();
+      return {
+        mode: currentControl() ? 'operating' : 'reading',
+        observation: { page },
+        results: [
+          { method: 'read-page', status: 'success', result: { includedInObservation: true } },
+        ],
+        failed: false,
+      };
+    } catch (error) {
+      assertActive();
+      if (errorInfo(error).code === 'STOPPED') throw error;
+      return {
+        mode: currentControl() ? 'operating' : 'reading',
+        observation: { available: false, error: errorInfo(error) },
+        results: [{ method: 'read-page', status: 'error', error: errorInfo(error) }],
+        failed: true,
+      };
+    }
+  }
   const results: unknown[] = [];
   let failed = false;
   let suppliedObservation: unknown;
@@ -84,7 +111,12 @@ export async function runBrowserRound(
   }
   assertActive();
   if (!currentControl())
-    return { observation: { available: false, reason: 'No selected task page' }, results, failed };
+    return {
+      mode: 'reading',
+      observation: { available: false, reason: 'No selected task page' },
+      results,
+      failed,
+    };
   let observation: unknown = suppliedObservation;
   // find/inspect refs remain valid: do not clear them with a redundant snapshot.
   if (observation === undefined) {
@@ -127,6 +159,7 @@ export async function runBrowserRound(
     );
   };
   return {
+    mode: 'operating',
     observation: { page: bounded(observation), tabs, target: currentGrant() },
     results: results.map(bounded),
     failed,

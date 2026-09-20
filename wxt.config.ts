@@ -15,6 +15,7 @@ export default defineConfig({
     minimum_chrome_version: '125',
     permissions: [
       'debugger',
+      'scripting',
       'storage',
       'tabs',
       'alarms',
@@ -22,6 +23,10 @@ export default defineConfig({
       'tabGroups',
       'webNavigation',
     ],
+    // The sidebar can stay open while the owner switches sites. activeTab alone
+    // does not grant access to each newly selected page. Reads still target only
+    // the page bound to an owner message, never all open tabs.
+    host_permissions: ['http://*/*', 'https://*/*'],
     action: {
       default_title: '__MSG_openSidebar__',
       default_icon: {

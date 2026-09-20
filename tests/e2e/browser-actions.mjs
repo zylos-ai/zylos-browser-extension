@@ -21,9 +21,10 @@ const relayRoot = process.env.RELAY_ROOT || path.resolve(root, '../zylos-browser
 process.env.BROWSER_REMOTE_KEY = 'ab'.repeat(32);
 const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'coco-actions-e2e-'));
 process.env.BROWSER_REMOTE_OBS_DIR = path.join(profile, 'observations');
-const { start } = require(path.join(relayRoot, 'relay/server.js'));
+const { start } = require(path.join(relayRoot, 'src/index.js'));
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const checks = [];
+const measurements = [];
 const chatMessages = [];
 let browser, relay, socket, site;
 async function eventually(work, timeout = 10000) {
@@ -63,6 +64,12 @@ function cdpClient(ws) {
     });
 }
 function fixture(url, port) {
+  if (url.startsWith('/article'))
+    return `<!doctype html><title>Read-only article</title><h1>Article heading</h1>
+    <button onclick="this.textContent='Action confirmed'">Article action</button>
+    <a href="/next">Real source</a><input value="PRIVATE_FIELD"><div contenteditable>PRIVATE_DRAFT</div>
+    <p hidden>PRIVATE_HIDDEN</p><p>${'Loaded article sentence. '.repeat(1000)}</p><h2>Article ending</h2>
+    <div id="shadow"></div><script>document.querySelector('#shadow').attachShadow({mode:'open'}).innerHTML='<p>Open shadow article</p>'</script>`;
   if (url.startsWith('/loop'))
     return `<!doctype html><title>Browser loop fixture</title>
     <form action="/next" target="_blank"><input name="q" aria-label="Popup query"></form>
@@ -281,6 +288,25 @@ try {
     if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
     return result.result.value;
   };
+  // Observe calls made by the extension itself; the test driver's separate CDP
+  // connection to the disposable worker is not a browser-control attachment.
+  const { sessionId: workerSession } = await cdp('Target.attachToTarget', {
+    targetId: worker.targetId,
+    flatten: true,
+  });
+  const workerEval = async (expression) => {
+    const value = await cdp(
+      'Runtime.evaluate',
+      { expression, awaitPromise: true, returnByValue: true },
+      workerSession,
+    );
+    if (value.exceptionDetails) throw new Error(JSON.stringify(value.exceptionDetails));
+    return value.result.value;
+  };
+  await workerEval(`globalThis.debuggerCalls = []; for (const name of ['attach','detach','sendCommand']) {
+    const original = chrome.debugger[name];
+    chrome.debugger[name] = function(...args) { debuggerCalls.push(name === 'sendCommand' ? args[1] : name); return original.apply(chrome.debugger, args); };
+  }`);
   const panelState = async () =>
     (await previewPanel("chrome.runtime.sendMessage({type:'remote-state'})")).value;
   await eventually(async () => (await panelState()).connected);
@@ -383,6 +409,143 @@ try {
     );
     assert.equal((await panelState()).task, null);
   };
+  await check(
+    'chat and paginated DOM reads stay CDP-free; late control keeps the captured tab',
+    async () => {
+      const tab = await previewPanel(
+        `chrome.tabs.create({url:${JSON.stringify(url + 'article')},active:true})`,
+      );
+      await eventually(
+        async () => (await previewPanel(`chrome.tabs.get(${tab.id})`)).status === 'complete',
+      );
+      await workerEval('debuggerCalls.length = 0');
+      let started = performance.now();
+      let request = await askLoop('Article: just say hello', tab);
+      const initial = request.request.payload.initialPage;
+      measurements.push({
+        operation: 'message context (DOM)',
+        elapsedMs: Math.round(performance.now() - started),
+        outputBytes: Buffer.byteLength(JSON.stringify(initial)),
+        debuggerCalls: (await workerEval('debuggerCalls')).length,
+      });
+      assert.equal(request.request.payload.mode, 'reading');
+      assert.ok(initial.text.includes('Article heading'));
+      assert.ok(!JSON.stringify(initial).includes('PRIVATE_'));
+      assert.ok(initial.nextOffset > 0);
+      assert.equal((await panelState()).task, null);
+      await finishLoop(request, 'Hello');
+      assert.deepEqual(await workerEval('debuggerCalls'), []);
+
+      request = await askLoop('Article: summarize then perform the requested action', tab);
+      const context = request.request.payload.initialPage;
+      const other = await previewPanel(
+        `chrome.tabs.create({url:${JSON.stringify(url + 'next')},active:true})`,
+      );
+      let cursor = context.nextOffset,
+        text = context.text;
+      for (let chunk = 0; cursor !== null; chunk++) {
+        assert.ok(chunk < 5, 'bounded article pagination');
+        started = performance.now();
+        await decision(request, {
+          kind: 'actions',
+          actions: [
+            {
+              method: 'read-page',
+              params: {
+                contextId: context.contextId,
+                offset: cursor,
+                contentVersion: context.contentVersion,
+              },
+            },
+          ],
+        });
+        request = await nextRound(request);
+        const page = request.request.payload.observation.page;
+        assert.equal(
+          request.request.payload.failed,
+          false,
+          JSON.stringify(request.request.payload),
+        );
+        assert.equal(request.request.payload.mode, 'reading');
+        assert.equal(
+          request.request.payload.tools,
+          undefined,
+          'read rounds do not unlock action schemas',
+        );
+        assert.equal(page.url, url + 'article');
+        text += page.text;
+        cursor = page.nextOffset;
+        measurements.push({
+          operation: 'read-page',
+          elapsedMs: Math.round(performance.now() - started),
+          outputBytes: Buffer.byteLength(JSON.stringify(page)),
+          debuggerCalls: (await workerEval('debuggerCalls')).length,
+        });
+      }
+      assert.ok(text.includes('Article ending') && text.includes('Open shadow article'));
+      assert.deepEqual(await workerEval('debuggerCalls'), []);
+      assert.equal((await panelState()).task, null);
+      await assert.rejects(
+        decision(request, {
+          kind: 'actions',
+          actions: [{ method: 'click', params: { ref: '@invented' } }],
+        }),
+        (error) => error.code === 'BAD_DECISION',
+      );
+      await decision(request, {
+        kind: 'actions',
+        actions: [{ method: 'use-current-tab', params: { contextId: context.contextId } }],
+      });
+      request = await nextRound(request);
+      assert.equal(request.request.payload.mode, 'operating');
+      assert.ok(request.request.payload.tools.some((tool) => tool.name === 'click'));
+      assert.equal(request.request.payload.observation.target.id, tab.id);
+      assert.ok((await workerEval('debuggerCalls')).includes('attach'));
+      await decision(request, {
+        kind: 'actions',
+        actions: [{ method: 'click', params: { ref: refIn(request, 'Article action') } }],
+      });
+      request = await nextRound(request);
+      assert.ok(request.request.payload.observation.page.text.includes('Action confirmed'));
+      await finishLoop(request, 'Article summarized and requested action confirmed');
+      await previewPanel(`chrome.tabs.remove([${tab.id},${other.id}])`);
+    },
+  );
+  await check(
+    'same-URL reload invalidates read and control contexts before debugger attachment',
+    async () => {
+      const tab = await previewPanel(
+        `chrome.tabs.create({url:${JSON.stringify(url + 'article')},active:true})`,
+      );
+      await eventually(
+        async () => (await previewPanel(`chrome.tabs.get(${tab.id})`)).status === 'complete',
+      );
+      let request = await askLoop('Article: stale document', tab);
+      const contextId = request.request.payload.initialPage.contextId;
+      const before = await previewPanel(
+        `chrome.webNavigation.getFrame({tabId:${tab.id},frameId:0})`,
+      );
+      await previewPanel(`chrome.tabs.reload(${tab.id})`);
+      await eventually(
+        async () =>
+          (await previewPanel(`chrome.webNavigation.getFrame({tabId:${tab.id},frameId:0})`))
+            ?.documentId !== before.documentId &&
+          (await previewPanel(`chrome.tabs.get(${tab.id})`)).status === 'complete',
+      );
+      await workerEval('debuggerCalls.length = 0');
+      for (const method of ['read-page', 'use-current-tab']) {
+        await decision(request, { kind: 'actions', actions: [{ method, params: { contextId } }] });
+        request = await nextRound(request);
+        assert.equal(request.request.payload.mode, 'reading');
+        assert.ok(
+          request.request.payload.results.some((result) => result.error?.code === 'PAGE_CHANGED'),
+        );
+      }
+      assert.deepEqual(await workerEval('debuggerCalls'), []);
+      await finishLoop(request, 'The captured page reloaded; send a new message');
+      await previewPanel(`chrome.tabs.remove(${tab.id})`);
+    },
+  );
   await check(
     'live preview streams real background-tab frames, stays anchored, and freezes on completion',
     async () => {
@@ -542,7 +705,7 @@ try {
       assert.equal(request.request.payload.protocol, 'browser-decision-v1');
       assert.equal(
         request.request.payload.tools.length,
-        2,
+        3,
         'ordinary chat does not receive the entire browser catalog',
       );
       await finishLoop(request, 'Hello from structured decision');
@@ -796,7 +959,7 @@ try {
   });
   console.log(
     JSON.stringify(
-      { passed: checks.length, checks, browser: await cdp('Browser.getVersion') },
+      { passed: checks.length, checks, measurements, browser: await cdp('Browser.getVersion') },
       null,
       2,
     ),

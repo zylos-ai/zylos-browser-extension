@@ -2,7 +2,7 @@
 import { actionParams, commandSchema, type Command } from './commands';
 import { isBlockedUrl } from './guard';
 import { createTask, currentControl, currentGrant, execute } from './automation/executor';
-import { usePageContext } from './page-context';
+import { usePageContext, readPageContext } from './page-context';
 import { browserParams as paramSchemas, BROWSER_METHODS, type BrowserMethod } from './tool-catalog';
 export { BROWSER_METHODS, type BrowserMethod } from './tool-catalog';
 
@@ -204,6 +204,10 @@ async function dispatchNow(
 
   const deadline = typeof req.deadline === 'number' ? req.deadline : Date.now() + 30_000;
   if (Date.now() > deadline) fail('COMMAND_EXPIRED');
+
+  // A DOM read does not acquire control or resume a CDP preview.
+  if (method === 'read-page')
+    return readPageContext(params.contextId as string, params, assertActive);
 
   if (req.requestId && IDEMPOTENT_METHODS.has(method)) {
     const prior = idem.get(req.requestId);

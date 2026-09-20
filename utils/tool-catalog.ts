@@ -14,6 +14,17 @@ const {
 export const browserParams = {
   ...loopActionParams,
   'use-current-tab': z.object({ contextId: z.string().uuid() }).strict(),
+  'read-page': z
+    .object({
+      contextId: z.string().uuid(),
+      offset: z.number().int().min(0).max(120000).default(0),
+      limit: z.number().int().min(1).max(12000).default(12000),
+      contentVersion: z.string().min(1).max(40).optional(),
+    })
+    .strict()
+    .refine((p) => p.offset === 0 || !!p.contentVersion, {
+      message: 'For a continuation use both nextOffset and contentVersion from the preceding read.',
+    }),
 } as const;
 export type BrowserMethod = keyof typeof browserParams;
 export const BROWSER_METHODS = Object.keys(browserParams) as BrowserMethod[];
@@ -28,9 +39,18 @@ const targetRule =
 // Adding a method without documentation is a TypeScript error. All browser
 // semantics stay in this extension; the transport has no copy of this table.
 export const toolHelp = {
+  'read-page': {
+    description:
+      'Read loaded text and links from the page attached to a user message, without debugger attachment, scrolling, navigation or screenshots.',
+    constraints: [
+      'Use the exact message contextId. This action runs alone in its batch. For more text, pass the returned nextOffset as offset and the same contentVersion. Stop when enough evidence is collected.',
+      'On PAGE_CONTENT_CHANGED restart at offset 0; do not combine chunks from different versions. nextOffset=null ends the extracted text. limited=true means coverage is incomplete; unexpanded, unloaded, closed-shadow and embedded frame contents may be absent. Never claim to have read the whole page when limited.',
+      'A closed, reloaded or navigated message page cannot be retargeted. No executable refs are returned. For actual interaction or advanced observations use use-current-tab to enter browser control.',
+    ],
+  },
   'use-current-tab': {
     description:
-      'Select the existing page attached to a user message for reading and actions, without reopening or regrouping it.',
+      'Enter browser control on the page attached to a user message, without reopening or regrouping it. Use read-page for ordinary text questions.',
     constraints: [
       'Use the exact contextId from that message, never a guessed tab ID. Contexts expire after 30 minutes or a worker restart. A navigated or closed page requires a new user message. Fresh evidence is returned automatically after selecting. User-owned tabs are never closed by task cleanup.',
     ],

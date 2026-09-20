@@ -29,7 +29,12 @@ vi.mock('../../utils/browser-round', () => ({
       results.push(await call(action.method, action.params, id));
     }
     active();
-    return { results, observation: { page: 'fresh state' }, failed: false };
+    return {
+      results,
+      observation: { page: 'fresh state' },
+      failed: false,
+      mode: actions[0]?.method === 'read-page' ? 'reading' : 'operating',
+    };
   },
 }));
 vi.mock('../../utils/messages', () => ({ isPanelSender: () => true }));
@@ -175,6 +180,39 @@ const respond = async (ws: Socket, request: Record<string, unknown>, decision: u
 };
 
 describe('decision transport background', () => {
+  it('a stop during initial DOM capture prevents the pending message from starting a turn', async () => {
+    const ws = await bootConnected();
+    const tab = { id: 3, windowId: 1, url: 'https://example.com/article', incognito: false };
+    vi.mocked(
+      chrome.tabs.query as (q: chrome.tabs.QueryInfo) => Promise<chrome.tabs.Tab[]>,
+    ).mockResolvedValue([tab as chrome.tabs.Tab]);
+    chrome.tabs.get = vi.fn(async () => tab) as never;
+    chrome.webNavigation = {
+      getFrame: vi.fn(async () => ({ documentId: 'doc', url: tab.url })),
+    } as never;
+    let release!: (value: unknown) => void;
+    chrome.scripting = {
+      executeScript: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+      ),
+    } as never;
+    chrome.debugger.attach = vi.fn() as never;
+    const sending = ask({ type: 'remote-chat-send', text: 'Hello from article' });
+    await flush();
+    expect(chrome.scripting.executeScript).toHaveBeenCalledOnce();
+    await ask({ type: 'remote-stop' });
+    release([
+      { documentId: 'doc', frameId: 0, result: { url: tab.url, text: 'Article', links: [] } },
+    ]);
+    await flush();
+    expect((await sending).ok).toBe(false);
+    expect(ws.last('agent-request')).toBeUndefined();
+    expect((await state()).loopActive).toBe(false);
+    expect(chrome.debugger.attach).not.toHaveBeenCalled();
+  });
   it('authenticates, negotiates and answers ordinary chat without browser actions', async () => {
     const ws = await bootConnected();
     expect(ws.protocols).toEqual([REMOTE_SUBPROTOCOL, `key.${KEY}`]);

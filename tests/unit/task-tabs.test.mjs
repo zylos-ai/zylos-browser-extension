@@ -39,6 +39,9 @@ async function fixture() {
     return tabs.get(id);
   };
   globalThis.chrome = {
+    webNavigation: {
+      getFrame: async ({ tabId }) => ({ url: getTab(tabId).url, documentId: 'current-document' }),
+    },
     action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {} },
     tabs: {
       get: async (id) => ({ ...getTab(id) }),
@@ -660,7 +663,7 @@ test('borrowed selection refuses navigation and never falls back to another acti
   );
   await assert.rejects(
     s.executor.useExistingTab(
-      { tabId: 1, windowId: 1, url: s.tabs.get(1).url, loaderId: 'old-document' },
+      { tabId: 1, windowId: 1, url: s.tabs.get(1).url, documentId: 'old-document' },
       () => {},
     ),
     (e) => e.code === 'PAGE_CHANGED',

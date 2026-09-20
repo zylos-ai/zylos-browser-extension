@@ -18,13 +18,14 @@ test('build exposes one sidebar and no toolbar popup', () => {
   assert.deepEqual([...manifest.permissions].sort(), [
     'alarms',
     'debugger',
+    'scripting',
     'sidePanel',
     'storage',
     'tabGroups',
     'tabs',
     'webNavigation',
   ]);
-  assert.equal(manifest.host_permissions, undefined);
+  assert.deepEqual(manifest.host_permissions, ['http://*/*', 'https://*/*']);
   assert.equal(manifest.externally_connectable, undefined);
   assert.ok(!manifest.web_accessible_resources?.length);
   const pages = fs.readdirSync(output).filter((file) => file.endsWith('.html'));

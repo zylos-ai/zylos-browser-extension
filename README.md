@@ -188,11 +188,12 @@ npm run zip         # 生成插件压缩包
 
 ## 文档
 
-| 文档                                                                                       | 内容                                               |
-| ------------------------------------------------------------------------------------------ | -------------------------------------------------- |
-| [开发指南](docs/DEVELOPMENT.md)                                                            | 项目架构、执行链路、目录地图、界面开发与本地验证。 |
-| [浏览器动作](docs/BROWSER-ACTIONS.md)                                                      | 动作参数、执行边界与验证记录。                     |
-| [Agent 决策指南](agent/decision-guide.md)                                                  | 随插件提供的浏览器工作流程与错误恢复说明。         |
-| [工具目录源码](utils/tool-catalog.ts)                                                      | 工具用途、约束、例子与动态参数描述。               |
-| [Remote 安装与部署](https://github.com/zylos-ai/zylos-browser-remote#readme)               | 连接服务的安装、配置与 Agent 接入。                |
-| [Remote 协议](https://github.com/zylos-ai/zylos-browser-remote/blob/main/docs/PROTOCOL.md) | 消息格式、传输接口与错误响应。                     |
+| 文档                                                                                       | 内容                                                         |
+| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
+| [开发指南](docs/DEVELOPMENT.md)                                                            | 项目架构、执行链路、目录地图、界面开发与本地验证。           |
+| [插件 WebSocket 收发协议](docs/EXTENSION-WEBSOCKET-PROTOCOL.md)                            | 连接握手、消息字段、决策与结果格式、完整调用示例和代码定位。 |
+| [浏览器动作](docs/BROWSER-ACTIONS.md)                                                      | 动作参数、执行边界与验证记录。                               |
+| [Agent 决策指南](agent/decision-guide.md)                                                  | 随插件提供的浏览器工作流程与错误恢复说明。                   |
+| [工具目录源码](utils/tool-catalog.ts)                                                      | 工具用途、约束、例子与动态参数描述。                         |
+| [Remote 安装与部署](https://github.com/zylos-ai/zylos-browser-remote#readme)               | 连接服务的安装、配置与 Agent 接入。                          |
+| [Remote 协议](https://github.com/zylos-ai/zylos-browser-remote/blob/main/docs/PROTOCOL.md) | 消息格式、传输接口与错误响应。                               |

@@ -6,7 +6,7 @@ import { cleanupTask, recordTask } from './task-lifecycle';
 import { PointerMotion } from './pointer-motion';
 import type { Command } from '../commands';
 import type { CdpResults, Cursor, GrantedTab, Point, Scope } from './types';
-import { canReadPage, readPageExcerpt } from './page-context';
+import { canReadPage, assertPageDocument } from '../page-reader';
 
 export const SCREENSHOT_TIMEOUT_MS = 12_000;
 
@@ -102,14 +102,6 @@ function serial<T>(fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
-export function capturePageExcerpt(tab: chrome.tabs.Tab & { id: number }) {
-  return serial(async () => {
-    const fresh = await chrome.tabs.get(tab.id);
-    if (!canReadPage(fresh) || fresh.url !== tab.url || fresh.windowId !== tab.windowId)
-      throw new Error('PAGE_CHANGED');
-    return readPageExcerpt(tab, grant?.id === tab.id);
-  });
-}
 async function groupOwnedTab(session: Scope, tabId: number) {
   if (control !== session) fail('STOPPED');
   const groupId = await chrome.tabs.group({
@@ -125,7 +117,7 @@ async function groupOwnedTab(session: Scope, tabId: number) {
 
 /** Borrow the page attached to a user message; never navigate, regroup or own it. */
 export async function useExistingTab(
-  expected: { tabId: number; windowId: number; url: string; loaderId?: string },
+  expected: { tabId: number; windowId: number; url: string; documentId?: string },
   assertActive: () => void,
 ) {
   const tab = await chrome.tabs.get(expected.tabId).catch(() => null);
@@ -134,6 +126,9 @@ export async function useExistingTab(
     fail('TAB_NOT_GRANTED', 'The shared page is closed, restricted or unavailable');
   if (tab.url !== expected.url)
     fail('PAGE_CHANGED', 'The shared page navigated; ask for a new message from the current page');
+  if (expected.documentId)
+    await assertPageDocument({ ...expected, documentId: expected.documentId });
+  assertActive();
   if (!inScope(tab, control)) {
     // Changing targets hands previous results back instead of closing them.
     const finishing = completeTask();
@@ -166,20 +161,13 @@ export async function useExistingTab(
     await syncTarget();
     assertActive();
     if (control !== session || grant?.id !== expected.tabId) fail('STOPPED');
-    const { frameTree } = (await chrome.debugger.sendCommand(
-      { tabId: expected.tabId },
-      'Page.getFrameTree',
-    )) as { frameTree: { frame: { loaderId?: string; url?: string } } };
+    if (expected.documentId)
+      await assertPageDocument({ ...expected, documentId: expected.documentId });
     assertActive();
     if (control !== session) fail('STOPPED');
     const fresh = await chrome.tabs.get(expected.tabId);
     if (control !== session || !inScope(fresh, session)) fail('STOPPED');
-    if (
-      !canReadPage(fresh) ||
-      fresh.url !== expected.url ||
-      (expected.loaderId && frameTree.frame.loaderId !== expected.loaderId)
-    )
-      fail('PAGE_CHANGED');
+    if (!canReadPage(fresh) || fresh.url !== expected.url) fail('PAGE_CHANGED');
     await markTask(session, 'ready');
     assertActive();
     if (control !== session) fail('STOPPED');

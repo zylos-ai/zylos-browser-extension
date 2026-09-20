@@ -56,6 +56,7 @@ export function startRemoteBackground() {
   let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
   let loopReady = false;
   let sendingChat = false;
+  let chatRevision = 0;
   let loop: BrowserLoop;
 
   const publish = () => {
@@ -270,6 +271,7 @@ export function startRemoteBackground() {
   });
 
   function cancelLoop(status: 'stopped' | 'interrupted') {
+    chatRevision++; // Also invalidate a message still collecting its initial DOM excerpt.
     const taskId = loop.taskId;
     loop.cancel();
     if (taskId) {
@@ -563,16 +565,20 @@ export function startRemoteBackground() {
           if (sendingChat) throw new Error('ui.error.messageNotSent');
           sendingChat = true;
           try {
+            const gen = generation;
+            let revision = chatRevision;
             if (loop.active) {
               cancelLoop('interrupted');
+              revision = chatRevision;
               activity.end('interrupted');
               await completeTask();
             }
+            if (gen !== generation || revision !== chatRevision || !loopReady)
+              throw new Error('ui.error.sendFailed');
             const id = crypto.randomUUID();
             const ts = Date.now();
-            const gen = generation;
             const { context, page } = await captureCurrentPage(id, m.windowId, m.tabId);
-            if (gen !== generation || !loopReady) {
+            if (gen !== generation || revision !== chatRevision || !loopReady) {
               forgetPageContext(id);
               throw new Error('ui.error.sendFailed');
             }
@@ -585,6 +591,15 @@ export function startRemoteBackground() {
               page,
               loopStatus: 'active',
             });
+            if (gen !== generation || revision !== chatRevision || !loopReady) {
+              forgetPageContext(id);
+              const message = state.chat.find((entry) => entry.id === id);
+              if (message) {
+                message.loopStatus = 'interrupted';
+                await persistChat();
+              }
+              throw new Error('ui.error.sendFailed');
+            }
             loop.start(id, text, context);
             return snapshot();
           } finally {

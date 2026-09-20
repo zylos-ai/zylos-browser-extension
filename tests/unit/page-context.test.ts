@@ -1,10 +1,14 @@
 // @vitest-environment node
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import { excerptFromAX, readPageExcerpt } from '../../utils/automation/page-context';
-
-const executor = vi.hoisted(() => ({ capturePageExcerpt: vi.fn(), useExistingTab: vi.fn() }));
+const executor = vi.hoisted(() => ({ useExistingTab: vi.fn() }));
 vi.mock('../../utils/automation/executor', () => executor);
-import { captureCurrentPage, clearPageContexts, usePageContext } from '../../utils/page-context';
+import {
+  captureCurrentPage,
+  clearPageContexts,
+  readPageContext,
+  usePageContext,
+} from '../../utils/page-context';
+import { getPageDocument, readPageDocument } from '../../utils/page-reader';
 const id = '11111111-1111-4111-8111-111111111111';
 const tab = {
   id: 7,
@@ -12,15 +16,23 @@ const tab = {
   url: 'https://example.com/article',
   title: 'Article',
   incognito: false,
-} as chrome.tabs.Tab;
+} as chrome.tabs.Tab & { id: number };
+let documentId: string;
+const page = () => ({
+  url: tab.url!,
+  title: 'Article',
+  text: 'Article body',
+  links: [],
+  contentVersion: '12-abc',
+  nextOffset: null,
+  offset: 0,
+  truncated: false,
+  limited: false,
+});
 beforeEach(() => {
   clearPageContexts();
   vi.clearAllMocks();
-  executor.capturePageExcerpt.mockResolvedValue({
-    text: 'heading: Article\nStaticText: Body',
-    truncated: false,
-    loaderId: 'document-1',
-  });
+  documentId = 'document-1';
   executor.useExistingTab.mockImplementation(async (context) => ({ tabId: context.tabId }));
   vi.stubGlobal('chrome', {
     windows: {
@@ -28,19 +40,9 @@ beforeEach(() => {
       getLastFocused: vi.fn(async () => ({ id: 2 })),
     },
     tabs: { query: vi.fn(async () => [tab]), get: vi.fn(async () => tab) },
-    debugger: {
-      attach: vi.fn(async () => {}),
-      detach: vi.fn(async () => {}),
-      sendCommand: vi.fn(async (_target, method) =>
-        method === 'Page.getFrameTree'
-          ? { frameTree: { frame: { id: 'root', url: tab.url, loaderId: 'document-1' } } }
-          : {
-              nodes: [
-                { nodeId: 'body', role: { value: 'StaticText' }, name: { value: 'Article body' } },
-              ],
-            },
-      ),
-    },
+    webNavigation: { getFrame: vi.fn(async () => ({ documentId, url: tab.url })) },
+    scripting: { executeScript: vi.fn(async () => [{ documentId, frameId: 0, result: page() }]) },
+    debugger: { attach: vi.fn(), detach: vi.fn(), sendCommand: vi.fn() },
   });
 });
 afterEach(() => {
@@ -48,110 +50,123 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-test('each message receives page content and a pinned token; later focus does not retarget it', async () => {
+test('captures DOM text without CDP and pins reads/operations despite foreground changes', async () => {
   const message = await captureCurrentPage(id, 2, 7);
   expect(JSON.parse(message.context)).toMatchObject({
     contextId: id,
     tabId: 7,
-    text: expect.stringContaining('Body'),
+    text: 'Article body',
   });
   vi.mocked(
     chrome.tabs.query as (query: chrome.tabs.QueryInfo) => Promise<chrome.tabs.Tab[]>,
   ).mockResolvedValue([{ ...tab, id: 99 }]);
+  await readPageContext(id, {}, () => {});
+  expect(chrome.scripting.executeScript).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      target: { tabId: 7, documentIds: ['document-1'] },
+      world: 'ISOLATED',
+    }),
+  );
+  expect(chrome.debugger.attach).not.toHaveBeenCalled();
+  expect(chrome.debugger.sendCommand).not.toHaveBeenCalled();
   await usePageContext(id, () => {});
   expect(executor.useExistingTab).toHaveBeenCalledWith(
-    expect.objectContaining({ tabId: 7, windowId: 2, loaderId: 'document-1' }),
+    expect.objectContaining({ tabId: 7, documentId: 'document-1' }),
     expect.any(Function),
   );
-  await expect(usePageContext('invented', () => {})).rejects.toMatchObject({
-    code: 'STALE_CONTEXT',
-  });
-  clearPageContexts();
-  await expect(usePageContext(id, () => {})).rejects.toMatchObject({ code: 'STALE_CONTEXT' });
 });
 
-test('contexts expire and a stop during capture does not revive a target', async () => {
+test('same-URL reload and closed tabs cannot be read through an old context', async () => {
+  await captureCurrentPage(id, 2, 7);
+  documentId = 'document-2';
+  await expect(readPageContext(id, {}, () => {})).rejects.toMatchObject({ code: 'PAGE_CHANGED' });
+  expect(chrome.scripting.executeScript).toHaveBeenCalledTimes(1);
+  vi.mocked(chrome.tabs.get as (id: number) => Promise<chrome.tabs.Tab>).mockRejectedValue(
+    new Error('Closed'),
+  );
+  await expect(readPageContext(id, {}, () => {})).rejects.toMatchObject({ code: 'PAGE_CHANGED' });
+});
+
+test('denied content access retains metadata and chat without falling back to CDP', async () => {
+  vi.mocked(chrome.scripting.executeScript).mockRejectedValue(
+    new Error('Cannot access contents of the page'),
+  );
+  expect(JSON.parse((await captureCurrentPage(id, 2, 7)).context)).toMatchObject({
+    contextId: id,
+    tabId: 7,
+    status: 'unavailable',
+    reason: 'CONTENT_UNAVAILABLE',
+  });
+  expect(chrome.debugger.attach).not.toHaveBeenCalled();
+  expect(chrome.debugger.sendCommand).not.toHaveBeenCalled();
+});
+
+test('restricted pages do not receive an executable context or injected script', async () => {
+  vi.mocked(chrome.tabs.get as (id: number) => Promise<chrome.tabs.Tab>).mockResolvedValue({
+    ...tab,
+    url: 'https://example.com/checkout',
+  });
+  expect(JSON.parse((await captureCurrentPage(id, 2, 7)).context).contextId).toBeUndefined();
+  expect(chrome.scripting.executeScript).not.toHaveBeenCalled();
+  await expect(readPageContext(id, {}, () => {})).rejects.toMatchObject({ code: 'STALE_CONTEXT' });
+});
+
+test('context expiry and clearing during capture cannot revive a target', async () => {
   vi.useFakeTimers();
   await captureCurrentPage(id, 2, 7);
   vi.setSystemTime(Date.now() + 31 * 60_000);
-  await expect(usePageContext(id, () => {})).rejects.toMatchObject({ code: 'STALE_CONTEXT' });
-  executor.capturePageExcerpt.mockImplementationOnce(async () => {
+  await expect(readPageContext(id, {}, () => {})).rejects.toMatchObject({ code: 'STALE_CONTEXT' });
+  vi.mocked(chrome.scripting.executeScript).mockImplementationOnce(async () => {
     clearPageContexts();
-    return { text: 'late', truncated: false };
+    return [{ documentId, frameId: 0, result: page() }];
   });
   expect(JSON.parse((await captureCurrentPage(id, 2, 7)).context).status).toBe('unavailable');
   await expect(usePageContext(id, () => {})).rejects.toMatchObject({ code: 'STALE_CONTEXT' });
 });
 
-test('failed reads keep metadata and chat usable; restricted or changed pages cannot be selected', async () => {
-  executor.capturePageExcerpt.mockRejectedValueOnce(new Error('DevTools attached'));
-  expect(JSON.parse((await captureCurrentPage(id, 2, 7)).context)).toMatchObject({
-    tabId: 7,
-    status: 'unavailable',
-    reason: 'CONTENT_UNAVAILABLE',
+test('navigation during a read discards its result', async () => {
+  const target = await getPageDocument(tab);
+  vi.mocked(chrome.scripting.executeScript).mockImplementationOnce(async () => {
+    documentId = 'new-document';
+    return [{ documentId: target.documentId, frameId: 0, result: page() }];
   });
-  clearPageContexts();
-  executor.capturePageExcerpt.mockRejectedValueOnce(new Error('PAGE_CHANGED'));
+  await expect(readPageDocument(target)).rejects.toMatchObject({ code: 'PAGE_CHANGED' });
+});
+
+test('pagination refuses to combine text from changed content versions', async () => {
   await captureCurrentPage(id, 2, 7);
-  await expect(usePageContext(id, () => {})).rejects.toMatchObject({ code: 'STALE_CONTEXT' });
-  vi.mocked(chrome.tabs.get as (id: number) => Promise<chrome.tabs.Tab>).mockResolvedValueOnce({
-    ...tab,
-    url: 'https://example.com/checkout',
-  });
-  expect(JSON.parse((await captureCurrentPage(id, 2, 7)).context).contextId).toBeUndefined();
+  await expect(
+    readPageContext(id, { offset: 6000, contentVersion: 'previous' }, () => {}),
+  ).rejects.toMatchObject({ code: 'PAGE_CONTENT_CHANGED' });
+  expect((await readPageContext(id, { offset: 0 }, () => {})).text).toBe('Article body');
 });
 
-test('automatic excerpt omits editable values and descendants and remains bounded', () => {
-  const result = excerptFromAX([
-    { nodeId: 'heading', role: { value: 'heading' }, name: { value: 'Visible article' } },
-    {
-      nodeId: 'otp',
-      role: { value: 'textbox' },
-      name: { value: 'OTP' },
-      value: { value: '123456' },
-      childIds: ['secret'],
-    },
-    { nodeId: 'secret', role: { value: 'StaticText' }, name: { value: '123456' } },
-    { nodeId: 'long', role: { value: 'StaticText' }, name: { value: 'a'.repeat(7000) } },
-  ]);
-  expect(result.text).toContain('Visible article');
-  expect(result.text).not.toContain('123456');
-  expect(result.truncated).toBe(true);
-  expect(result.text.length).toBeLessThanOrEqual(6000);
-});
-
-test('a temporary debugger attachment is released; an existing executor attachment is retained', async () => {
-  expect(await readPageExcerpt({ ...tab, id: 7 }, false)).toMatchObject({
-    text: 'StaticText: Article body',
-    loaderId: 'document-1',
-  });
-  expect(chrome.debugger.detach).toHaveBeenCalledOnce();
-  vi.mocked(chrome.debugger.detach).mockClear();
-  await readPageExcerpt({ ...tab, id: 7 }, true);
-  expect(chrome.debugger.detach).not.toHaveBeenCalled();
-});
-
-test('navigation while reading discards the excerpt and late attachments are cleaned up after timeout', async () => {
-  vi.mocked(chrome.tabs.get as (id: number) => Promise<chrome.tabs.Tab>).mockResolvedValueOnce({
-    ...tab,
-    url: 'https://example.com/new',
-  });
-  await expect(readPageExcerpt({ ...tab, id: 7 }, false)).rejects.toThrow('PAGE_CHANGED');
+test('slow reads time out and a stopped read cannot return late content', async () => {
   vi.useFakeTimers();
-  let finish!: () => void;
-  vi.mocked(chrome.debugger.attach).mockImplementationOnce(
+  const target = await getPageDocument(tab);
+  let complete!: (value: any) => void;
+  vi.mocked(chrome.scripting.executeScript).mockImplementationOnce(
     () =>
-      new Promise<void>((resolve) => {
-        finish = resolve;
+      new Promise((resolve) => {
+        complete = resolve;
       }),
   );
-  const pending = expect(readPageExcerpt({ ...tab, id: 7 }, false)).rejects.toThrow(
-    'CONTEXT_TIMEOUT',
-  );
+  const pending = expect(readPageDocument(target)).rejects.toMatchObject({
+    code: 'CONTEXT_TIMEOUT',
+  });
   await vi.advanceTimersByTimeAsync(2501);
   await pending;
-  vi.mocked(chrome.debugger.detach).mockClear();
-  finish();
+  complete([{ documentId, frameId: 0, result: page() }]);
   await vi.advanceTimersByTimeAsync(0);
-  expect(chrome.debugger.detach).toHaveBeenCalledOnce();
+  let stopped = false;
+  vi.mocked(chrome.scripting.executeScript).mockImplementationOnce(async () => {
+    stopped = true;
+    return [{ documentId, frameId: 0, result: page() }];
+  });
+  await expect(
+    readPageDocument(target, {}, () => {
+      if (stopped) throw Object.assign(new Error('Stopped'), { code: 'STOPPED' });
+    }),
+  ).rejects.toMatchObject({ code: 'STOPPED' });
+  expect(chrome.debugger.attach).not.toHaveBeenCalled();
 });

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { canReadPage } from '../utils/automation/page-context';
+import { canReadPage } from '../utils/page-reader';
 import { useI18n } from './LanguageProvider';
 
 export function CurrentPage() {

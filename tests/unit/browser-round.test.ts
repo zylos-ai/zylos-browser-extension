@@ -26,6 +26,41 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
+it('returns a DOM read directly without snapshot, settle, tabs or popup work', async () => {
+  executor.currentControl.mockReturnValue(null);
+  const call = vi.fn(async () => ({ text: 'article', nextOffset: null }));
+  const result = await runBrowserRound(
+    [{ method: 'read-page', params: { contextId: 'message' } }],
+    call,
+    () => {},
+    'read',
+  );
+  expect(result).toMatchObject({
+    mode: 'reading',
+    failed: false,
+    observation: { page: { text: 'article' } },
+  });
+  expect(call).toHaveBeenCalledTimes(1);
+  expect(executor.flushTaskPopups).not.toHaveBeenCalled();
+});
+it('does not fall back to CDP after a denied read', async () => {
+  executor.currentControl.mockReturnValue(null);
+  const call = vi.fn(async () => {
+    throw Object.assign(new Error('denied'), { code: 'READ_DENIED' });
+  });
+  const result = await runBrowserRound(
+    [{ method: 'read-page', params: {} }],
+    call,
+    () => {},
+    'read',
+  );
+  expect(result).toMatchObject({
+    mode: 'reading',
+    failed: true,
+    observation: { error: { code: 'READ_DENIED' } },
+  });
+  expect(call).toHaveBeenCalledTimes(1);
+});
 it('executor revocation ends the round without asking for another browser decision', async () => {
   const call = vi.fn(async () => {
     throw Object.assign(new Error('owner revoked control'), { code: 'STOPPED' });

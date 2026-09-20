@@ -51,7 +51,7 @@ describe('extension-owned Agent reference', () => {
       const help = toolHelp[name] as { examples?: Record<string, unknown>[] };
       for (const example of help.examples || []) {
         expect(browserParams[name].safeParse(example).success, name).toBe(true);
-        if (!['use-current-tab', 'finalize'].includes(name))
+        if (!['use-current-tab', 'read-page', 'finalize'].includes(name))
           expect(commandSchema.safeParse({ op: name, ...example }).success, name).toBe(true);
       }
     }

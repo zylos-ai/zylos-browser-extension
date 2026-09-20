@@ -8,6 +8,8 @@ const executor = vi.hoisted(() => ({
   currentGrant: vi.fn((): null | { id: number; url: string } => null),
 }));
 vi.mock('../../utils/automation/executor', () => executor);
+const context = vi.hoisted(() => ({ readPageContext: vi.fn(), usePageContext: vi.fn() }));
+vi.mock('../../utils/page-context', () => context);
 
 import { IdempotencyCache, BrowserActionError, dispatch } from '../../utils/browser-actions';
 
@@ -47,6 +49,26 @@ beforeEach(() => {
 });
 
 describe('local browser dispatch', () => {
+  it('dispatches a DOM read without control or preview activation', async () => {
+    context.readPageContext.mockResolvedValue({ text: 'article' });
+    const onExecute = vi.fn();
+    await expect(
+      dispatch(
+        {
+          method: 'read-page',
+          params: { contextId: '11111111-1111-4111-8111-111111111111' },
+          keyId: 'endpoint',
+        },
+        idem,
+        undefined,
+        onExecute,
+      ),
+    ).resolves.toEqual({ text: 'article' });
+    expect(context.readPageContext).toHaveBeenCalledOnce();
+    expect(executor.execute).not.toHaveBeenCalled();
+    expect(executor.createTask).not.toHaveBeenCalled();
+    expect(onExecute).not.toHaveBeenCalled();
+  });
   it('refuses unknown methods and bad params before touching the executor', async () => {
     await rejects(call('Runtime.evaluate', { expression: '1' }), 'UNKNOWN_METHOD');
     await rejects(call('click', {}), 'BAD_PARAMS');

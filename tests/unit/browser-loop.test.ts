@@ -1,6 +1,11 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { BrowserLoop, decisionSchema, type AgentRequest } from '../../utils/browser-loop';
+import {
+  BrowserLoop,
+  decisionSchema,
+  type AgentRequest,
+  type RoundResult,
+} from '../../utils/browser-loop';
 
 function setup(timeout = 300000) {
   const requests: AgentRequest[] = [];
@@ -9,7 +14,12 @@ function setup(timeout = 300000) {
       requests.push(request);
       return true;
     }),
-    execute: vi.fn(async () => ({ observation: { text: 'new page' }, results: [], failed: false })),
+    execute: vi.fn(async (): Promise<RoundResult> => ({
+      observation: { text: 'new page' },
+      results: [],
+      failed: false,
+      mode: 'operating',
+    })),
     finish: vi.fn(async () => {}),
     cancel: vi.fn(),
   };
@@ -28,6 +38,84 @@ const action = {
 };
 afterEach(() => vi.useRealTimers());
 describe('extension-owned loop', () => {
+  it('stays read-only across multiple chunks and sends control schemas only after adoption', async () => {
+    const { loop, requests, io } = setup();
+    const read = {
+      kind: 'actions',
+      actions: [
+        { method: 'read-page', params: { contextId: '11111111-1111-4111-8111-111111111111' } },
+      ],
+    };
+    io.execute.mockResolvedValue({
+      observation: { text: 'more text' },
+      results: [],
+      failed: false,
+      mode: 'reading',
+    });
+    for (let i = 0; i < 3; i++) {
+      loop.accept(requests[i]!.id, read);
+      await vi.waitFor(() => expect(requests).toHaveLength(i + 2));
+      expect(requests[i + 1]!.payload).toMatchObject({ mode: 'reading' });
+      expect(requests[i + 1]!.payload).not.toHaveProperty('tools');
+      expect(() =>
+        loop.accept(requests[i + 1]!.id, {
+          kind: 'actions',
+          actions: [{ method: 'click', params: { ref: '@invented' } }],
+        }),
+      ).toThrow('enter browser control');
+    }
+    io.execute.mockResolvedValueOnce({
+      observation: { text: 'controls' },
+      results: [],
+      failed: false,
+      mode: 'operating',
+    });
+    loop.accept(requests[3]!.id, action);
+    await vi.waitFor(() => expect(requests).toHaveLength(5));
+    expect(requests[4]!.payload).toMatchObject({
+      mode: 'operating',
+      tools: expect.arrayContaining([expect.objectContaining({ name: 'click' })]),
+    });
+    loop.cancel();
+  });
+  it('does not enter control after a failed selection and allows a final answer after a read', async () => {
+    const { loop, requests, io } = setup();
+    io.execute.mockResolvedValueOnce({
+      observation: {},
+      results: [],
+      failed: true,
+      mode: 'reading',
+    });
+    loop.accept(requests[0]!.id, action);
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[1]!.payload).toMatchObject({ mode: 'reading' });
+    expect(requests[1]!.payload).not.toHaveProperty('tools');
+    loop.accept(requests[1]!.id, { kind: 'done', text: 'Here is the summary' });
+    await vi.waitFor(() => expect(loop.active).toBe(false));
+    expect(io.execute).toHaveBeenCalledTimes(1);
+  });
+  it('requires a content version for chunk continuation and keeps DOM reads standalone', () => {
+    const read = {
+      method: 'read-page',
+      params: { contextId: '11111111-1111-4111-8111-111111111111', offset: 6000 },
+    };
+    expect(decisionSchema.safeParse({ kind: 'actions', actions: [read] }).success).toBe(false);
+    expect(
+      decisionSchema.safeParse({
+        kind: 'actions',
+        actions: [{ ...read, params: { ...read.params, contentVersion: '12000-ab' } }],
+      }).success,
+    ).toBe(true);
+    expect(
+      decisionSchema.safeParse({
+        kind: 'actions',
+        actions: [
+          { method: 'fill', params: { ref: '@real', text: 'query' } },
+          { method: 'read-page', params: { ...read.params, offset: 0 } },
+        ],
+      }).success,
+    ).toBe(false);
+  });
   it('enforces the total deadline even when an operation never resolves', async () => {
     vi.useFakeTimers();
     const { loop, requests, io } = setup();
@@ -66,7 +154,11 @@ describe('extension-owned loop', () => {
   it('delivers action constraints with the browser schemas, without resending them every round', async () => {
     const { loop, requests } = setup();
     const initial = requests[0]!.payload as { tools: { name: string }[] };
-    expect(initial.tools.map((tool) => tool.name)).toEqual(['use-current-tab', 'open']);
+    expect(initial.tools.map((tool) => tool.name)).toEqual([
+      'read-page',
+      'use-current-tab',
+      'open',
+    ]);
     loop.accept(requests[0]!.id, action);
     await vi.waitFor(() => expect(requests).toHaveLength(2));
     const payload = requests[1]!.payload as {
@@ -112,7 +204,8 @@ describe('extension-owned loop', () => {
     io.execute.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
-          release = () => resolve({ observation: { text: '' }, results: [], failed: false });
+          release = () =>
+            resolve({ observation: { text: '' }, results: [], failed: false, mode: 'operating' });
         }),
     );
     loop.accept(requests[0]!.id, action);
@@ -141,7 +234,12 @@ describe('extension-owned loop', () => {
   });
   it('stops after three failed rounds without replaying any action automatically', async () => {
     const { loop, requests, io } = setup();
-    io.execute.mockResolvedValue({ observation: { text: '' }, results: [], failed: true });
+    io.execute.mockResolvedValue({
+      observation: { text: '' },
+      results: [],
+      failed: true,
+      mode: 'reading',
+    });
     for (let i = 0; i < 3; i++) {
       loop.accept(requests[i]!.id, action);
       await vi.waitFor(() => expect(io.execute).toHaveBeenCalledTimes(i + 1));
