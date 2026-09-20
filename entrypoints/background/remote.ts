@@ -15,6 +15,9 @@ import { recoverTasks } from '../../utils/automation/task-lifecycle';
 import { isPanelSender } from '../../utils/messages';
 import {
   CHAT_LOG_CAP,
+  BROWSER_ID_RE,
+  INSTANCE_CAPABILITY,
+  REMOTE_BROWSER_ID_KEY,
   REMOTE_CHAT_LOG_KEY,
   REMOTE_CONFIG_KEY,
   REMOTE_KEY_PROTO_PREFIX,
@@ -303,6 +306,7 @@ export function startRemoteBackground() {
     const old = socket;
     socket = null;
     state.connected = false;
+    state.endpointId = '';
     state.connecting = false;
     idem.cancel();
     activity.end('interrupted');
@@ -340,7 +344,12 @@ export function startRemoteBackground() {
       state.connected = false;
       state.connecting = true;
       state.error = '';
-      send({ type: 'hello', version: REMOTE_VERSION, capabilities: REMOTE_CAPABILITIES });
+      send({
+        type: 'hello',
+        version: REMOTE_VERSION,
+        capabilities: [...REMOTE_CAPABILITIES, INSTANCE_CAPABILITY],
+        browserId: state.browserId,
+      });
       handshakeTimer = setTimeout(() => {
         if (gen !== generation || loopReady) return;
         state.error = 'ui.error.protocolMismatch';
@@ -359,10 +368,11 @@ export function startRemoteBackground() {
       preview.finish('interrupted');
       socket = null;
       state.connected = false;
+      state.endpointId = '';
       state.connecting = false;
       idem.cancel();
       activity.end('interrupted');
-      // 4001 = superseded by a newer socket of ours (another window / reload); do not fight it.
+      // 4001 = a newer socket of this same installation; do not fight it.
       if (ev.code === 4002) state.error = 'ui.error.protocolMismatch';
       else if (ev.code === 4001) state.error = 'ui.error.connectionTaken';
       else if (ev.code === 1006 && !state.error) state.error = 'ui.error.connectionRejected';
@@ -393,11 +403,16 @@ export function startRemoteBackground() {
     switch (m.type) {
       case 'ready':
         clearTimeout(handshakeTimer);
-        if (!m.capabilities.includes('agent-loop-v1')) {
+        if (
+          !m.capabilities.includes('agent-loop-v1') ||
+          !m.capabilities.includes(INSTANCE_CAPABILITY) ||
+          m.endpointId !== `${state.keyId}.${state.browserId}`
+        ) {
           state.error = 'ui.error.protocolMismatch';
-          socket?.close(4002, 'agent-loop-v1 required');
+          socket?.close(4002, 'browser-instance-v1 and matching endpoint required');
           return;
         }
+        state.endpointId = m.endpointId;
         loopReady = true;
         state.connected = true;
         state.connecting = false;
@@ -492,9 +507,18 @@ export function startRemoteBackground() {
     await recoverTasks();
     const saved = await chrome.storage.local.get([
       REMOTE_CONFIG_KEY,
+      REMOTE_BROWSER_ID_KEY,
       REMOTE_CHAT_LOG_KEY,
       LANGUAGE_STORAGE_KEY,
     ]);
+    const storedBrowserId = saved[REMOTE_BROWSER_ID_KEY];
+    state.browserId =
+      typeof storedBrowserId === 'string' && BROWSER_ID_RE.test(storedBrowserId)
+        ? storedBrowserId
+        : crypto.randomUUID();
+    // Persist before dialing: failure must not create a new identity every reconnect.
+    if (state.browserId !== storedBrowserId)
+      await chrome.storage.local.set({ [REMOTE_BROWSER_ID_KEY]: state.browserId });
     setWorkerLanguage(saved[LANGUAGE_STORAGE_KEY]);
     const cfg = remoteConfigSchema.safeParse(saved[REMOTE_CONFIG_KEY] ?? {});
     const log = z.array(chatEntrySchema).safeParse(saved[REMOTE_CHAT_LOG_KEY] ?? []);

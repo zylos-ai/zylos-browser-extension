@@ -123,7 +123,7 @@ Agent 应当返回两项信息，例如：
 | 服务地址（Relay URL） | `wss://alice.example.com/browser-remote/ext` |
 | 连接 Key              | Agent 生成的完整连接密钥                     |
 
-**使用完整 Key，而不是短的 `keyId`。** 每个 Chrome profile 应使用独立 Key，同一个 Key 的新连接会替换旧连接。
+**使用完整 Key，而不是短的 `keyId`。** 同一个 Key 可以同时连接多个 Chrome profile 或设备。插件自动保存独立的浏览器实例 ID，操作与回复按实例返回；同一 profile 的多个窗口共享一个实例。请先更新 Remote，再重新加载插件。
 
 ### 3. 连接并开始聊天
 

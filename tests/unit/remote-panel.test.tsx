@@ -496,7 +496,7 @@ test('saved English preference localizes the interface and errors without transl
   expect(container.querySelector('.sidebar-header img')).toBeNull();
   expect(container.querySelector('.message-text')?.textContent).toBe('这条回复保持原文。');
   expect(container.querySelector('[role="alert"]')?.textContent).toBe(
-    'Another connection has taken over this key',
+    'This browser instance connected elsewhere; this connection has been replaced',
   );
 });
 

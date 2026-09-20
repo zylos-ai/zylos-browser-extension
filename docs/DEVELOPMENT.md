@@ -52,9 +52,11 @@ npm run build
 
 在 Chrome 扩展管理页加载 `.output/chrome-mv3`。Remote 运行于 Agent 所在机器；
 同机联调可使用 `ws://127.0.0.1:3802/ext`，远程连接使用已配置公网代理的 `wss://` 地址。
-插件设置保存完整 Key；Key 不进入聊天记录。
+插件设置保存完整 Key；Key 不进入聊天记录。实例 ID 首次生成 UUID v4，保存为
+`chrome.storage.local.remoteBrowserId`，不会跨 profile 同步。清除聊天、修改连接配置、
+重启或重连都保留这个 ID。Remote 按 `keyId.browserId` 区分实例，多个实例可以共用 Key。
 
-双方必须完成 `agent-loop-v1` 握手后才显示已连接。协议不匹配时给出升级提示，
+插件通过 WebSocket v3 连接；双方必须完成 `agent-loop-v1` 和 `browser-instance-v1` 握手，且 `endpointId` 与本地 `keyId.browserId` 一致后才显示已连接。协议不匹配时给出升级提示，
 没有就绪回执时在 10 秒后结束握手。连接替换或协议不匹配不会自动反复重连。
 
 ## 决策与执行
@@ -116,3 +118,9 @@ E2E 使用临时 Chrome profile、本地网页和相邻 Remote 仓库，模拟 A
 实际标签页操作、表单提交、弹窗选择、滚动、图像读取、停止和预览。
 不会向用户正在运行的 Agent 投递任务。可通过 `CHROME_PATH` 指定 Chrome for Testing，
 `RELAY_ROOT` 指定 Remote 仓库，`E2E_FILTER` 按名称筛选，`E2E_SCREENSHOT_DIR` 保存截图。
+
+## 多浏览器验证
+
+`npm run test:e2e` 包含两份临时 Chrome profile 共用一个 Key 的回归场景：
+A/B 分别操作各自页面，拒绝错目标回复，停止和重连 A 不影响 B，重启 A 保留身份。
+测试使用实际插件、Remote 和本地网页，Agent 决策由确定性测试输入代替，不接入真实 Agent 队列。

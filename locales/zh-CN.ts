@@ -182,7 +182,7 @@ export default {
   invalidRelayUrl: '需要有效的 ws:// 或 wss:// 服务地址',
   invalidKey: 'Key 应为服务提供的十六进制字符串',
   protocolMismatch: '连接协议不匹配，请更新 Browser Remote 和插件后重新连接。',
-  connectionTaken: '另一处连接已接管此 Key',
+  connectionTaken: '同一插件实例已重新连接，当前连接已被替换',
   connectionRejected: '服务拒绝连接，请检查 Key 和服务是否运行',
   connectionFailed: '连接服务失败',
   initializationFailed: '插件初始化失败，请重新加载插件',

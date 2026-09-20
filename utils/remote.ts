@@ -4,7 +4,7 @@
 // and nothing else. The relay is a pipe; every safety decision is made here.
 import { z } from 'zod';
 
-export const REMOTE_SUBPROTOCOL = 'zylos-browser-remote.v2';
+export const REMOTE_SUBPROTOCOL = 'zylos-browser-remote.v3';
 export const REMOTE_KEY_PROTO_PREFIX = 'key.';
 export const REMOTE_VERSION = '1.5.0';
 export const MAX_CHAT_TEXT = 8000;
@@ -23,6 +23,11 @@ export const remoteConfigSchema = z.object({
 });
 export type RemoteConfig = z.infer<typeof remoteConfigSchema>;
 export const REMOTE_CONFIG_KEY = 'remoteConfig';
+// One random identity per installation/profile. Never sync it between devices.
+export const REMOTE_BROWSER_ID_KEY = 'remoteBrowserId';
+export const INSTANCE_CAPABILITY = 'browser-instance-v1';
+export const BROWSER_ID_RE =
+  /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 export const REMOTE_CHAT_LOG_KEY = 'remoteChatLog';
 
 // Keep tool history small: never persist raw arguments, page output or images.
@@ -73,6 +78,8 @@ export const remoteStateSchema = z.object({
   connecting: z.boolean(),
   error: z.string(),
   keyId: z.string(),
+  browserId: z.string().default(''),
+  endpointId: z.string().default(''),
   relayHost: z.string(),
   relayUrl: z.string(),
   loopActive: z.boolean().optional(),
@@ -97,6 +104,8 @@ export const initialRemoteState: RemoteState = {
   connecting: false,
   error: '',
   keyId: '',
+  browserId: '',
+  endpointId: '',
   relayHost: '',
   relayUrl: '',
   task: null,
@@ -125,7 +134,11 @@ export type RemoteRequest = z.infer<typeof remoteRequestSchema>;
 
 // Relay -> extension frames.
 export const relayFrameSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('ready'), capabilities: z.array(z.string()).max(32) }),
+  z.object({
+    type: z.literal('ready'),
+    capabilities: z.array(z.string()).max(32),
+    endpointId: z.string().max(80).optional(),
+  }),
   z.object({
     type: z.literal('agent-status'),
     requestId: z.string().max(128),

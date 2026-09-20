@@ -156,7 +156,11 @@ async function bootConnected() {
   await flush();
   const ws = sockets[0]!;
   ws.open();
-  ws.receive({ type: 'ready', capabilities: ['agent-loop-v1'] });
+  ws.receive({
+    type: 'ready',
+    capabilities: ['agent-loop-v1', 'browser-instance-v1'],
+    endpointId: `abababababab.${storage.remoteBrowserId}`,
+  });
   await flush();
   return ws;
 }
@@ -180,6 +184,65 @@ const respond = async (ws: Socket, request: Record<string, unknown>, decision: u
 };
 
 describe('decision transport background', () => {
+  it('persists a random instance identity and reuses it after reconnect, clearing chat, and worker restart', async () => {
+    const ws = await bootConnected();
+    const id = storage.remoteBrowserId;
+    expect(id).toMatch(/^[a-f0-9-]{36}$/);
+    expect(ws.last('hello')!.browserId).toBe(id);
+    expect((await state()).endpointId).toBe(`abababababab.${id}`);
+    await ask({ type: 'remote-chat-clear' });
+    await ask({ type: 'remote-set-enabled', enabled: false });
+    await ask({ type: 'remote-set-enabled', enabled: true });
+    await flush();
+    sockets[1]!.open();
+    expect(sockets[1]!.last('hello')!.browserId).toBe(id);
+    await ask({ type: 'remote-set-enabled', enabled: false });
+    storage.remoteConfig = { relayUrl: 'wss://agent.example/ext', key: KEY, enabled: true };
+    startRemoteBackground();
+    await flush();
+    sockets[2]!.open();
+    expect(sockets[2]!.last('hello')!.browserId).toBe(id);
+    expect(storage.remoteBrowserId).toBe(id);
+  });
+
+  it('fresh installations sharing a key get different identities', async () => {
+    const ws = await bootConnected();
+    const firstId = storage.remoteBrowserId;
+    await ask({ type: 'remote-set-enabled', enabled: false });
+    storage = { remoteConfig: { relayUrl: 'wss://agent.example/ext', key: KEY, enabled: true } };
+    startRemoteBackground();
+    await flush();
+    sockets[1]!.open();
+    expect(sockets[1]!.last('hello')!.browserId).not.toBe(firstId);
+    expect(ws.last('hello')!.browserId).toBe(firstId);
+  });
+
+  it.each([
+    { capabilities: ['agent-loop-v1'] },
+    { capabilities: ['agent-loop-v1', 'browser-instance-v1'], endpointId: 'wrong-browser' },
+  ])('rejects missing identity support or a mismatched endpoint: %j', async (reply) => {
+    startRemoteBackground();
+    await flush();
+    const ws = sockets[0]!;
+    ws.open();
+    ws.receive({ type: 'ready', ...reply });
+    await flush();
+    expect((await state()).connected).toBe(false);
+    expect((await state()).error).toBe('ui.error.protocolMismatch');
+    expect((await ask({ type: 'remote-chat-send', text: 'Hello' })).ok).toBe(false);
+    expect(executor.execute).not.toHaveBeenCalled();
+  });
+
+  it('does not dial with an ephemeral identity if saving the identity fails', async () => {
+    vi.mocked(chrome.storage.local.set).mockRejectedValueOnce(new Error('storage unavailable'));
+    startRemoteBackground();
+    await flush();
+    expect(sockets).toHaveLength(0);
+    expect(broadcasts.at(-1)).toMatchObject({
+      state: { error: expect.stringContaining('ui.error.initializationFailed') },
+    });
+  });
+
   it('a stop during initial DOM capture prevents the pending message from starting a turn', async () => {
     const ws = await bootConnected();
     const tab = { id: 3, windowId: 1, url: 'https://example.com/article', incognito: false };
@@ -216,7 +279,7 @@ describe('decision transport background', () => {
   it('authenticates, negotiates and answers ordinary chat without browser actions', async () => {
     const ws = await bootConnected();
     expect(ws.protocols).toEqual([REMOTE_SUBPROTOCOL, `key.${KEY}`]);
-    expect(ws.last('hello')!.capabilities).toEqual(['agent-loop-v1']);
+    expect(ws.last('hello')!.capabilities).toEqual(['agent-loop-v1', 'browser-instance-v1']);
     const request = await begin(ws, 'Hello');
     expect(ws.last('chat')).toBeUndefined();
     await respond(ws, request, { kind: 'done', text: 'Hello back' });
@@ -366,7 +429,11 @@ describe('decision transport background', () => {
     expect((storage.remoteChatLog as ChatEntry[])[0]!.loopStatus).toBe('interrupted');
     expect(sockets).toHaveLength(2);
     sockets[1]!.open();
-    sockets[1]!.receive({ type: 'ready', capabilities: ['agent-loop-v1'] });
+    sockets[1]!.receive({
+      type: 'ready',
+      capabilities: ['agent-loop-v1', 'browser-instance-v1'],
+      endpointId: `abababababab.${storage.remoteBrowserId}`,
+    });
     await flush();
     expect(sockets[1]!.last('agent-request')).toBeUndefined();
     sockets[1]!.serverClose(4001);

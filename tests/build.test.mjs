@@ -44,7 +44,7 @@ test('bundle contains Remote commands and no former protocol entrypoints', () =>
     .map((name) => fs.readFileSync(path.join(output, name), 'utf8'))
     .join('\n');
   for (const message of [
-    'zylos-browser-remote.v2',
+    'zylos-browser-remote.v3',
     'remote-chat-send',
     'remote-save',
     'agent-loop-v1',

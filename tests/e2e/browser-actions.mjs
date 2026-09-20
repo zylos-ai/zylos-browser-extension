@@ -323,13 +323,18 @@ try {
     const response = await fetch(rpcUrl + '/decision', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: request.request.id, decision: value }),
+      body: JSON.stringify({
+        endpoint: request.endpointId,
+        id: request.request.id,
+        decision: value,
+      }),
     });
     const body = await response.json();
     if (!body.ok)
       throw Object.assign(new Error(`${body.code}: ${body.message}`), { code: body.code });
     if (body.next && !chatMessages.some((message) => message.request?.id === body.next.id))
       chatMessages.push({
+        endpointId: body.next.endpointId,
         text: body.next.text,
         chatId: body.next.taskId,
         request: { id: body.next.id, round: body.next.round, payload: body.next.payload },

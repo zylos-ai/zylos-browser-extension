@@ -23,18 +23,23 @@
 插件读取设置中的 `relayUrl`、`key`，建立连接：
 
 ```ts
-new WebSocket(config.relayUrl, ['zylos-browser-remote.v2', `key.${config.key}`]);
+new WebSocket(config.relayUrl, ['zylos-browser-remote.v3', `key.${config.key}`]);
 ```
 
 地址可以是本地 `ws://127.0.0.1:3802/ext`，也可以是远端部署提供的 `wss://实际域名/browser-remote/ext`。Key 放在 WebSocket 握手的子协议字段中，不放在每条聊天消息里。
+
+插件首次运行生成 UUID v4 实例 ID，保存在 `chrome.storage.local.remoteBrowserId`。
+重启、重连、修改配置和清空聊天不会重建 ID；不同 profile 或设备各自生成，同一 profile
+多个窗口共享。Key 负责鉴权，实例 ID 负责路由；它不是设备硬件指纹，也不是新凭据。
 
 连接打开后，插件发送：
 
 ```json
 {
   "type": "hello",
+  "browserId": "12345678-1234-4567-89ab-123456789abc",
   "version": "1.5.0",
-  "capabilities": ["agent-loop-v1"]
+  "capabilities": ["agent-loop-v1", "browser-instance-v1"]
 }
 ```
 
@@ -45,11 +50,16 @@ new WebSocket(config.relayUrl, ['zylos-browser-remote.v2', `key.${config.key}`])
 ```json
 {
   "type": "ready",
-  "capabilities": ["agent-loop-v1"]
+  "endpointId": "abc123def456.12345678-1234-4567-89ab-123456789abc",
+  "capabilities": ["agent-loop-v1", "browser-instance-v1"]
 }
 ```
 
-收到兼容的 `ready` 后才允许发聊天消息。缺少 `agent-loop-v1`，或 10 秒内未完成握手，插件会关闭连接并提示协议不匹配。后续消息复用已经建立的连接。
+收到兼容的 `ready` 后才允许发聊天消息。缺少 `agent-loop-v1` / `browser-instance-v1`、返回的 `endpointId` 与本地 `keyId.browserId` 不一致，或 10 秒内未完成握手，插件会关闭连接并提示协议不匹配。后续消息复用已经建立的连接，不需要重复携带实例 ID。Remote 从已验证的连接识别实例，
+以 `endpointId` 隔离请求、回执、停止和 Monitor 任务。同 Key 的其他实例保持在线；仅同实例
+的新连接替换旧连接（4001）。Agent 的会话上下文仍然共用。
+
+请先更新 Remote 再更新插件。新版插件只使用 v3，不会自动降级到旧服务器的单 Key 路由。
 
 ## 2. 消息类型总览
 

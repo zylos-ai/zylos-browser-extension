@@ -194,7 +194,7 @@ export default {
   invalidKey: 'Use the hexadecimal key provided by your service',
   protocolMismatch:
     'Connection protocol mismatch. Update Browser Remote and the extension, then reconnect.',
-  connectionTaken: 'Another connection has taken over this key',
+  connectionTaken: 'This browser instance connected elsewhere; this connection has been replaced',
   connectionRejected: 'Connection rejected. Check your key and make sure the service is running.',
   connectionFailed: 'Could not connect to the service',
   initializationFailed: 'The extension could not start. Please reload it.',
