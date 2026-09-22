@@ -9,6 +9,7 @@ import {
   usePageContext,
 } from '../../utils/page-context';
 import { getPageDocument, readPageDocument } from '../../utils/page-reader';
+import type { PageSelection } from '../../utils/page-selection';
 const id = '11111111-1111-4111-8111-111111111111';
 const tab = {
   id: 7,
@@ -52,7 +53,7 @@ afterEach(() => {
 
 test('captures DOM text without CDP and pins reads/operations despite foreground changes', async () => {
   const message = await captureCurrentPage(id, 2, 7);
-  expect(JSON.parse(message.context)).toMatchObject({
+  expect(message.context).toMatchObject({
     contextId: id,
     tabId: 7,
     text: 'Article body',
@@ -76,6 +77,51 @@ test('captures DOM text without CDP and pins reads/operations despite foreground
   );
 });
 
+test('validates displayed quotes without copying them into the page context', async () => {
+  const selection: PageSelection = {
+    tabId: 7,
+    documentId,
+    url: tab.url!,
+    title: 'Article',
+    text: 'The exact selected passage',
+    truncated: false,
+  };
+  const captured = await captureCurrentPage(id, 2, 7, [selection]);
+  expect(captured.context).toMatchObject({
+    text: 'Article body',
+  });
+  expect(captured.context).not.toHaveProperty('selection');
+  expect(chrome.scripting.executeScript).toHaveBeenCalledTimes(1);
+  expect(chrome.debugger.attach).not.toHaveBeenCalled();
+  await expect(captureCurrentPage(id, 2, 7, [{ ...selection, tabId: 99 }])).rejects.toThrow(
+    'selectionChanged',
+  );
+  documentId = 'new-document';
+  await expect(captureCurrentPage(id, 2, 7, [selection])).rejects.toThrow('selectionChanged');
+});
+
+test('a large quote does not consume the page excerpt budget', async () => {
+  const selection: PageSelection = {
+    tabId: 7,
+    documentId,
+    url: tab.url!,
+    title: 'Article',
+    text: '"'.repeat(4000),
+    truncated: true,
+  };
+  vi.mocked(chrome.scripting.executeScript).mockImplementation(async () => [
+    {
+      documentId,
+      frameId: 0,
+      result: { ...page(), text: '"'.repeat(6000), nextOffset: 6000, truncated: true },
+    },
+  ]);
+  const captured = await captureCurrentPage(id, 2, 7, [selection]);
+  expect(JSON.stringify(captured.context).length).toBeLessThanOrEqual(16000);
+  expect(captured.context).not.toHaveProperty('selection');
+  expect(captured.context.text).toHaveLength(6000);
+});
+
 test('same-URL reload and closed tabs cannot be read through an old context', async () => {
   await captureCurrentPage(id, 2, 7);
   documentId = 'document-2';
@@ -91,7 +137,7 @@ test('denied content access retains metadata and chat without falling back to CD
   vi.mocked(chrome.scripting.executeScript).mockRejectedValue(
     new Error('Cannot access contents of the page'),
   );
-  expect(JSON.parse((await captureCurrentPage(id, 2, 7)).context)).toMatchObject({
+  expect((await captureCurrentPage(id, 2, 7)).context).toMatchObject({
     contextId: id,
     tabId: 7,
     status: 'unavailable',
@@ -106,7 +152,7 @@ test('restricted pages do not receive an executable context or injected script',
     ...tab,
     url: 'https://example.com/checkout',
   });
-  expect(JSON.parse((await captureCurrentPage(id, 2, 7)).context).contextId).toBeUndefined();
+  expect((await captureCurrentPage(id, 2, 7)).context.contextId).toBeUndefined();
   expect(chrome.scripting.executeScript).not.toHaveBeenCalled();
   await expect(readPageContext(id, {}, () => {})).rejects.toMatchObject({ code: 'STALE_CONTEXT' });
 });
@@ -120,7 +166,7 @@ test('context expiry and clearing during capture cannot revive a target', async 
     clearPageContexts();
     return [{ documentId, frameId: 0, result: page() }];
   });
-  expect(JSON.parse((await captureCurrentPage(id, 2, 7)).context).status).toBe('unavailable');
+  expect((await captureCurrentPage(id, 2, 7)).context.status).toBe('unavailable');
   await expect(usePageContext(id, () => {})).rejects.toMatchObject({ code: 'STALE_CONTEXT' });
 });
 

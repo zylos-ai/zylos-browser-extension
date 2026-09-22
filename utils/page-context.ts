@@ -1,11 +1,14 @@
 import {
   canReadPage,
+  assertPageDocument,
   getPageDocument,
   readPageDocument,
   type PageDocument,
   type ReadPageOptions,
 } from './page-reader';
 import { useExistingTab } from './automation/executor';
+import type { PageSelection } from './page-selection';
+import type { PageContext } from './agent-message';
 
 type Context = PageDocument & { expires: number };
 const contexts = new Map<string, Context>();
@@ -18,7 +21,12 @@ export function forgetPageContext(id: string) {
   contexts.delete(id);
 }
 
-export async function captureCurrentPage(contextId: string, windowId?: number, tabId?: number) {
+export async function captureCurrentPage(
+  contextId: string,
+  windowId?: number,
+  tabId?: number,
+  selections: PageSelection[] = [],
+): Promise<{ context: PageContext; page?: { title: string; url: string; status: string } }> {
   const currentRevision = revision;
   try {
     const win =
@@ -32,15 +40,17 @@ export async function captureCurrentPage(contextId: string, windowId?: number, t
         : await chrome.tabs.get(tabId);
     if (!tab || tab.id === undefined) throw new Error('NO_PAGE');
     if (tab.windowId !== win.id) throw new Error('WRONG_WINDOW');
-    if (!canReadPage(tab))
+    if (!canReadPage(tab)) {
+      if (selections.length) throw new Error('ui.error.selectionChanged');
       return {
-        context: JSON.stringify({
+        context: {
           type: 'current-page',
           status: 'unavailable',
           reason:
             'This page is restricted or navigating. Do not reopen it to bypass the restriction.',
-        }),
+        },
       };
+    }
     const id = tab.id;
     let document: PageDocument | undefined;
     let excerpt: Awaited<ReturnType<typeof readPageDocument>> | undefined;
@@ -57,6 +67,18 @@ export async function captureCurrentPage(contextId: string, windowId?: number, t
           : 'CONTENT_UNAVAILABLE';
     }
     if (currentRevision !== revision) throw new Error('CONTEXT_CANCELLED');
+    for (const selection of selections) {
+      if (
+        !document ||
+        reason === 'PAGE_CHANGED' ||
+        selection.tabId !== id ||
+        selection.documentId !== document.documentId ||
+        selection.url !== document.url
+      )
+        throw new Error('ui.error.selectionChanged');
+      await assertPageDocument(document);
+      if (currentRevision !== revision) throw new Error('CONTEXT_CANCELLED');
+    }
     // No arbitrary tab selection: only IDs captured by this panel message can be used.
     if (document && reason !== 'PAGE_CHANGED')
       contexts.set(contextId, {
@@ -64,7 +86,12 @@ export async function captureCurrentPage(contextId: string, windowId?: number, t
         expires: Date.now() + 30 * 60_000,
       });
     while (contexts.size > 20) contexts.delete(contexts.keys().next().value!);
-    const data = {
+    const data: PageContext & {
+      text: string;
+      links: { text: string; url: string }[];
+      title: string;
+      url: string;
+    } = {
       type: 'current-page',
       contextId: contexts.has(contextId) ? contextId : undefined,
       tabId: id,
@@ -90,16 +117,17 @@ export async function captureCurrentPage(contextId: string, windowId?: number, t
       data.truncated = true;
     }
     return {
-      context: JSON.stringify(data),
+      context: data,
       page: { title: data.title, url: data.url, status: data.status },
     };
-  } catch {
+  } catch (error) {
+    if (selections.length) throw new Error('ui.error.selectionChanged');
     return {
-      context: JSON.stringify({
+      context: {
         type: 'current-page',
         status: 'unavailable',
         reason: 'No current page could be captured. Do not guess a tab.',
-      }),
+      },
     };
   }
 }

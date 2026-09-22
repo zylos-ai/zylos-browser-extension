@@ -171,12 +171,6 @@ export function Conversation({
                     ) : (
                       <p className="message-text">{message.text}</p>
                     )}
-                    {message.page && (
-                      <p className="message-page" title={message.page.url}>
-                        {t(message.page.status === 'excerpt' ? 'pageAttached' : 'pageMetadataOnly')}{' '}
-                        · {message.page.title || message.page.url}
-                      </p>
-                    )}
                     {message.role === 'user' && message.deliveryError && (
                       <p className="message-delivery" role="alert">
                         {errorText(message.deliveryError)}

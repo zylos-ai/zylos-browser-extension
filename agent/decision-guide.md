@@ -2,6 +2,13 @@
 
 You provide decisions; the extension executes them and sends fresh evidence in
 the next request. The transport supplies replyCommands and the request ID.
+Requests use envelope version 2: `message.content` contains the owner's text and
+quote/image/file blocks; `context.pages` contains the initially captured page;
+`execution` contains rules, tool definitions, mode, memory and current evidence.
+Only the first round includes message content and initial page data. Later rounds
+carry `message: {id}` and `context: {pages: []}` to reference that same input;
+they do not clear the goal or attachments. Read fresh state from
+`execution.observation` and action outcomes from `execution.results`.
 For actions, pipe ONE JSON object into replyCommands.actions. For done or blocked,
 pipe only the answer text (not JSON) into replyCommands.done or replyCommands.blocked;
 the C4 send adapter delivers the corresponding terminal response below. Never send

@@ -3,6 +3,9 @@
 // The extension dials out to a zylos-browser-remote relay with `relayUrl + key`
 // and nothing else. The relay is a pipe; every safety decision is made here.
 import { z } from 'zod';
+import { pageSelectionSchema } from './page-selection';
+import { storedAttachmentsSchema, selectionAttachment } from './attachments';
+import { userMessageSchema } from './agent-message';
 
 export const REMOTE_SUBPROTOCOL = 'zylos-browser-remote.v3';
 export const REMOTE_KEY_PROTO_PREFIX = 'key.';
@@ -57,18 +60,37 @@ export const toolRunSchema = z.object({
 export type ToolStep = z.infer<typeof toolStepSchema>;
 export type ToolRun = z.infer<typeof toolRunSchema>;
 
-export const chatEntrySchema = z.object({
-  id: z.string().max(128).optional(),
-  role: z.enum(['user', 'assistant', 'system']),
-  text: z.string().max(MAX_CHAT_TEXT),
-  ts: z.number().int(),
-  delivery: z.enum(['sent', 'queued', 'failed', 'unknown']).optional(),
-  deliveryError: z.string().optional(),
-  final: z.boolean().optional(),
-  loopStatus: z.enum(['active', 'done', 'blocked', 'interrupted', 'stopped']).optional(),
-  page: z.object({ title: z.string(), url: z.string(), status: z.string() }).optional(),
-  toolRun: toolRunSchema.optional(),
-});
+export const chatEntrySchema = z
+  .object({
+    id: z.string().max(128).optional(),
+    role: z.enum(['user', 'assistant', 'system']),
+    text: z.string().max(MAX_CHAT_TEXT),
+    ts: z.number().int(),
+    delivery: z.enum(['sent', 'queued', 'failed', 'unknown']).optional(),
+    deliveryError: z.string().optional(),
+    final: z.boolean().optional(),
+    loopStatus: z.enum(['active', 'done', 'blocked', 'interrupted', 'stopped']).optional(),
+    page: z.object({ title: z.string(), url: z.string(), status: z.string() }).optional(),
+    selection: pageSelectionSchema.optional(),
+    attachments: storedAttachmentsSchema.optional(),
+    toolRun: toolRunSchema.optional(),
+  })
+  .transform(({ selection, ...entry }) => ({
+    ...entry,
+    // Read old local histories once; all new messages use attachments exclusively.
+    ...(entry.attachments
+      ? {}
+      : selection
+        ? {
+            attachments: [
+              selectionAttachment(
+                selection,
+                `${String(entry.id || entry.ts).slice(0, 100)}-selection`,
+              ),
+            ],
+          }
+        : {}),
+  }));
 export type ChatEntry = z.infer<typeof chatEntrySchema>;
 
 export const remoteStateSchema = z.object({
@@ -83,6 +105,7 @@ export const remoteStateSchema = z.object({
   relayHost: z.string(),
   relayUrl: z.string(),
   loopActive: z.boolean().optional(),
+  chatBusy: z.boolean().optional(),
   task: z
     .object({
       sessionId: z.string(),
@@ -120,7 +143,7 @@ export const remoteRequestSchema = z.discriminatedUnion('type', [
   z
     .object({
       type: z.literal('remote-chat-send'),
-      text: z.string().min(1).max(MAX_CHAT_TEXT),
+      message: userMessageSchema,
       windowId: z.number().int().nonnegative().optional(),
       tabId: z.number().int().nonnegative().optional(),
     })

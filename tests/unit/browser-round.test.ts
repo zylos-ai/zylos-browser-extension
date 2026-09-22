@@ -26,6 +26,28 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
+it('preserves attachment metadata when page text exhausts the observation budget', async () => {
+  const screenshot = {
+    id: 'image-1',
+    type: 'image',
+    name: 'screenshot.png',
+    mimeType: 'image/png',
+    bytes: 3,
+    data: 'AAAA',
+  };
+  const call = vi.fn(async (method: string) =>
+    method === 'observe'
+      ? {
+          text: 'a'.repeat(15000),
+          otherText: 'b'.repeat(15000),
+          screenshot,
+        }
+      : [],
+  );
+  const result = await runBrowserRound([{ method: 'observe', params: {} }], call, () => {}, 'r');
+  expect(result.observation).toHaveProperty('page.screenshot', screenshot);
+  expect(JSON.stringify(result.observation).length).toBeLessThan(21000);
+});
 it('returns a DOM read directly without snapshot, settle, tabs or popup work', async () => {
   executor.currentControl.mockReturnValue(null);
   const call = vi.fn(async () => ({ text: 'article', nextOffset: null }));

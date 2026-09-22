@@ -1023,41 +1023,109 @@ html[data-theme='zylos'] > body {
     justify-content: center;
     color: var(--color-muted);
   }
-  .current-page {
+  .selection-chip-row {
+    position: relative;
+    min-width: 0;
+  }
+  .selection-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 4px;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: var(--color-primary-soft);
+    color: var(--color-primary);
+    font-size: 12px;
+    line-height: 20px;
+  }
+  .selection-chip-label {
     display: flex;
     align-items: center;
-    min-width: 0;
-    flex-shrink: 0;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    cursor: pointer;
+  }
+  .selection-chip-icon {
+    display: block;
+    width: 16px;
+    height: 16px;
+    object-fit: contain;
+  }
+  .selection-chip button:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  .selection-tooltip {
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    width: min(320px, 100%);
+    padding-bottom: 8px;
+    z-index: 30;
+  }
+  .selection-tooltip .selection-quote {
     margin: 0;
-    padding: 4px 8px;
-    border-radius: var(--radius-card);
+    padding: 12px;
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    background: var(--color-base-100);
+    box-shadow: 0 4px 20px rgb(0 0 0 / 12%);
+  }
+  .selection-tooltip .selection-quote blockquote {
+    max-height: min(240px, 40vh);
+    overscroll-behavior: contain;
+  }
+  .selection-quote {
+    min-width: 0;
+    margin: 6px 0;
+    padding: 8px 10px;
+    border-left: 3px solid var(--color-primary);
+    border-radius: 6px;
     background: var(--color-primary-soft);
     font-size: 12px;
     line-height: 18px;
   }
-  .current-page-label {
-    flex-shrink: 0;
-    color: var(--color-muted);
-    margin-right: 8px;
+  .selection-quote-heading {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    margin-bottom: 4px;
   }
-  .current-page-title,
-  .message-page {
+  .selection-quote-label {
+    flex-shrink: 0;
+    color: var(--color-primary);
+  }
+  .selection-quote-source {
+    flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    display: block;
-  }
-  .current-page-title {
-    min-width: 0;
-    flex: 1;
-  }
-  .current-page-hint {
-    display: none;
-  }
-  .current-page-hint,
-  .message-page {
     color: var(--color-muted);
-    font-size: 12px;
+  }
+  .selection-quote-remove {
+    flex-shrink: 0;
+    min-height: 24px;
+    height: 24px;
+    width: 24px;
+    padding: 0;
+    font-size: 18px;
+  }
+  .selection-quote blockquote {
+    margin: 0;
+    max-height: 72px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .selection-quote-note {
+    margin-top: 4px;
+    color: var(--color-muted);
+    font-size: 11px;
   }
   @media (max-height: 500px) {
     .empty-chat {

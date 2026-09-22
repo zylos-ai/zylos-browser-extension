@@ -182,7 +182,12 @@ try {
       client.evaluate(`chrome.tabs.get(${tab.id}).then(t=>t.status==='complete')`),
     );
   const begin = async (client, tab, text) => {
-    await client.ask({ type: 'remote-chat-send', tabId: tab.id, windowId: tab.windowId, text });
+    await client.ask({
+      type: 'remote-chat-send',
+      tabId: tab.id,
+      windowId: tab.windowId,
+      message: { role: 'user', content: [{ type: 'text', text }] },
+    });
     return eventually(() => messages.find((message) => message.text === text));
   };
   let ra = await begin(a, ta, 'Operate browser A'),
@@ -201,10 +206,10 @@ try {
     return { endpointId: result.next.endpointId, request: result.next };
   };
   ra = await act(ra, [
-    { method: 'use-current-tab', params: { contextId: ra.request.payload.initialPage.contextId } },
+    { method: 'use-current-tab', params: { contextId: ra.request.context.pages[0].contextId } },
   ]);
   const ref = (request, text) =>
-    request.request.payload.observation.page.text
+    request.request.execution.observation.page.text
       .split('\n')
       .find((line) => line.includes(JSON.stringify(text)))
       ?.match(/@[^\s]+/)?.[0];
@@ -224,7 +229,7 @@ try {
   assert.equal((await a.state()).loopActive, false);
   assert.equal((await b.state()).loopActive, true);
   rb = await act(rb, [
-    { method: 'use-current-tab', params: { contextId: rb.request.payload.initialPage.contextId } },
+    { method: 'use-current-tab', params: { contextId: rb.request.context.pages[0].contextId } },
   ]);
   rb = await act(rb, [{ method: 'click', params: { ref: ref(rb, 'Action B') } }]);
   assert.equal(await count(a, ta), '1');

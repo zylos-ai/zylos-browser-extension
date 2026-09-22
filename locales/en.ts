@@ -2,11 +2,6 @@ import type zh from './zh-CN';
 
 export default {
   settings: 'Settings',
-  currentPage: 'Current page',
-  currentPageUnavailable: 'This page cannot be read right now',
-  currentPageHint: 'Page context included when you send',
-  pageAttached: 'Page context attached',
-  pageMetadataOnly: 'Page details only',
   back: 'Back',
   loading: 'Loading…',
   notConnected: 'Not connected',
@@ -162,6 +157,15 @@ export default {
   disconnectedPlaceholder: 'Connect your Agent to start chatting…',
   composerTagline: 'Just ask Zylos',
   sending: 'Sending',
+  selectedText: 'Selected text',
+  removeSelection: 'Remove selected text',
+  selectionTruncated: 'First 4,000 characters attached',
+  attachmentsUnsupported: 'Update Browser Remote before sending image or file attachments.',
+  selectionChanged:
+    'The selected page has changed. Select the text again or remove the quote before sending.',
+  chatInProgress: 'Task in progress',
+  taskInProgressHint: 'Task in progress. You can draft your next message.',
+  chatBusy: 'Wait for the current task to finish, or stop it before sending another message.',
   sendMessage: 'Send message',
   keyboardHint: 'Enter to send · Shift + Enter for a new line',
   connectTitle: 'Connect your Agent',

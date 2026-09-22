@@ -86,9 +86,15 @@ class Socket {
   }
 }
 
+const toDraft = (value: unknown) => {
+  const m = value as { type?: string; text?: string; attachments?: unknown[] };
+  if (m.type !== 'remote-chat-send' || !('text' in m)) return value;
+  const { text, attachments = [], ...rest } = m;
+  return { ...rest, message: { role: 'user', content: [{ type: 'text', text }, ...attachments] } };
+};
 const ask = (m: unknown) =>
   new Promise<{ ok: boolean; value?: Record<string, unknown>; error?: string }>((resolve) =>
-    internal(m, {}, (v) => resolve(v as never)),
+    internal(toDraft(m), {}, (v) => resolve(v as never)),
   );
 const flush = () => vi.advanceTimersByTimeAsync(0);
 
@@ -151,14 +157,19 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function bootConnected() {
+async function bootConnected(attachments = false) {
   startRemoteBackground();
   await flush();
   const ws = sockets[0]!;
   ws.open();
   ws.receive({
     type: 'ready',
-    capabilities: ['agent-loop-v1', 'browser-instance-v1'],
+    capabilities: [
+      'agent-loop-v1',
+      'browser-instance-v1',
+      'agent-message-v2',
+      ...(attachments ? ['attachments-v1'] : []),
+    ],
     endpointId: `abababababab.${storage.remoteBrowserId}`,
   });
   await flush();
@@ -184,6 +195,88 @@ const respond = async (ws: Socket, request: Record<string, unknown>, decision: u
 };
 
 describe('decision transport background', () => {
+  it('refuses an older Remote before any v2 message can be sent', async () => {
+    startRemoteBackground();
+    await flush();
+    const ws = sockets[0]!;
+    ws.open();
+    ws.receive({
+      type: 'ready',
+      capabilities: ['agent-loop-v1', 'browser-instance-v1'],
+      endpointId: `abababababab.${storage.remoteBrowserId}`,
+    });
+    await flush();
+    expect((await state()).error).toBe('ui.error.protocolMismatch');
+    expect((await ask({ type: 'remote-chat-send', text: 'Hello' })).ok).toBe(false);
+    expect(ws.last('agent-request')).toBeUndefined();
+  });
+  const file = {
+    id: 'file-1',
+    type: 'file',
+    name: 'notes.txt',
+    mimeType: 'text/plain',
+    bytes: 5,
+    data: 'aGVsbG8=',
+  };
+  it('refuses binary attachments on an older Remote before writing chat history', async () => {
+    const ws = await bootConnected();
+    expect(
+      await ask({ type: 'remote-chat-send', text: 'Read this file', attachments: [file] }),
+    ).toEqual({
+      ok: false,
+      error: 'ui.error.attachmentsUnsupported',
+    });
+    expect(ws.last('agent-request')).toBeUndefined();
+    expect((await state()).chat).toEqual([]);
+    expect((await state()).chatBusy).toBe(false);
+  });
+  it('sends file data only over the wire and persists metadata for history', async () => {
+    const ws = await bootConnected(true);
+    expect(
+      (await ask({ type: 'remote-chat-send', text: 'Read this file', attachments: [file] })).ok,
+    ).toBe(true);
+    const request = ws.last('agent-request')!;
+    expect(request.message).toHaveProperty('content', [
+      { type: 'text', text: 'Read this file' },
+      file,
+    ]);
+    expect(JSON.stringify(request.context)).not.toContain(file.data);
+    expect(JSON.stringify(storage.remoteChatLog)).not.toContain(file.data);
+    expect((await state()).chat).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          attachments: [
+            { id: 'file-1', type: 'file', name: 'notes.txt', mimeType: 'text/plain', bytes: 5 },
+          ],
+        }),
+      ]),
+    );
+    await respond(ws, request, { kind: 'done', text: 'Read' });
+  });
+  it.each(['done', 'blocked', 'stopped'] as const)(
+    'rejects a new message without interrupting the current request, and accepts one after %s',
+    async (status) => {
+      const ws = await bootConnected();
+      const original = await begin(ws, 'First task');
+      expect((await state()).chatBusy).toBe(true);
+      expect(await ask({ type: 'remote-chat-send', text: 'Second task' })).toEqual({
+        ok: false,
+        error: 'ui.error.chatBusy',
+      });
+      expect(ws.last('agent-request')!.id).toBe(original.id);
+      expect(ws.last('agent-turn-end')).toBeUndefined();
+      expect(executor.completeTask).not.toHaveBeenCalled();
+      expect((storage.remoteChatLog as ChatEntry[]).filter((m) => m.role === 'user')).toHaveLength(
+        1,
+      );
+      if (status === 'stopped') await ask({ type: 'remote-stop' });
+      else await respond(ws, original, { kind: status, text: 'First task ended' });
+      expect((await state()).chatBusy).toBe(false);
+      const next = await begin(ws, 'Second task');
+      expect(next.taskId).not.toBe(original.taskId);
+    },
+  );
+
   it('persists a random instance identity and reuses it after reconnect, clearing chat, and worker restart', async () => {
     const ws = await bootConnected();
     const id = storage.remoteBrowserId;
@@ -266,6 +359,12 @@ describe('decision transport background', () => {
     const sending = ask({ type: 'remote-chat-send', text: 'Hello from article' });
     await flush();
     expect(chrome.scripting.executeScript).toHaveBeenCalledOnce();
+    expect((await state()).chatBusy).toBe(true);
+    expect(await ask({ type: 'remote-chat-send', text: 'Concurrent message' })).toEqual({
+      ok: false,
+      error: 'ui.error.chatBusy',
+    });
+    expect(chrome.scripting.executeScript).toHaveBeenCalledOnce();
     await ask({ type: 'remote-stop' });
     release([
       { documentId: 'doc', frameId: 0, result: { url: tab.url, text: 'Article', links: [] } },
@@ -274,12 +373,17 @@ describe('decision transport background', () => {
     expect((await sending).ok).toBe(false);
     expect(ws.last('agent-request')).toBeUndefined();
     expect((await state()).loopActive).toBe(false);
+    expect((await state()).chatBusy).toBe(false);
     expect(chrome.debugger.attach).not.toHaveBeenCalled();
   });
   it('authenticates, negotiates and answers ordinary chat without browser actions', async () => {
     const ws = await bootConnected();
     expect(ws.protocols).toEqual([REMOTE_SUBPROTOCOL, `key.${KEY}`]);
-    expect(ws.last('hello')!.capabilities).toEqual(['agent-loop-v1', 'browser-instance-v1']);
+    expect(ws.last('hello')!.capabilities).toEqual([
+      'agent-loop-v1',
+      'browser-instance-v1',
+      'agent-message-v2',
+    ]);
     const request = await begin(ws, 'Hello');
     expect(ws.last('chat')).toBeUndefined();
     await respond(ws, request, { kind: 'done', text: 'Hello back' });
@@ -366,6 +470,11 @@ describe('decision transport background', () => {
       kind: 'actions',
       actions: [{ method: 'click', params: { x: 1, y: 2 } }],
     });
+    expect(await ask({ type: 'remote-chat-send', text: 'Do not replace running action' })).toEqual({
+      ok: false,
+      error: 'ui.error.chatBusy',
+    });
+    expect(ws.last('agent-turn-end')).toBeUndefined();
     ws.receive({ type: 'ping', ts: 123 });
     await flush();
     expect(ws.last('pong')).toEqual({ type: 'pong', ts: 123 });

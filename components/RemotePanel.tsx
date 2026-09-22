@@ -9,8 +9,10 @@ import { useI18n } from './LanguageProvider';
 import { ChatComposer } from './ChatComposer';
 import { Conversation } from './Conversation';
 import { ConnectionSettings } from './ConnectionSettings';
-import { CurrentPage } from './CurrentPage';
 import { LivePreview } from './LivePreview';
+import { usePageSelection } from './usePageSelection';
+import { SelectionChip } from './SelectionChip';
+import { selectionAttachment } from '../utils/attachments';
 
 /** Owns the sidebar state; all browser operations still run in the background. */
 export function RemotePanel() {
@@ -25,6 +27,9 @@ export function RemotePanel() {
   const sendingRef = useRef(false);
   const pendingRef = useRef(false);
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
+  const { selection, faviconUrl, clearSelection } = usePageSelection(
+    state.connected && screen === 'chat',
+  );
 
   async function request(message: RemoteRequest): Promise<RemoteState | null> {
     try {
@@ -66,10 +71,13 @@ export function RemotePanel() {
     };
   }, []);
 
+  const chatBusy = !!(state.chatBusy || state.loopActive || pending === 'remote-stop');
+
   async function sendChat() {
     const text = draft.trim();
-    if (!state.connected || !text || sendingRef.current) return;
+    if (!state.connected || !text || sendingRef.current || chatBusy) return;
     const submittedDraft = draft;
+    const submittedSelection = selection;
     sendingRef.current = true;
     setSending(true);
     try {
@@ -77,11 +85,20 @@ export function RemotePanel() {
       const [tab] = await chrome.tabs.query({ active: true, windowId: win.id });
       const ok = await request({
         type: 'remote-chat-send',
-        text,
+        message: {
+          role: 'user',
+          content: [
+            { type: 'text', text },
+            ...(submittedSelection ? [selectionAttachment(submittedSelection)] : []),
+          ],
+        },
         windowId: win.id,
         tabId: tab?.id,
       });
-      if (ok) setDraft((current) => (current === submittedDraft ? '' : current));
+      if (ok) {
+        setDraft((current) => (current === submittedDraft ? '' : current));
+        if (submittedSelection) clearSelection(submittedSelection);
+      }
     } catch {
       setError('ui.error.serviceUnavailable');
     } finally {
@@ -193,7 +210,15 @@ export function RemotePanel() {
             }}
           />
           <ChatComposer
-            pageContext={<CurrentPage />}
+            attachments={
+              selection && (
+                <SelectionChip
+                  selection={selection}
+                  faviconUrl={faviconUrl}
+                  onRemove={() => clearSelection()}
+                />
+              )
+            }
             preview={
               <LivePreview
                 task={state.task}
@@ -206,6 +231,7 @@ export function RemotePanel() {
             onDraftChange={setDraft}
             connected={connected}
             sending={sending}
+            busy={chatBusy}
             onStop={
               state.loopActive && !state.task
                 ? () => void action({ type: 'remote-stop' })

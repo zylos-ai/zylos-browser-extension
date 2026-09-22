@@ -40,6 +40,16 @@ import { ToolActivity } from '../../utils/tool-activity';
 import { LivePreview } from '../../utils/automation/live-preview';
 import { BrowserLoop } from '../../utils/browser-loop';
 import { runBrowserRound } from '../../utils/browser-round';
+import {
+  AGENT_MESSAGE_CAPABILITY,
+  messageText,
+  messageAttachments,
+} from '../../utils/agent-message';
+import {
+  ATTACHMENT_CAPABILITY,
+  attachmentSelection,
+  storedAttachments,
+} from '../../utils/attachments';
 
 const BACKOFF_MIN_MS = 1000;
 const BACKOFF_MAX_MS = 60_000;
@@ -58,6 +68,7 @@ export function startRemoteBackground() {
   const idem = new IdempotencyCache();
   let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
   let loopReady = false;
+  let attachmentsReady = false;
   let sendingChat = false;
   let chatRevision = 0;
   let loop: BrowserLoop;
@@ -68,6 +79,7 @@ export function startRemoteBackground() {
   };
   function snapshot(): RemoteState {
     state.loopActive = loop?.active ?? false;
+    state.chatBusy = sendingChat || state.loopActive;
     const control = currentControl();
     const grant = currentGrant();
     const previous =
@@ -347,7 +359,7 @@ export function startRemoteBackground() {
       send({
         type: 'hello',
         version: REMOTE_VERSION,
-        capabilities: [...REMOTE_CAPABILITIES, INSTANCE_CAPABILITY],
+        capabilities: [...REMOTE_CAPABILITIES, INSTANCE_CAPABILITY, AGENT_MESSAGE_CAPABILITY],
         browserId: state.browserId,
       });
       handshakeTimer = setTimeout(() => {
@@ -406,13 +418,15 @@ export function startRemoteBackground() {
         if (
           !m.capabilities.includes('agent-loop-v1') ||
           !m.capabilities.includes(INSTANCE_CAPABILITY) ||
+          !m.capabilities.includes(AGENT_MESSAGE_CAPABILITY) ||
           m.endpointId !== `${state.keyId}.${state.browserId}`
         ) {
           state.error = 'ui.error.protocolMismatch';
-          socket?.close(4002, 'browser-instance-v1 and matching endpoint required');
+          socket?.close(4002, 'agent-message-v2 and matching browser endpoint required');
           return;
         }
         state.endpointId = m.endpointId;
+        attachmentsReady = m.capabilities.includes(ATTACHMENT_CAPABILITY);
         loopReady = true;
         state.connected = true;
         state.connecting = false;
@@ -584,24 +598,27 @@ export function startRemoteBackground() {
         }
         case 'remote-chat-send': {
           if (!state.connected || !loopReady) throw new Error('ui.error.messageNotSent');
-          const text = m.text.trim();
+          const text = messageText(m.message).trim();
           if (!text) throw new Error('ui.error.emptyMessage');
-          if (sendingChat) throw new Error('ui.error.messageNotSent');
+          if (sendingChat || loop.active) throw new Error('ui.error.chatBusy');
+          const attachments = messageAttachments(m.message);
+          if (!attachmentsReady && attachments.some((a) => a.type !== 'quote'))
+            throw new Error('ui.error.attachmentsUnsupported');
           sendingChat = true;
           try {
             const gen = generation;
-            let revision = chatRevision;
-            if (loop.active) {
-              cancelLoop('interrupted');
-              revision = chatRevision;
-              activity.end('interrupted');
-              await completeTask();
-            }
+            const revision = chatRevision;
+            publish();
             if (gen !== generation || revision !== chatRevision || !loopReady)
               throw new Error('ui.error.sendFailed');
             const id = crypto.randomUUID();
             const ts = Date.now();
-            const { context, page } = await captureCurrentPage(id, m.windowId, m.tabId);
+            const { context, page } = await captureCurrentPage(
+              id,
+              m.windowId,
+              m.tabId,
+              attachments.filter((a) => a.type === 'quote').map(attachmentSelection),
+            );
             if (gen !== generation || revision !== chatRevision || !loopReady) {
               forgetPageContext(id);
               throw new Error('ui.error.sendFailed');
@@ -613,6 +630,7 @@ export function startRemoteBackground() {
               ts,
               delivery: 'sent',
               page,
+              ...(attachments.length ? { attachments: storedAttachments(attachments) } : {}),
               loopStatus: 'active',
             });
             if (gen !== generation || revision !== chatRevision || !loopReady) {
@@ -624,10 +642,11 @@ export function startRemoteBackground() {
               }
               throw new Error('ui.error.sendFailed');
             }
-            loop.start(id, text, context);
+            loop.start(id, m.message, context);
             return snapshot();
           } finally {
             sendingChat = false;
+            publish();
           }
         }
         case 'remote-chat-clear':

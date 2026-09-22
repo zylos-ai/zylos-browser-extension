@@ -64,8 +64,16 @@ function cdpClient(ws) {
     });
 }
 function fixture(url, port) {
+  if (url.startsWith('/selection-mixed'))
+    return `<!doctype html><meta charset="utf-8"><title>Mixed video-page selection</title><section>
+    <h1>007初露锋芒格斗场获取拍卖费6万-游戏通关攻略解说</h1>
+    <p>681 · 0 · 2026-06-14 10:22:17</p><p>01:45 / 09:14 · 1080P 60帧 · 倍速</p>
+    <input hidden value="PRIVATE_HIDDEN_FIELD"><input type="password" value="PRIVATE_PASSWORD">
+    <textarea placeholder="发个友善的弹幕见证当下">PRIVATE_TEXTAREA</textarea>
+    <div contenteditable>PRIVATE_DRAFT</div><span style="display:none">PRIVATE_HIDDEN_TEXT</span>
+    <a href="#">弹幕礼仪</a><p>视频说明结尾</p></section>`;
   if (url.startsWith('/article'))
-    return `<!doctype html><title>Read-only article</title><h1>Article heading</h1>
+    return `<!doctype html><title>Read-only article</title><link rel="icon" href="/fixture-icon.svg"><h1>Article heading</h1>
     <button onclick="this.textContent='Action confirmed'">Article action</button>
     <a href="/next">Real source</a><input value="PRIVATE_FIELD"><div contenteditable>PRIVATE_DRAFT</div>
     <p hidden>PRIVATE_HIDDEN</p><p>${'Loaded article sentence. '.repeat(1000)}</p><h2>Article ending</h2>
@@ -132,6 +140,13 @@ body{font:16px sans-serif;margin:20px}button,input,select{margin:5px;padding:8px
 }
 try {
   site = http.createServer((req, res) => {
+    if (req.url === '/fixture-icon.svg') {
+      res.setHeader('content-type', 'image/svg+xml');
+      res.end(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" rx="7" fill="#168b83"/><path d="M22 9H10v14h12" fill="none" stroke="white" stroke-width="4"/></svg>',
+      );
+      return;
+    }
     if (req.url === '/redirect') {
       res.writeHead(302, { location: '/next?actual=redirected' });
       res.end();
@@ -312,7 +327,7 @@ try {
   await eventually(async () => (await panelState()).connected);
   const askLoop = async (text, tab) => {
     const reply = await previewPanel(
-      `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-chat-send', text, ...(tab ? { tabId: tab.id, windowId: tab.windowId } : {}) })})`,
+      `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-chat-send', message: { role: 'user', content: [{ type: 'text', text }] }, ...(tab ? { tabId: tab.id, windowId: tab.windowId } : {}) })})`,
     );
     assert.equal(reply.ok, true, JSON.stringify(reply));
     return eventually(() =>
@@ -335,9 +350,9 @@ try {
     if (body.next && !chatMessages.some((message) => message.request?.id === body.next.id))
       chatMessages.push({
         endpointId: body.next.endpointId,
-        text: body.next.text,
+        text: request.text,
         chatId: body.next.taskId,
-        request: { id: body.next.id, round: body.next.round, payload: body.next.payload },
+        request: body.next,
       });
     return { replayed: false, ...body };
   };
@@ -352,10 +367,13 @@ try {
       18000,
     );
   const refIn = (request, label) => {
-    const line = request.request.payload.observation.page.text
+    const line = request.request.execution.observation.page.text
       .split('\n')
       .find((line) => line.includes(JSON.stringify(label)));
-    assert.ok(line, `Missing ref ${label}: ${JSON.stringify(request.request.payload.observation)}`);
+    assert.ok(
+      line,
+      `Missing ref ${label}: ${JSON.stringify(request.request.execution.observation)}`,
+    );
     return line.split(' ')[0];
   };
   const finishLoop = async (request, text) => {
@@ -415,6 +433,215 @@ try {
     assert.equal((await panelState()).task, null);
   };
   await check(
+    'selected prose is previewed, sent once with its source page, and removable without CDP',
+    async () => {
+      const tab = await previewPanel(
+        `chrome.tabs.create({url:${JSON.stringify(url + 'article')},active:true})`,
+      );
+      await eventually(
+        async () => (await previewPanel(`chrome.tabs.get(${tab.id})`)).status === 'complete',
+      );
+      await workerEval('debuggerCalls.length = 0');
+      const select = async (selector) =>
+        previewPanel(`chrome.scripting.executeScript({target:{tabId:${tab.id}},func:() => {
+        const range = document.createRange(); range.selectNodeContents(document.querySelector(${JSON.stringify(selector)}));
+        const selected = window.getSelection(); selected.removeAllRanges(); selected.addRange(range);
+      }})`);
+      await select('h2');
+      await eventually(() =>
+        previewPanel(
+          "document.querySelector('.composer-field .selection-quote blockquote')?.textContent === 'Article ending'",
+        ),
+      );
+      assert.equal(await previewPanel("!!document.querySelector('.current-page')"), false);
+      await eventually(() =>
+        previewPanel(`(() => {
+        const icon = document.querySelector('.selection-chip-label img');
+        return icon?.src === ${JSON.stringify(url + 'fixture-icon.svg')} && icon.complete && icon.naturalWidth > 0;
+      })()`),
+      );
+      assert.equal(
+        await previewPanel("document.querySelector('.selection-chip-label').textContent"),
+        '',
+      );
+      assert.equal(
+        await previewPanel(
+          "getComputedStyle(document.querySelector('.selection-tooltip')).display",
+        ),
+        'none',
+      );
+      const fill = (text) =>
+        previewPanel(`(() => {
+        const input = document.querySelector('#message');
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input,${JSON.stringify(text)});
+        input.dispatchEvent(new Event('input',{bubbles:true}));
+      })()`);
+      await fill('Selection: explain this passage');
+      await previewPanel("document.querySelector('#message').focus()");
+      await sleep(750);
+      assert.equal(
+        await previewPanel("!!document.querySelector('.selection-chip')"),
+        true,
+        'focusing the composer retains an existing page selection',
+      );
+      if (process.env.E2E_SCREENSHOT_DIR) {
+        await cdp(
+          'Emulation.setDeviceMetricsOverride',
+          { width: 360, height: 820, deviceScaleFactor: 1, mobile: false },
+          sessionId,
+        );
+        await fs.mkdir(process.env.E2E_SCREENSHOT_DIR, { recursive: true });
+        const shot = await cdp('Page.captureScreenshot', { format: 'png' }, sessionId);
+        await fs.writeFile(
+          path.join(process.env.E2E_SCREENSHOT_DIR, 'selection-chip-360.png'),
+          Buffer.from(shot.data, 'base64'),
+        );
+      }
+      const chip = await previewPanel(`(() => {
+        const r = document.querySelector('.selection-chip-label').getBoundingClientRect();
+        return {x:r.x+r.width/2,y:r.y+r.height/2};
+      })()`);
+      await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', ...chip }, sessionId);
+      await eventually(() => previewPanel("!document.querySelector('.selection-tooltip').hidden"));
+      assert.equal(
+        await previewPanel(`(() => {
+          const r = document.querySelector('.selection-tooltip').getBoundingClientRect();
+          return r.left >= 0 && r.right <= innerWidth && r.top >= 0;
+        })()`),
+        true,
+        'hover preview fits inside the narrow sidebar',
+      );
+      if (process.env.E2E_SCREENSHOT_DIR) {
+        const shot = await cdp('Page.captureScreenshot', { format: 'png' }, sessionId);
+        await fs.writeFile(
+          path.join(process.env.E2E_SCREENSHOT_DIR, 'selection-chip-hover-360.png'),
+          Buffer.from(shot.data, 'base64'),
+        );
+      }
+      await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 1, y: 1 }, sessionId);
+      await eventually(() => previewPanel("document.querySelector('.selection-tooltip').hidden"));
+      await previewPanel("document.querySelector('#send').click()");
+      const request = await eventually(() =>
+        chatMessages.find((m) => m.text === 'Selection: explain this passage'),
+      );
+      const quote = request.request.message.content[1];
+      assert.equal(quote.type, 'quote');
+      assert.equal(quote.text, 'Article ending');
+      assert.equal(quote.truncated, false);
+      assert.equal(quote.source.contextId, request.chatId);
+      assert.equal(quote.source.documentId, undefined);
+      assert.equal(request.request.context.pages[0].selection, undefined);
+      assert.ok(
+        !request.request.context.pages[0].text.includes('Article ending'),
+        'selected text outside the excerpt is still attached',
+      );
+      assert.equal(request.request.context.pages[0].selection, undefined);
+      assert.equal(
+        (await panelState()).chat.find((entry) => entry.id === request.chatId).attachments[0].text,
+        'Article ending',
+      );
+      assert.equal(
+        await previewPanel("document.querySelector('.message.user').textContent"),
+        'Selection: explain this passage',
+        'the sent bubble shows user text while the quote and page still reach the Agent',
+      );
+      await eventually(() =>
+        previewPanel("!document.querySelector('.composer-field .selection-quote')"),
+      );
+      await sleep(750);
+      assert.equal(
+        await previewPanel("!!document.querySelector('.composer-field .selection-quote')"),
+        false,
+      );
+      assert.deepEqual(await workerEval('debuggerCalls'), []);
+      await finishLoop(request, 'The selected ending was received.');
+      await select('h1');
+      await eventually(() =>
+        previewPanel(
+          "document.querySelector('.composer-field .selection-quote blockquote')?.textContent === 'Article heading'",
+        ),
+      );
+      await previewPanel("document.querySelector('.selection-quote-remove').click()");
+      await sleep(750);
+      assert.equal(
+        await previewPanel("!!document.querySelector('.composer-field .selection-quote')"),
+        false,
+      );
+      await fill('Selection: send without a quote');
+      await previewPanel("document.querySelector('#send').click()");
+      const without = await eventually(() =>
+        chatMessages.find((m) => m.text === 'Selection: send without a quote'),
+      );
+      assert.equal(without.request.context.pages[0].selection, undefined);
+      assert.equal(without.request.message.content.length, 1);
+      await finishLoop(without, 'No quote attached.');
+      await select('h2');
+      await eventually(() => previewPanel("!!document.querySelector('.selection-chip')"));
+      await previewPanel(`chrome.scripting.executeScript({target:{tabId:${tab.id}},func:() => {
+        window.getSelection().removeAllRanges();
+      }})`);
+      await eventually(() => previewPanel("!document.querySelector('.selection-chip')"));
+      await sleep(750);
+      assert.equal(
+        await previewPanel("!!document.querySelector('.selection-chip')"),
+        false,
+        'cancelled page selection must not return from the observer cache',
+      );
+      await fill('Selection: page selection cancelled');
+      await previewPanel("document.querySelector('#send').click()");
+      const cancelled = await eventually(() =>
+        chatMessages.find((m) => m.text === 'Selection: page selection cancelled'),
+      );
+      assert.equal(cancelled.request.message.content.length, 1);
+      await finishLoop(cancelled, 'Cancelled selection was not attached.');
+      await previewPanel(`chrome.tabs.remove(${tab.id})`);
+    },
+  );
+  await check(
+    'selected prose across video controls keeps surrounding text without editor contents or CDP',
+    async () => {
+      const tab = await previewPanel(
+        `chrome.tabs.create({url:${JSON.stringify(url + 'selection-mixed')},active:true})`,
+      );
+      await eventually(
+        async () => (await previewPanel(`chrome.tabs.get(${tab.id})`)).status === 'complete',
+      );
+      await workerEval('debuggerCalls.length = 0');
+      await previewPanel(`chrome.scripting.executeScript({target:{tabId:${tab.id}},func:() => {
+        const range = document.createRange(); range.selectNodeContents(document.querySelector('section'));
+        window.getSelection().removeAllRanges(); window.getSelection().addRange(range);
+      }})`);
+      const text = await eventually(() =>
+        previewPanel(
+          "document.querySelector('.composer-field .selection-quote blockquote')?.textContent",
+        ),
+      );
+      for (const expected of [
+        '007初露锋芒',
+        '681',
+        '01:45 / 09:14',
+        '1080P 60帧',
+        '弹幕礼仪',
+        '视频说明结尾',
+      ])
+        assert.ok(text.includes(expected), `mixed selection includes ${expected}: ${text}`);
+      assert.ok(!text.includes('PRIVATE_'));
+      await previewPanel(`(() => {
+        const input = document.querySelector('#message');
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input,'Selection: explain video information');
+        input.dispatchEvent(new Event('input',{bubbles:true}));
+        document.querySelector('#send').click();
+      })()`);
+      const request = await eventually(() =>
+        chatMessages.find((m) => m.text === 'Selection: explain video information'),
+      );
+      assert.equal(request.request.message.content[1].text, text);
+      assert.deepEqual(await workerEval('debuggerCalls'), []);
+      await finishLoop(request, 'Visible video information was received.');
+      await previewPanel(`chrome.tabs.remove(${tab.id})`);
+    },
+  );
+  await check(
     'chat and paginated DOM reads stay CDP-free; late control keeps the captured tab',
     async () => {
       const tab = await previewPanel(
@@ -426,14 +653,14 @@ try {
       await workerEval('debuggerCalls.length = 0');
       let started = performance.now();
       let request = await askLoop('Article: just say hello', tab);
-      const initial = request.request.payload.initialPage;
+      const initial = request.request.context.pages[0];
       measurements.push({
         operation: 'message context (DOM)',
         elapsedMs: Math.round(performance.now() - started),
         outputBytes: Buffer.byteLength(JSON.stringify(initial)),
         debuggerCalls: (await workerEval('debuggerCalls')).length,
       });
-      assert.equal(request.request.payload.mode, 'reading');
+      assert.equal(request.request.execution.mode, 'reading');
       assert.ok(initial.text.includes('Article heading'));
       assert.ok(!JSON.stringify(initial).includes('PRIVATE_'));
       assert.ok(initial.nextOffset > 0);
@@ -442,7 +669,7 @@ try {
       assert.deepEqual(await workerEval('debuggerCalls'), []);
 
       request = await askLoop('Article: summarize then perform the requested action', tab);
-      const context = request.request.payload.initialPage;
+      const context = request.request.context.pages[0];
       const other = await previewPanel(
         `chrome.tabs.create({url:${JSON.stringify(url + 'next')},active:true})`,
       );
@@ -465,15 +692,15 @@ try {
           ],
         });
         request = await nextRound(request);
-        const page = request.request.payload.observation.page;
+        const page = request.request.execution.observation.page;
         assert.equal(
-          request.request.payload.failed,
+          request.request.execution.failed,
           false,
-          JSON.stringify(request.request.payload),
+          JSON.stringify(request.request.execution),
         );
-        assert.equal(request.request.payload.mode, 'reading');
+        assert.equal(request.request.execution.mode, 'reading');
         assert.equal(
-          request.request.payload.tools,
+          request.request.execution.tools,
           undefined,
           'read rounds do not unlock action schemas',
         );
@@ -502,16 +729,16 @@ try {
         actions: [{ method: 'use-current-tab', params: { contextId: context.contextId } }],
       });
       request = await nextRound(request);
-      assert.equal(request.request.payload.mode, 'operating');
-      assert.ok(request.request.payload.tools.some((tool) => tool.name === 'click'));
-      assert.equal(request.request.payload.observation.target.id, tab.id);
+      assert.equal(request.request.execution.mode, 'operating');
+      assert.ok(request.request.execution.tools.some((tool) => tool.name === 'click'));
+      assert.equal(request.request.execution.observation.target.id, tab.id);
       assert.ok((await workerEval('debuggerCalls')).includes('attach'));
       await decision(request, {
         kind: 'actions',
         actions: [{ method: 'click', params: { ref: refIn(request, 'Article action') } }],
       });
       request = await nextRound(request);
-      assert.ok(request.request.payload.observation.page.text.includes('Action confirmed'));
+      assert.ok(request.request.execution.observation.page.text.includes('Action confirmed'));
       await finishLoop(request, 'Article summarized and requested action confirmed');
       await previewPanel(`chrome.tabs.remove([${tab.id},${other.id}])`);
     },
@@ -526,7 +753,7 @@ try {
         async () => (await previewPanel(`chrome.tabs.get(${tab.id})`)).status === 'complete',
       );
       let request = await askLoop('Article: stale document', tab);
-      const contextId = request.request.payload.initialPage.contextId;
+      const contextId = request.request.context.pages[0].contextId;
       const before = await previewPanel(
         `chrome.webNavigation.getFrame({tabId:${tab.id},frameId:0})`,
       );
@@ -541,9 +768,9 @@ try {
       for (const method of ['read-page', 'use-current-tab']) {
         await decision(request, { kind: 'actions', actions: [{ method, params: { contextId } }] });
         request = await nextRound(request);
-        assert.equal(request.request.payload.mode, 'reading');
+        assert.equal(request.request.execution.mode, 'reading');
         assert.ok(
-          request.request.payload.results.some((result) => result.error?.code === 'PAGE_CHANGED'),
+          request.request.execution.results.some((result) => result.error?.code === 'PAGE_CHANGED'),
         );
       }
       assert.deepEqual(await workerEval('debuggerCalls'), []);
@@ -707,13 +934,39 @@ try {
     async () => {
       const before = (await previewPanel('chrome.tabs.query({})')).map((tab) => tab.id);
       const request = await askLoop('Loop: just say hello');
-      assert.equal(request.request.payload.protocol, 'browser-decision-v1');
+      assert.equal(request.request.execution.protocol, 'browser-decision-v1');
       assert.equal(
-        request.request.payload.tools.length,
+        request.request.execution.tools.length,
         3,
         'ordinary chat does not receive the entire browser catalog',
       );
+      await eventually(async () => (await panelState()).chatBusy);
+      await previewPanel(`(() => {
+        const input = document.querySelector('#message');
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, 'Draft for later');
+        input.dispatchEvent(new Event('input', {bubbles:true}));
+      })()`);
+      assert.equal(await previewPanel("document.querySelector('#message').disabled"), false);
+      assert.equal(await previewPanel("document.querySelector('#send').disabled"), true);
+      await previewPanel(`(() => {
+        document.querySelector('#send').click();
+        document.querySelector('#message').dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true, cancelable:true}));
+        document.querySelector('#chat-form').dispatchEvent(new Event('submit', {bubbles:true, cancelable:true}));
+      })()`);
+      assert.deepEqual(
+        await previewPanel(
+          "chrome.runtime.sendMessage({type:'remote-chat-send',message:{role:'user',content:[{type:'text',text:'Duplicate request'}]}})",
+        ),
+        { ok: false, error: 'ui.error.chatBusy' },
+      );
+      assert.equal((await panelState()).chat.at(-1).text, 'Loop: just say hello');
       await finishLoop(request, 'Hello from structured decision');
+      await eventually(() => previewPanel("!document.querySelector('#send').disabled"));
+      assert.equal(
+        await previewPanel("document.querySelector('#message').value"),
+        'Draft for later',
+      );
+      assert.equal((await panelState()).chatBusy, false);
       assert.deepEqual(
         (await previewPanel('chrome.tabs.query({})')).map((tab) => tab.id),
         before,
@@ -736,12 +989,12 @@ try {
         actions: [
           {
             method: 'use-current-tab',
-            params: { contextId: request.request.payload.initialPage.contextId },
+            params: { contextId: request.request.context.pages[0].contextId },
           },
         ],
       });
       request = await nextRound(request);
-      assert.equal(request.request.payload.observation.target.id, tab.id);
+      assert.equal(request.request.execution.observation.target.id, tab.id);
       const ref = refIn(request, 'Popup query');
       await assert.rejects(
         decision(request, {
@@ -781,16 +1034,20 @@ try {
       assert.equal((await decision(request, value)).replayed, true);
       const previous = request;
       request = await nextRound(request);
-      assert.equal(request.request.payload.failed, false, JSON.stringify(request.request.payload));
+      assert.equal(
+        request.request.execution.failed,
+        false,
+        JSON.stringify(request.request.execution),
+      );
       assert.ok(
-        request.request.payload.observation.target.url.includes('/next?q=spider'),
+        request.request.execution.observation.target.url.includes('/next?q=spider'),
         JSON.stringify({
-          payload: request.request.payload,
+          payload: request.request.execution,
           tabs: await previewPanel('chrome.tabs.query({})'),
         }),
       );
-      assert.notEqual(request.request.payload.observation.target.id, tab.id);
-      assert.notEqual(request.request.payload.observation.target.id, unrelated.id);
+      assert.notEqual(request.request.execution.observation.target.id, tab.id);
+      assert.notEqual(request.request.execution.observation.target.id, unrelated.id);
       assert.equal((await previewPanel(`chrome.tabs.get(${tab.id})`)).url, url + 'loop');
       const opened = (await previewPanel('chrome.tabs.query({})')).filter((t) =>
         t.url.includes('/next?q=spider'),
@@ -828,7 +1085,7 @@ try {
         actions: [
           {
             method: 'use-current-tab',
-            params: { contextId: request.request.payload.initialPage.contextId },
+            params: { contextId: request.request.context.pages[0].contextId },
           },
         ],
       });
@@ -842,9 +1099,13 @@ try {
         ],
       });
       request = await nextRound(request);
-      assert.equal(request.request.payload.failed, false, JSON.stringify(request.request.payload));
-      assert.equal(request.request.payload.observation.target.id, tab.id);
-      assert.ok(request.request.payload.observation.target.url.includes('/next?q=same'));
+      assert.equal(
+        request.request.execution.failed,
+        false,
+        JSON.stringify(request.request.execution),
+      );
+      assert.equal(request.request.execution.observation.target.id, tab.id);
+      assert.ok(request.request.execution.observation.target.url.includes('/next?q=same'));
       await finishLoop(request, 'Same-tab search completed');
     },
   );
@@ -863,23 +1124,27 @@ try {
         actions: [
           {
             method: 'use-current-tab',
-            params: { contextId: request.request.payload.initialPage.contextId },
+            params: { contextId: request.request.context.pages[0].contextId },
           },
         ],
       });
       request = await nextRound(request);
-      assert.ok(request.request.payload.observation.page.viewport.remainingBelow > 0);
+      assert.ok(request.request.execution.observation.page.viewport.remainingBelow > 0);
       await decision(request, {
         kind: 'actions',
         actions: [{ method: 'scroll', params: { direction: 'down', pixels: 800 } }],
       });
       request = await nextRound(request);
-      assert.equal(request.request.payload.failed, false, JSON.stringify(request.request.payload));
-      assert.ok(request.request.payload.observation.page.viewport.scrollY > 0);
-      assert.ok(request.request.payload.observation.page.text.includes('Lazy result loaded'));
+      assert.equal(
+        request.request.execution.failed,
+        false,
+        JSON.stringify(request.request.execution),
+      );
+      assert.ok(request.request.execution.observation.page.viewport.scrollY > 0);
+      assert.ok(request.request.execution.observation.page.text.includes('Lazy result loaded'));
       await decision(request, { kind: 'actions', actions: [{ method: 'observe', params: {} }] });
       request = await nextRound(request);
-      const image = request.request.payload.observation.page.screenshot;
+      const image = request.request.execution.observation.page.screenshot;
       assert.equal(image.data, undefined, 'image encoding must not reach Agent stdout');
       assert.equal(image.imageReadRequired, true);
       assert.equal(path.dirname(image.path), process.env.BROWSER_REMOTE_OBS_DIR);
@@ -916,13 +1181,13 @@ try {
         await decision(request, { kind: 'actions', actions: [{ method, params }] });
         request = await nextRound(request);
         assert.equal(
-          request.request.payload.failed,
+          request.request.execution.failed,
           false,
-          JSON.stringify(request.request.payload),
+          JSON.stringify(request.request.execution),
         );
-        return request.request.payload.observation.page;
+        return request.request.execution.observation.page;
       };
-      await action('use-current-tab', { contextId: request.request.payload.initialPage.contextId });
+      await action('use-current-tab', { contextId: request.request.context.pages[0].contextId });
       const find = async (selector) => (await action('find', { selector })).matches[0].ref;
       const inspect = async (selector) => action('inspect', { ref: await find(selector) });
       await action('fill', { ref: await find('#input'), text: 'A retained draft' });
@@ -943,7 +1208,7 @@ try {
     const action = async (method, params = {}) => {
       await decision(request, { kind: 'actions', actions: [{ method, params }] });
       request = await nextRound(request);
-      return request.request.payload;
+      return request.request.execution;
     };
     await action('open', { url: url + 'far-frame' });
     const field = (await action('find', { selector: 'input[type=password]' })).observation.page

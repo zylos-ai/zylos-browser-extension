@@ -6,6 +6,7 @@ import {
   type AgentRequest,
   type RoundResult,
 } from '../../utils/browser-loop';
+import { selectionAttachment } from '../../utils/attachments';
 
 function setup(timeout = 300000) {
   const requests: AgentRequest[] = [];
@@ -26,8 +27,8 @@ function setup(timeout = 300000) {
   const loop = new BrowserLoop(io, timeout);
   loop.start(
     'task-1',
-    'Search the current page',
-    JSON.stringify({ contextId: '11111111-1111-4111-8111-111111111111' }),
+    { role: 'user', content: [{ type: 'text', text: 'Search the current page' }] },
+    { type: 'current-page', status: 'excerpt', contextId: '11111111-1111-4111-8111-111111111111' },
   );
   return { requests, io, loop };
 }
@@ -38,6 +39,41 @@ const action = {
 };
 afterEach(() => vi.useRealTimers());
 describe('extension-owned loop', () => {
+  it('sends owner attachments once, outside page observations, and retains the original task after actions', async () => {
+    const { loop, requests } = setup();
+    loop.cancel();
+    requests.length = 0;
+    const quote = selectionAttachment({
+      text: 'Compare this passage',
+      truncated: false,
+      tabId: 3,
+      documentId: 'doc-1',
+      url: 'https://example.com/',
+      title: 'Article',
+    });
+    loop.start(
+      'task-with-quote',
+      { role: 'user', content: [{ type: 'text', text: 'Explain' }, quote] },
+      { type: 'current-page', status: 'excerpt', contextId: 'task-with-quote' },
+    );
+    expect(requests[0]!.message).toMatchObject({
+      content: [
+        { type: 'text', text: 'Explain' },
+        { type: 'quote', text: quote.text, source: { contextId: 'task-with-quote' } },
+      ],
+    });
+    expect(requests[0]).not.toHaveProperty('payload');
+    expect(requests[0]).not.toHaveProperty('text');
+    expect(requests[0]!.execution).not.toHaveProperty('initialPage');
+    expect(requests[0]!.context.pages[0]).not.toHaveProperty('selection');
+    loop.accept(requests[0]!.id, action);
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[1]!.taskId).toBe('task-with-quote');
+    expect(requests[1]!.message).toEqual({ id: 'task-with-quote' });
+    expect(requests[1]!.context).toEqual({ pages: [] });
+    expect(requests[1]!.execution).toHaveProperty('observation');
+    loop.cancel();
+  });
   it('stays read-only across multiple chunks and sends control schemas only after adoption', async () => {
     const { loop, requests, io } = setup();
     const read = {
@@ -55,8 +91,8 @@ describe('extension-owned loop', () => {
     for (let i = 0; i < 3; i++) {
       loop.accept(requests[i]!.id, read);
       await vi.waitFor(() => expect(requests).toHaveLength(i + 2));
-      expect(requests[i + 1]!.payload).toMatchObject({ mode: 'reading' });
-      expect(requests[i + 1]!.payload).not.toHaveProperty('tools');
+      expect(requests[i + 1]!.execution).toMatchObject({ mode: 'reading' });
+      expect(requests[i + 1]!.execution).not.toHaveProperty('tools');
       expect(() =>
         loop.accept(requests[i + 1]!.id, {
           kind: 'actions',
@@ -72,7 +108,7 @@ describe('extension-owned loop', () => {
     });
     loop.accept(requests[3]!.id, action);
     await vi.waitFor(() => expect(requests).toHaveLength(5));
-    expect(requests[4]!.payload).toMatchObject({
+    expect(requests[4]!.execution).toMatchObject({
       mode: 'operating',
       tools: expect.arrayContaining([expect.objectContaining({ name: 'click' })]),
     });
@@ -88,8 +124,8 @@ describe('extension-owned loop', () => {
     });
     loop.accept(requests[0]!.id, action);
     await vi.waitFor(() => expect(requests).toHaveLength(2));
-    expect(requests[1]!.payload).toMatchObject({ mode: 'reading' });
-    expect(requests[1]!.payload).not.toHaveProperty('tools');
+    expect(requests[1]!.execution).toMatchObject({ mode: 'reading' });
+    expect(requests[1]!.execution).not.toHaveProperty('tools');
     loop.accept(requests[1]!.id, { kind: 'done', text: 'Here is the summary' });
     await vi.waitFor(() => expect(loop.active).toBe(false));
     expect(io.execute).toHaveBeenCalledTimes(1);
@@ -143,17 +179,17 @@ describe('extension-owned loop', () => {
     expect(loop.accept(id, action).replayed).toBe(true);
     await vi.waitFor(() => expect(requests).toHaveLength(2));
     expect(io.execute).toHaveBeenCalledTimes(1);
-    expect(requests[1]!.payload).toMatchObject({
+    expect(requests[1]!.execution).toMatchObject({
       memory: 'Need results',
       observation: { text: 'new page' },
     });
-    expect(requests[1]!.payload).toHaveProperty('tools');
+    expect(requests[1]!.execution).toHaveProperty('tools');
     expect(() => loop.accept(id, { kind: 'done', text: 'changed' })).toThrow('different contents');
     loop.cancel();
   });
   it('delivers action constraints with the browser schemas, without resending them every round', async () => {
     const { loop, requests } = setup();
-    const initial = requests[0]!.payload as { tools: { name: string }[] };
+    const initial = requests[0]!.execution as { tools: { name: string }[] };
     expect(initial.tools.map((tool) => tool.name)).toEqual([
       'read-page',
       'use-current-tab',
@@ -161,7 +197,7 @@ describe('extension-owned loop', () => {
     ]);
     loop.accept(requests[0]!.id, action);
     await vi.waitFor(() => expect(requests).toHaveLength(2));
-    const payload = requests[1]!.payload as {
+    const payload = requests[1]!.execution as {
       tools: { name: string; constraints?: string[]; examples?: unknown[] }[];
     };
     const constraints = (name: string) =>
@@ -178,8 +214,8 @@ describe('extension-owned loop', () => {
       actions: [{ method: 'find', params: { selector: 'video,audio' } }],
     });
     await vi.waitFor(() => expect(requests).toHaveLength(3));
-    expect(requests[2]!.payload).not.toHaveProperty('tools');
-    expect(requests[2]!.payload).not.toHaveProperty('instructions');
+    expect(requests[2]!.execution).not.toHaveProperty('tools');
+    expect(requests[2]!.execution).not.toHaveProperty('instructions');
     loop.cancel();
   });
   it('validates the entire batch before consuming the pending decision', () => {
@@ -213,7 +249,11 @@ describe('extension-owned loop', () => {
     release();
     await Promise.resolve();
     expect(requests).toHaveLength(1);
-    loop.start('new-turn', 'new', '{}');
+    loop.start(
+      'new-turn',
+      { role: 'user', content: [{ type: 'text', text: 'new' }] },
+      { type: 'current-page', status: 'unavailable' },
+    );
     const next = requests[1]!.id;
     loop.cancel();
     expect(() => loop.accept(next, action)).toThrow('no longer active');

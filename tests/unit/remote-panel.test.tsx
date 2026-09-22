@@ -5,6 +5,7 @@ import { LanguageProvider } from '../../components/LanguageProvider';
 import { RemotePanel } from '../../components/RemotePanel';
 import { initialRemoteState, type RemoteState } from '../../utils/remote';
 import markdownExample from '../fixtures/markdown-message.json';
+import { selectionAttachment } from '../../utils/attachments';
 
 let root: Root;
 let container: HTMLDivElement;
@@ -64,7 +65,13 @@ beforeEach(() => {
     windows: { getCurrent: vi.fn(async () => ({ id: 1 })) },
     tabs: {
       query: vi.fn(async () => [
-        { id: 3, windowId: 1, url: 'https://example.com/', title: 'Example' },
+        {
+          id: 3,
+          windowId: 1,
+          url: 'https://example.com/',
+          title: 'Example',
+          favIconUrl: 'https://example.com/favicon.ico',
+        },
       ]),
       onActivated: { addListener: vi.fn(), removeListener: vi.fn() },
       onUpdated: { addListener: vi.fn(), removeListener: vi.fn() },
@@ -199,6 +206,8 @@ test('Markdown cannot inject HTML or executable URLs, and footnotes stay within 
 
 test('starter prompts fill the composer and require a separate send; IME and Shift+Enter do not send', async () => {
   await mount();
+  expect(container.querySelector('.current-page')).toBeNull();
+  expect(container.querySelector('.selection-chip')).toBeNull();
   send.mockClear();
   await click('.starter');
   expect(input().value).toBe('找资料，整理成要点');
@@ -211,12 +220,244 @@ test('starter prompts fill the composer and require a separate send; IME and Shi
   await enter();
   expect(send).toHaveBeenCalledExactlyOnceWith({
     type: 'remote-chat-send',
-    text: '找资料，整理成要点',
+    message: { role: 'user', content: [{ type: 'text', text: '找资料，整理成要点' }] },
     windowId: 1,
     tabId: 3,
   });
   expect(input().value).toBe('');
 });
+
+test('selected text appears above the composer, survives focus and failed send, and is consumed once', async () => {
+  vi.useFakeTimers();
+  let text = 'Quoted passage\nSecond line';
+  Object.assign(chrome, {
+    scripting: {
+      executeScript: vi.fn(async () => [
+        {
+          frameId: 0,
+          documentId: 'doc-1',
+          result: { url: 'https://example.com/', text, truncated: false },
+        },
+      ]),
+    },
+  });
+  await mount();
+  expect(container.querySelector('.current-page')).toBeNull();
+  const trigger = container.querySelector<HTMLButtonElement>('.selection-chip-label')!;
+  const tooltip = container.querySelector<HTMLElement>('.selection-tooltip')!;
+  expect(trigger.textContent).toBe('');
+  expect(trigger.getAttribute('aria-label')).toContain('Example');
+  const icon = trigger.querySelector('img')!;
+  expect(icon.getAttribute('src')).toBe('https://example.com/favicon.ico');
+  await act(async () => icon.dispatchEvent(new Event('error')));
+  expect(trigger.querySelector('img')).toBeNull();
+  expect(trigger.querySelector('svg')).not.toBeNull();
+  expect(tooltip.hidden).toBe(true);
+  await act(async () => {
+    trigger.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+  });
+  expect(tooltip.hidden).toBe(false);
+  expect(tooltip.textContent).toContain(text);
+  await act(async () => {
+    trigger.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }));
+  });
+  expect(tooltip.hidden).toBe(true);
+  await act(async () => trigger.focus());
+  expect(tooltip.hidden).toBe(false);
+  await act(async () => {
+    trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+  expect(tooltip.hidden).toBe(true);
+  expect(container.querySelector('.composer-field .selection-quote')?.textContent).toContain(text);
+  await act(async () => input().focus());
+  await fill('#message', 'Explain this selection');
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(601);
+  });
+  expect(container.querySelector('.composer-field .selection-quote')?.textContent).toContain(
+    'Quoted passage',
+  );
+  send.mockResolvedValueOnce({ ok: false, error: 'ui.error.sendFailed' });
+  await enter();
+  expect(input().value).toBe('Explain this selection');
+  expect(container.querySelector('.selection-quote')).not.toBeNull();
+  text = 'Quoted passage\nSecond line';
+  await enter();
+  expect(send).toHaveBeenLastCalledWith({
+    type: 'remote-chat-send',
+    windowId: 1,
+    tabId: 3,
+    message: {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Explain this selection' },
+        {
+          id: expect.any(String),
+          type: 'quote',
+          text,
+          truncated: false,
+          source: {
+            tabId: 3,
+            documentId: 'doc-1',
+            url: 'https://example.com/',
+            title: 'Example',
+          },
+        },
+      ],
+    },
+  });
+  expect(input().value).toBe('');
+  expect(container.querySelector('.composer-field .selection-quote')).toBeNull();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1201);
+  });
+  expect(container.querySelector('.composer-field .selection-quote')).toBeNull();
+});
+
+test('cancelling or removing a quote prevents sending it, and history shows only the user message', async () => {
+  vi.useFakeTimers();
+  let text = 'First selection';
+  Object.assign(chrome, {
+    scripting: {
+      executeScript: vi.fn(async () => [
+        {
+          frameId: 0,
+          documentId: 'doc-1',
+          result: { url: 'https://example.com/', text, truncated: false },
+        },
+      ]),
+    },
+  });
+  await mount();
+  text = '';
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(601);
+  });
+  expect(container.querySelector('.selection-chip')).toBeNull();
+  await fill('#message', 'Selection cancelled');
+  await enter();
+  expect(send).toHaveBeenLastCalledWith({
+    type: 'remote-chat-send',
+    message: { role: 'user', content: [{ type: 'text', text: 'Selection cancelled' }] },
+    windowId: 1,
+    tabId: 3,
+  });
+  text = 'First selection';
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(601);
+  });
+  expect(container.querySelector('.selection-chip')).not.toBeNull();
+  await click('.selection-quote-remove');
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1201);
+  });
+  expect(container.querySelector('.selection-quote')).toBeNull();
+  await fill('#message', 'No quote');
+  await enter();
+  expect(send).toHaveBeenLastCalledWith({
+    type: 'remote-chat-send',
+    message: { role: 'user', content: [{ type: 'text', text: 'No quote' }] },
+    windowId: 1,
+    tabId: 3,
+  });
+  text = '<img src=x onerror=alert(1)> **New selection**';
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(601);
+  });
+  expect(container.querySelector('.selection-quote blockquote')?.textContent).toBe(text);
+  state.chat.push({
+    role: 'user',
+    text: 'Explain',
+    ts: 1,
+    page: { url: 'https://example.com/', title: 'Example', status: 'excerpt' },
+    attachments: [
+      selectionAttachment({
+        text,
+        truncated: false,
+        tabId: 3,
+        documentId: 'doc-1',
+        url: 'https://example.com/',
+        title: 'Example',
+      }),
+    ],
+  });
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(container.querySelector('.message.user')?.textContent).toBe('Explain');
+  expect(container.querySelector('.message.user .selection-quote')).toBeNull();
+  expect(container.querySelector('.message.user .message-page')).toBeNull();
+  expect(container.querySelector('.selection-quote img')).toBeNull();
+  expect(container.querySelector('.message.user .selection-quote-remove')).toBeNull();
+});
+
+test('same-URL reload and switching tabs clear the old quote, and hidden panels stop selection reads', async () => {
+  vi.useFakeTimers();
+  let documentId = 'doc-1',
+    text = 'Old quote';
+  const reading = vi.fn(async () => [
+    { frameId: 0, documentId, result: { url: 'https://example.com/', text, truncated: false } },
+  ]);
+  Object.assign(chrome, { scripting: { executeScript: reading } });
+  await mount();
+  documentId = 'doc-2';
+  text = '';
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(601);
+  });
+  expect(container.querySelector('.selection-quote')).toBeNull();
+  text = 'New quote';
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(601);
+  });
+  expect(container.querySelector('.selection-quote')?.textContent).toContain(text);
+  vi.mocked(
+    chrome.tabs.query as (query: chrome.tabs.QueryInfo) => Promise<chrome.tabs.Tab[]>,
+  ).mockResolvedValue([{ id: 9, windowId: 1, url: 'https://other.example/' } as chrome.tabs.Tab]);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(601);
+  });
+  expect(container.querySelector('.selection-quote')).toBeNull();
+  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+  document.dispatchEvent(new Event('visibilitychange'));
+  const before = reading.mock.calls.length;
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(3000);
+  });
+  expect(reading).toHaveBeenCalledTimes(before);
+});
+
+test.each([{ loopActive: true }, { chatBusy: true }])(
+  'busy task or initial capture blocks button, Enter and form submission while preserving the draft: %j',
+  async (busy) => {
+    Object.assign(state, busy);
+    await mount();
+    await fill('#message', 'Next message draft');
+    send.mockClear();
+    expect(input().disabled).toBe(false);
+    expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(true);
+    expect(container.querySelector('#composer-hint')!.textContent).toContain('可先编辑下一条消息');
+    await click('#send');
+    await enter();
+    await act(async () => {
+      container
+        .querySelector('form')!
+        .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+    expect(send).not.toHaveBeenCalled();
+    expect(input().value).toBe('Next message draft');
+    state.loopActive = false;
+    state.chatBusy = false;
+    await act(async () => listener({ type: 'remote-updated', state }));
+    expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+    await click('#send');
+    expect(send).toHaveBeenCalledExactlyOnceWith({
+      type: 'remote-chat-send',
+      message: { role: 'user', content: [{ type: 'text', text: 'Next message draft' }] },
+      windowId: 1,
+      tabId: 3,
+    });
+  },
+);
 
 test('tool steps appear inline, update live, collapse on completion and can be reopened', async () => {
   state.chat = [
@@ -403,9 +644,10 @@ test('delivery failure remains visible beside the user message after reopening t
   expect(container.querySelector('.reply-status')).toBeNull();
 });
 
-test('browser activity refreshes the reply notice and two minutes never disable sending or receiving', async () => {
+test('reply delays keep the current task locked while still accepting its eventual answer', async () => {
   vi.useFakeTimers();
   const start = Date.now();
+  state.loopActive = true;
   state.chat = [{ role: 'user', text: 'Read pages', ts: start, delivery: 'queued' }];
   await mount();
   await act(async () => {
@@ -448,13 +690,11 @@ test('browser activity refreshes the reply notice and two minutes never disable 
   expect(container.querySelector('.reply-status')?.textContent).toContain('不会停止任务或阻止回复');
   expect(input().disabled).toBe(false);
   await fill('#message', 'Continue');
+  send.mockClear();
   await enter();
-  expect(send).toHaveBeenLastCalledWith({
-    type: 'remote-chat-send',
-    text: 'Continue',
-    windowId: 1,
-    tabId: 3,
-  });
+  expect(send).not.toHaveBeenCalled();
+  expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(true);
+  state.loopActive = false;
   state.chat.push({
     role: 'assistant',
     text: 'The late reply arrived',
@@ -464,6 +704,8 @@ test('browser activity refreshes the reply notice and two minutes never disable 
   await act(async () => listener({ type: 'remote-updated', state }));
   expect(container.querySelector('.reply-status')).toBeNull();
   expect(container.textContent).toContain('The late reply arrived');
+  expect(input().value).toBe('Continue');
+  expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(false);
 });
 
 test('settings show the saved URL without exposing the key and return to chat after saving', async () => {

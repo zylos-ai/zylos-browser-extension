@@ -9,25 +9,27 @@ export function ChatComposer({
   onDraftChange,
   connected,
   sending,
+  busy,
   onSend,
   inputRef,
   preview,
-  pageContext,
+  attachments,
   onStop,
 }: {
   draft: string;
   onDraftChange: (value: string) => void;
   connected: boolean;
   sending: boolean;
+  busy: boolean;
   onSend: () => void;
   inputRef: React.RefObject<HTMLTextAreaElement | null>;
   preview?: React.ReactNode;
-  pageContext?: React.ReactNode;
+  attachments?: React.ReactNode;
   onStop?: () => void;
 }) {
   const { t } = useI18n();
   const composing = useRef(false);
-  const disabled = !connected || !draft.trim() || sending;
+  const disabled = !connected || !draft.trim() || sending || busy;
   useLayoutEffect(() => {
     const input = inputRef.current;
     if (!input) return;
@@ -41,12 +43,12 @@ export function ChatComposer({
       className="composer"
       onSubmit={(e) => {
         e.preventDefault();
-        onSend();
+        if (!disabled) onSend();
       }}
     >
       <div className="composer-field">
         {preview}
-        {pageContext}
+        {attachments}
         <textarea
           ref={inputRef}
           id="message"
@@ -90,8 +92,8 @@ export function ChatComposer({
             className="btn btn-primary send-button"
             type="submit"
             disabled={disabled}
-            aria-label={sending ? t('sending') : t('sendMessage')}
-            title={t('sendMessage')}
+            aria-label={sending ? t('sending') : busy ? t('chatInProgress') : t('sendMessage')}
+            title={busy ? t('chatBusy') : t('sendMessage')}
           >
             {sending ? (
               <span className="loading loading-spinner loading-xs" aria-hidden="true" />
@@ -102,7 +104,7 @@ export function ChatComposer({
         </div>
       </div>
       <p id="composer-hint" className="text-caption text-muted">
-        {t('keyboardHint')}
+        {busy ? t('taskInProgressHint') : t('keyboardHint')}
       </p>
     </form>
   );

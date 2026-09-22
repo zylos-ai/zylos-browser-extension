@@ -154,6 +154,10 @@ export async function runBrowserRound(
     }
     if (Array.isArray(value)) return value.slice(0, 100).map(bounded);
     if (!value || typeof value !== 'object') return value;
+    // An attachment's MIME, ID and filename are protocol metadata, not page prose.
+    // Truncating them can make otherwise valid image bytes unreadable on Remote.
+    if ('type' in value && ['image', 'file'].includes(String(value.type)) && 'data' in value)
+      return value;
     return Object.fromEntries(
       Object.entries(value).map(([key, item]) => [key, key === 'data' ? item : bounded(item)]),
     );

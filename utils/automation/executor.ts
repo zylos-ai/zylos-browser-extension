@@ -7,6 +7,7 @@ import { PointerMotion } from './pointer-motion';
 import type { Command } from '../commands';
 import type { CdpResults, Cursor, GrantedTab, Point, Scope } from './types';
 import { canReadPage, assertPageDocument } from '../page-reader';
+import { screenshotAttachment } from '../attachments';
 
 export const SCREENSHOT_TIMEOUT_MS = 12_000;
 
@@ -1071,7 +1072,7 @@ export async function execute(command: Command, deadline: number) {
     };
   }
   if (command.op === 'screenshot')
-    return { ...(await boundedCdp(screenshot, check)), mimeType: 'image/png' };
+    return screenshotAttachment((await boundedCdp(screenshot, check)).data);
   if (command.op === 'observe') {
     const tab = await chrome.tabs.get(lease.id);
     check();
@@ -1120,7 +1121,7 @@ export async function execute(command: Command, deadline: number) {
         capturedAt: new Date().toISOString(),
         viewport,
         text,
-        screenshot: { mimeType: 'image/png' as const, data },
+        screenshot: screenshotAttachment(data),
       };
     } catch (error) {
       // An incomplete observation must not leave a usable new ref set behind.
