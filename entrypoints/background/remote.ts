@@ -52,6 +52,8 @@ import {
   storedAttachments,
 } from '../../utils/attachments';
 
+import { AGENT_ACTIVITY_CAPABILITY } from '../../utils/agent-activity';
+
 const BACKOFF_MIN_MS = 1000;
 const BACKOFF_MAX_MS = 60_000;
 const KEEPALIVE_ALARM = 'remote-keepalive';
@@ -82,6 +84,8 @@ export function startRemoteBackground() {
     void chrome.runtime.sendMessage({ type: 'remote-updated', state: snapshot() }).catch(() => {});
   };
   function snapshot(): RemoteState {
+    if (!loop?.active || state.agentActivity?.taskId !== loop.taskId)
+      state.agentActivity = undefined;
     state.loopActive = loop?.active ?? false;
     state.stopping = !!stopTaskPromise;
     state.chatBusy = sendingChat || state.loopActive || state.stopping;
@@ -288,6 +292,7 @@ export function startRemoteBackground() {
         requestId,
       ),
     finish: async (text, status, taskId, notice) => {
+      state.agentActivity = undefined;
       idem.cancel();
       preview.finish(status === 'done' ? 'completed' : 'error');
       activity.end(status === 'done' ? 'completed' : 'interrupted');
@@ -312,6 +317,7 @@ export function startRemoteBackground() {
   });
 
   function cancelLoop(status: 'stopped' | 'interrupted', interrupt = false) {
+    state.agentActivity = undefined;
     chatRevision++; // Also invalidate a message still collecting its initial DOM excerpt.
     const taskId = loop.taskId;
     loop.cancel();
@@ -431,7 +437,12 @@ export function startRemoteBackground() {
       send({
         type: 'hello',
         version: REMOTE_VERSION,
-        capabilities: [...REMOTE_CAPABILITIES, INSTANCE_CAPABILITY, AGENT_MESSAGE_CAPABILITY],
+        capabilities: [
+          ...REMOTE_CAPABILITIES,
+          INSTANCE_CAPABILITY,
+          AGENT_MESSAGE_CAPABILITY,
+          AGENT_ACTIVITY_CAPABILITY,
+        ],
         browserId: state.browserId,
       });
       handshakeTimer = setTimeout(() => {
@@ -505,6 +516,19 @@ export function startRemoteBackground() {
         state.connected = true;
         state.connecting = false;
         publish();
+        return;
+      case 'agent-activity':
+        if (
+          !state.connected ||
+          !loop.active ||
+          m.endpointId !== state.endpointId ||
+          m.taskId !== loop.taskId
+        )
+          return;
+        if (state.agentActivity?.taskId === m.taskId && m.sequence <= state.agentActivity.sequence)
+          return;
+        state.agentActivity = { ...m, receivedAt: Date.now() };
+        publish(); // Ephemeral status: never append or persist a chat entry.
         return;
       case 'agent-stop-result':
         if (pendingStop?.taskId === m.taskId) pendingStop.resolve(m.ok);

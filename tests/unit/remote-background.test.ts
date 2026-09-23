@@ -447,6 +447,7 @@ describe('decision transport background', () => {
       'agent-loop-v1',
       'browser-instance-v1',
       'agent-message-v2',
+      'agent-activity-v1',
     ]);
     const request = await begin(ws, 'Hello');
     expect(ws.last('chat')).toBeUndefined();
@@ -683,4 +684,51 @@ describe('decision transport background', () => {
     await flush();
     expect(sockets).toHaveLength(0);
   });
+});
+
+it('routes ephemeral Agent activity to the active task without persisting tool events', async () => {
+  const ws = await bootConnected();
+  expect(ws.last('hello')!.capabilities).toContain('agent-activity-v1');
+  const request = await begin(ws);
+  const endpointId = `abababababab.${storage.remoteBrowserId}`;
+  const frame = {
+    type: 'agent-activity',
+    endpointId,
+    taskId: request.taskId,
+    sequence: 1,
+    category: 'command',
+    detail: 'python3',
+  };
+  const saved = JSON.stringify(storage.remoteChatLog);
+  vi.mocked(chrome.storage.local.set).mockClear();
+  ws.receive({ ...frame, endpointId: 'other' });
+  ws.receive({ ...frame, taskId: 'other' });
+  ws.receive({ ...frame, detail: 'SECRET arbitrary command' });
+  await flush();
+  expect((await state()).agentActivity).toBeUndefined();
+  ws.receive(frame);
+  await flush();
+  expect((await state()).agentActivity).toMatchObject({
+    category: 'command',
+    detail: 'python3',
+    sequence: 1,
+  });
+  ws.receive({ ...frame, sequence: 2, category: 'read', detail: undefined });
+  ws.receive(frame);
+  await flush();
+  expect((await state()).agentActivity).toMatchObject({ category: 'read', sequence: 2 });
+  expect(chrome.storage.local.set).not.toHaveBeenCalled();
+  expect(JSON.stringify(storage.remoteChatLog)).toBe(saved);
+  await respond(ws, request, { kind: 'done', text: 'Finished' });
+  ws.receive({ ...frame, sequence: 3 });
+  await flush();
+  expect((await state()).agentActivity).toBeUndefined();
+  expect(JSON.stringify(storage.remoteChatLog)).not.toContain('python3');
+  const next = await begin(ws, 'Next');
+  ws.receive({ ...frame, taskId: next.taskId, sequence: 1 });
+  await flush();
+  expect((await state()).agentActivity).toBeDefined();
+  ws.serverClose(1006);
+  await flush();
+  expect((await state()).agentActivity).toBeUndefined();
 });

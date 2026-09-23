@@ -1,6 +1,11 @@
 import { useEffect, useId, useState } from 'react';
 import { summarizeTools, stageLabels } from '../utils/tool-progress';
 import type { TranslationKey } from '../utils/i18n';
+import {
+  AGENT_ACTIVITY_TTL_MS,
+  agentActivityLabels,
+  type AgentActivity,
+} from '../utils/agent-activity';
 import type { ToolRun } from '../utils/remote';
 import { useI18n } from './LanguageProvider';
 
@@ -22,11 +27,13 @@ export function ToolSteps({
   startedAt = run.startedAt,
   className = '',
   label,
+  agentActivity,
 }: {
   run: ToolRun;
   startedAt?: number;
   className?: string;
   label?: TranslationKey;
+  agentActivity?: AgentActivity;
 }) {
   const { t } = useI18n();
   const listId = useId();
@@ -57,19 +64,46 @@ export function ToolSteps({
             ? 'progressWorking'
             : 'progressAwaiting'
           : null);
-  const currentActivity =
-    progress.hasExecution &&
-    (latestSummary || (progress.phaseLabel !== statusLabel ? t(progress.phaseLabel) : ''));
+  const remoteActivity =
+    agentActivity &&
+    agentActivity.category !== 'idle' &&
+    now - agentActivity.receivedAt < AGENT_ACTIVITY_TTL_MS
+      ? agentActivity
+      : undefined;
+  const remoteLabel =
+    remoteActivity &&
+    (remoteActivity.phase === 'returned'
+      ? now - remoteActivity.receivedAt < 2500
+        ? t('agentReturned')
+        : t('agentProcessing')
+      : t(agentActivityLabels[remoteActivity.category]));
+  // Browser actions are the most specific evidence while Chrome is executing.
+  // Between actions show the latest real Agent event, replacing the same line.
+  const title =
+    active && !label
+      ? progress.busy && progress.hasExecution
+        ? t(progress.phaseLabel)
+        : remoteLabel
+          ? `${remoteLabel}${remoteActivity?.detail && (remoteActivity.phase !== 'returned' || now - remoteActivity.receivedAt < 2500) ? ` · ${remoteActivity.detail}` : ''}`
+          : latestSummary ||
+            (progress.hasExecution
+              ? t(progress.phaseLabel)
+              : agentActivity
+                ? t('agentAwaitingResponse')
+                : t('progressAwaiting'))
+      : statusLabel
+        ? t(statusLabel)
+        : '';
   const timing = elapsed((run.endedAt ?? now) - startedAt);
   const heading = (
     <>
       {active && <span className="tool-activity-dot" aria-hidden="true" />}
-      {statusLabel && (
-        <span className="tool-activity-title" title={t(statusLabel)}>
-          {t(statusLabel)}
+      {title && (
+        <span className="tool-activity-title" title={title}>
+          {title}
         </span>
       )}
-      {statusLabel && (
+      {title && (
         <span className="tool-activity-separator" aria-hidden="true">
           ·
         </span>
@@ -119,11 +153,6 @@ export function ToolSteps({
         <div className="tool-activity-toggle" role={active ? 'status' : undefined}>
           {heading}
         </div>
-      )}
-      {active && !open && currentActivity && (
-        <p className="tool-activity-context" title={currentActivity}>
-          {currentActivity}
-        </p>
       )}
       {overview.length > 0 && (
         <div id={listId} hidden={!open} className="tool-activity-body">

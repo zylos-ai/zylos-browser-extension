@@ -42,6 +42,10 @@ export function Conversation({
     turn.delivery !== 'failed' &&
     turn.delivery !== 'unknown' &&
     (!turn.loopStatus || turn.loopStatus === 'active');
+  const agentActivity =
+    awaiting && state.connected && state.agentActivity?.taskId === turn.id
+      ? state.agentActivity
+      : undefined;
   function scrollToLatest() {
     const el = historyRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -117,6 +121,7 @@ export function Conversation({
                 {message.toolRun ? (
                   <ToolSteps
                     run={message.toolRun}
+                    agentActivity={turn && index > chat.indexOf(turn) ? agentActivity : undefined}
                     startedAt={chat.slice(0, index).findLast((entry) => entry.role === 'user')?.ts}
                   />
                 ) : (
@@ -160,6 +165,7 @@ export function Conversation({
         {awaiting && !turnActivity?.length && (
           <ToolSteps
             className="reply-status"
+            agentActivity={agentActivity}
             label={!state.connected ? 'progressDisconnected' : undefined}
             run={{
               status: state.connected ? 'running' : 'interrupted',

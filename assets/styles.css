@@ -705,17 +705,6 @@ html[data-theme='zylos'] > body {
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .tool-activity-context {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    overflow: hidden;
-    overflow-wrap: anywhere;
-    margin-top: 3px;
-    font-size: var(--text-caption);
-    line-height: 20px;
-    color: var(--color-base-content);
-  }
   .tool-activity-time {
     flex-shrink: 0;
     font-variant-numeric: tabular-nums;

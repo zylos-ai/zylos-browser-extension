@@ -21,7 +21,7 @@ key.<accessKey>
   "type": "hello",
   "version": "1.5.0",
   "browserId": "12345678-1234-4567-89ab-123456789abc",
-  "capabilities": ["agent-loop-v1", "browser-instance-v1", "agent-message-v2"]
+  "capabilities": ["agent-loop-v1", "browser-instance-v1", "agent-message-v2", "agent-activity-v1"]
 }
 ```
 
@@ -308,3 +308,34 @@ Escape，再返回 `{type:"agent-stop-result",taskId,ok,code?}`。
 新消息的 text 总长度最多 8,000 字符，最多 8 个附件；context 序列化上限为
 18,000 字符；整个 WebSocket 帧上限仍为 8 MiB。Remote 不维护浏览器工具表，
 浏览器操作规则只在插件中定义。
+
+## Agent 当前活动（可选）
+
+插件在 `hello.capabilities` 声明 `agent-activity-v1` 后，Remote 可通过同一个
+WebSocket 推送当前任务的工具活动，不需要修改 zylos-core 或增加模型调用：
+
+```json
+{
+  "type": "agent-activity",
+  "endpointId": "abc123def456.12345678-1234-4567-89ab-123456789abc",
+  "taskId": "T1",
+  "sequence": 1,
+  "category": "command",
+  "detail": "python3"
+}
+```
+
+`category` 为 `processing / command / read / write / search / web / image /
+delegate / waiting / tool / idle`，`detail` 仅允许已知可执行程序名，不包含参数、
+文件路径、原始输出或模型思考内容。工具返回后可附带 `phase: "returned"`。
+`sequence` 在任务内递增；`idle` 清除当前活动。未知字段不用于展示。
+
+插件仅接受当前连接、当前任务的新序号，结束、停止、断开时清除。
+这一状态只在内存保存，替换进度行，不追加聊天记录或工具日志。
+浏览器正在执行的动作优先显示；超过 30 秒未收到更新时使用原有进度提示。
+旧 Remote 不推送该消息时仍可正常聊天和操作浏览器。
+
+Remote 从 Agent 本机的 Codex CLI / Claude Code 根会话日志读取工具事件。
+它在 C4 消息开头加入任务专属活动标记，用于关联日志，不改变插件的决策协议。
+只有能够明确关联到活动任务的日志才会推送，其他 Channel、子 Agent 和混合任务不推测归属。
+这是尽力提供的活动状态，受运行时日志格式和写入时机影响；不是模型的内部推理流。

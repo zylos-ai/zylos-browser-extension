@@ -519,7 +519,7 @@ test('compact progress shows only a broad overview and collapses neutrally on co
   const body = () => container.querySelector<HTMLElement>('.tool-activity-body')!;
   expect(toggle().getAttribute('aria-expanded')).toBe('false');
   expect(body().hidden).toBe(true);
-  expect(toggle().textContent).toContain('思考执行中');
+  expect(toggle().textContent).toContain('正在操作页面');
   await click('.tool-activity-toggle');
   expect(body().hidden).toBe(false);
   expect(container.querySelector('.message-list .tool-activity')).not.toBeNull();
@@ -622,15 +622,15 @@ test('Agent phase descriptions appear as plain text and tool states remain speci
     },
   ];
   await mount();
-  expect(container.querySelector('.tool-activity-title')?.textContent).toBe('思考执行中');
-  expect(container.querySelector('.tool-activity-context')?.textContent).toContain('补齐下载量');
-  expect(container.querySelector('.tool-activity-context b')).toBeNull();
+  expect(container.querySelector('.tool-activity-title')?.textContent).toBe('正在滚动查看更多内容');
+  expect(container.querySelector('.tool-activity-context')).toBeNull();
   await click('.tool-activity-toggle');
   expect(container.querySelector('.tool-overview')?.textContent).toContain('继续查看后面的应用');
   const run = state.chat[1]!.toolRun!;
   run.steps[0]!.status = 'success';
   await act(async () => listener({ type: 'remote-updated', state }));
-  expect(container.querySelector('.tool-activity-title')?.textContent).toBe('思考执行中');
+  expect(container.querySelector('.tool-activity-title')?.textContent).toContain('补齐下载量');
+  expect(container.querySelector('.tool-activity-title b')).toBeNull();
   run.status = 'completed';
   run.endedAt = Date.now();
   await act(async () => listener({ type: 'remote-updated', state }));
@@ -825,12 +825,10 @@ test('a new turn waits until a tool starts, then keeps working between tool resp
   expect(container.querySelector('.tool-activity-context')).toBeNull();
   run.steps[0]!.status = 'running';
   await act(async () => listener({ type: 'remote-updated', state }));
-  expect(title()).toBe('思考执行中');
-  expect(container.querySelector('.tool-activity-context')?.textContent).toBe('正在读取页面');
+  expect(title()).toBe('正在读取页面');
   run.steps[0]!.status = 'success';
   await act(async () => listener({ type: 'remote-updated', state }));
-  expect(title()).toBe('思考执行中');
-  expect(container.querySelector('.tool-activity-context')?.textContent).toBe('正在分析页面内容');
+  expect(title()).toBe('正在分析页面内容');
 });
 
 test('reply delays keep the current task locked while still accepting its eventual answer', async () => {
@@ -869,17 +867,17 @@ test('reply delays keep the current task locked while still accepting its eventu
   });
   expect(container.querySelector('.reply-status')).toBeNull();
   expect(container.querySelectorAll('.tool-activity')).toHaveLength(1);
-  expect(container.querySelector('.tool-activity-title')?.textContent).toBe('思考执行中');
+  expect(container.querySelector('.tool-activity-title')?.textContent).toBe('正在读取页面');
   expect(container.querySelector('.tool-activity-time')?.textContent).toBe('3:51');
   const step = state.chat[1]!.toolRun!.steps[0]!;
   step.status = 'success';
   step.endedAt = Date.now();
   await act(async () => listener({ type: 'remote-updated', state }));
-  expect(container.querySelector('.tool-activity-context')?.textContent).toBe('正在分析页面内容');
+  expect(container.querySelector('.tool-activity-title')?.textContent).toBe('正在分析页面内容');
   await act(async () => {
     await vi.advanceTimersByTimeAsync(120_001);
   });
-  expect(container.querySelector('.tool-activity-context')?.textContent).toBe('正在分析页面内容');
+  expect(container.querySelector('.tool-activity-title')?.textContent).toBe('正在分析页面内容');
   expect(container.querySelector('.reply-status')).toBeNull();
   expect(input().disabled).toBe(false);
   await fill('#message', 'Continue');
@@ -1231,4 +1229,106 @@ test('preview follows this window active tab without losing manual dismissal or 
   await activate(5);
   expect(container.querySelector('.live-preview')?.getAttribute('data-tab-id')).toBe('4');
   expect(previewPost).toHaveBeenLastCalledWith({ type: 'visibility', visible: true });
+});
+
+test('live Agent activity replaces the same line, expires, and yields to local browser actions', async () => {
+  vi.useFakeTimers();
+  state.loopActive = true;
+  state.chat = [{ id: 'task', role: 'user', text: 'Research', ts: Date.now(), delivery: 'queued' }];
+  await mount();
+  const title = () => container.querySelector('.tool-activity-title')?.textContent;
+  const update = () => act(async () => listener({ type: 'remote-updated', state }));
+  state.agentActivity = {
+    endpointId: 'endpoint',
+    taskId: 'task',
+    sequence: 1,
+    category: 'command',
+    detail: 'python3',
+    receivedAt: Date.now(),
+  };
+  await update();
+  expect(title()).toBe('执行命令 · python3');
+  state.agentActivity = {
+    ...state.agentActivity,
+    sequence: 2,
+    category: 'read',
+    detail: undefined,
+  };
+  await update();
+  expect(title()).toBe('读取文件');
+  expect(container.querySelectorAll('.tool-activity')).toHaveLength(1);
+  expect(container.querySelector('.tool-activity-context')).toBeNull();
+  expect(container.textContent).not.toContain('python3');
+  state.chat.push({
+    role: 'system',
+    text: '',
+    ts: Date.now(),
+    toolRun: {
+      status: 'running',
+      startedAt: Date.now(),
+      total: 1,
+      failed: 0,
+      steps: [
+        { id: 'scroll', number: 1, method: 'scroll', status: 'running', queuedAt: Date.now() },
+      ],
+    },
+  });
+  await update();
+  expect(title()).toBe('正在滚动查看更多内容');
+  state.chat[1]!.toolRun!.steps[0]!.status = 'success';
+  await update();
+  expect(title()).toBe('读取文件');
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(31_000);
+  });
+  expect(title()).toBe('正在分析滚动后的页面');
+  state.agentActivity = { ...state.agentActivity, taskId: 'different', receivedAt: Date.now() };
+  await update();
+  expect(title()).toBe('正在分析滚动后的页面');
+  state.chat[1]!.toolRun!.status = 'completed';
+  state.chat[1]!.toolRun!.endedAt = Date.now();
+  state.chat.push({ role: 'assistant', text: 'Done', ts: Date.now(), final: true });
+  await update();
+  expect(title()).toBeUndefined();
+  expect(container.querySelector('.tool-activity-time')?.textContent).toBe('用时 0:31');
+});
+
+test('a quiet Agent after a real activity never returns to Connecting, including a cleared or stale status', async () => {
+  vi.useFakeTimers();
+  const now = Date.now();
+  state.loopActive = true;
+  state.chat = [{ id: 'task', role: 'user', text: 'Hello', ts: now, delivery: 'queued' }];
+  await mount();
+  const title = () => container.querySelector('.tool-activity-title')?.textContent;
+  expect(title()).toBe('接通中');
+  state.agentActivity = {
+    endpointId: 'endpoint',
+    taskId: 'task',
+    sequence: 1,
+    category: 'read',
+    receivedAt: now,
+  };
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(title()).toBe('读取文件');
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(31_000);
+  });
+  expect(title()).toBe('等待 Agent 回复');
+  state.agentActivity = {
+    ...state.agentActivity,
+    category: 'idle',
+    sequence: 2,
+    receivedAt: Date.now(),
+  };
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(title()).toBe('等待 Agent 回复');
+  state.chat.push({
+    id: 'other-task',
+    role: 'user',
+    text: 'Another question',
+    ts: Date.now(),
+    delivery: 'queued',
+  });
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(title()).toBe('接通中');
 });

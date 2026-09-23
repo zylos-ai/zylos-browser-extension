@@ -212,6 +212,7 @@ try {
     monitor: true,
     monitorFile: path.join(profile, 'monitor.json'),
     agentMonitorDir: null,
+    activityOptions: { discover: async () => [] },
     onStop: async (event) => {
       stopMessages.push(event);
       await sleep(300);
@@ -1620,6 +1621,87 @@ try {
       await finishLoop(next, 'Fixture read complete');
     },
   );
+  await check('live Agent activity replaces one line through the actual WebSocket', async () => {
+    await workerEval("chrome.storage.local.set({uiLanguage:'zh-CN'})");
+    await cdp(
+      'Emulation.setDeviceMetricsOverride',
+      { width: 360, height: 760, deviceScaleFactor: 1, mobile: false },
+      sessionId,
+    );
+    const request = await askLoop('Activity fixture: read and analyze without browser control');
+    assert.ok(request.activityId);
+    const { ActivitySession } = require(path.join(relayRoot, 'src/lib/agent-activity.js'));
+    const log = new ActivitySession(relay.activity, 'isolated-agent-fixture', 0, 'codex');
+    const emit = (payload) =>
+      log.event({ timestamp: new Date().toISOString(), type: 'response_item', payload });
+    emit({
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: `[Browser] [Activity ${request.activityId}]` }],
+    });
+    emit({
+      type: 'function_call',
+      call_id: 'python',
+      name: 'exec_command',
+      arguments: JSON.stringify({ cmd: 'python3 /private/report.py --key=NEVER_VISIBLE' }),
+    });
+    relay.activity.flush();
+    await eventually(() =>
+      previewPanel(
+        "document.querySelector('.tool-activity-title')?.textContent === '执行命令 · python3'",
+      ),
+    );
+    assert.equal(await previewPanel("document.querySelectorAll('.tool-activity').length"), 1);
+    assert.equal(await previewPanel('document.documentElement.scrollWidth > innerWidth'), false);
+    assert.equal(
+      await previewPanel(
+        "document.querySelector('.tool-activity').getBoundingClientRect().height <= 32",
+      ),
+      true,
+    );
+    assert.doesNotMatch(await previewPanel('document.body.textContent'), /NEVER_VISIBLE|report.py/);
+    if (process.env.E2E_SCREENSHOT_DIR) {
+      await fs.mkdir(process.env.E2E_SCREENSHOT_DIR, { recursive: true });
+      const { data } = await cdp('Page.captureScreenshot', { format: 'png' }, sessionId);
+      await fs.writeFile(
+        path.join(process.env.E2E_SCREENSHOT_DIR, 'agent-activity.png'),
+        Buffer.from(data, 'base64'),
+      );
+    }
+    emit({
+      type: 'function_call',
+      call_id: 'read',
+      name: 'Read',
+      arguments: JSON.stringify({ file_path: '/private/result.md' }),
+    });
+    relay.activity.flush();
+    await eventually(() =>
+      previewPanel("document.querySelector('.tool-activity-title')?.textContent === '读取文件'"),
+    );
+    assert.equal(await previewPanel("document.querySelectorAll('.tool-activity').length"), 1);
+    assert.equal(await previewPanel("document.body.textContent.includes('python3')"), false);
+    await workerEval("chrome.storage.local.set({uiLanguage:'en'})");
+    await eventually(() =>
+      previewPanel(
+        "document.querySelector('.tool-activity-title')?.textContent === 'Reading file'",
+      ),
+    );
+    await finishLoop(request, 'Activity fixture finished');
+    await eventually(async () => !(await panelState()).agentActivity);
+    emit({
+      type: 'function_call',
+      call_id: 'late',
+      name: 'Bash',
+      arguments: '{"command":"cat secret"}',
+    });
+    relay.activity.flush();
+    assert.equal((await panelState()).agentActivity, undefined);
+    assert.doesNotMatch(
+      JSON.stringify(await previewPanel("chrome.storage.local.get('remoteChatLog')")),
+      /python3|agent-activity|NEVER_VISIBLE/,
+    );
+    await cdp('Emulation.clearDeviceMetricsOverride', {}, sessionId);
+  });
   await check(
     'compact progress stays quiet at sidebar widths and collapses after completion',
     async () => {
@@ -1712,7 +1794,7 @@ try {
       await update();
       await eventually(() =>
         previewPanel(
-          "document.querySelector('.tool-activity-context')?.textContent === '正在操作页面'",
+          "document.querySelector('.tool-activity-title')?.textContent === '正在操作页面'",
         ),
       );
       const compact = await previewPanel(`(() => {
@@ -1725,7 +1807,7 @@ try {
       assert.equal(compact.border, '0px');
       assert.equal(compact.count, 1);
       assert.equal(compact.overflow, false);
-      assert.match(compact.text, /思考执行中/);
+      assert.match(compact.text, /正在操作页面/);
       assert.doesNotMatch(compact.text, /ELEMENT_ERROR|失败|成功|snapshot|工具调用/);
       await screenshot('progress-running');
       state.chat[1].toolRun.steps[3].status = 'success';
@@ -1753,12 +1835,12 @@ try {
       await update();
       await eventually(() =>
         previewPanel(
-          "document.querySelector('.tool-activity-title')?.textContent === '思考执行中'",
+          "document.querySelector('.tool-activity-title')?.textContent === '正在滚动查看更多内容'",
         ),
       );
       assert.equal(
-        await previewPanel("document.querySelector('.tool-activity-context')?.textContent"),
-        '继续查看后面的应用，补齐下载量数据。',
+        await previewPanel("document.querySelector('.tool-activity-title')?.textContent"),
+        '正在滚动查看更多内容',
       );
       await screenshot('progress-phase');
 
