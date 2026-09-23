@@ -38,6 +38,10 @@ function domAction(action, option) {
       text: (this.innerText || this.textContent || '').slice(0, 4000),
       ariaLabel: this.getAttribute('aria-label')?.slice(0, 512),
       title: this.getAttribute('title')?.slice(0, 512),
+      href:
+        /^(A|AREA)$/.test(this.tagName) && typeof this.href === 'string' && this.href.length <= 4000
+          ? this.href
+          : undefined,
       value: sensitive
         ? '[redacted]'
         : 'value' in this
@@ -107,6 +111,15 @@ function domAction(action, option) {
   };
   if (action === 'inspect') return state();
   if (!this.isConnected) throw new Error('Element is detached');
+  if (action === 'scroll-state')
+    return {
+      x: this.scrollLeft,
+      y: this.scrollTop,
+      width: this.scrollWidth,
+      height: this.scrollHeight,
+      clientWidth: this.clientWidth,
+      clientHeight: this.clientHeight,
+    };
   if (action === 'validate') return null;
   if (action === 'hit') return hit(option.x, option.y);
   if (action === 'frame-geometry') {
@@ -119,7 +132,35 @@ function domAction(action, option) {
     }
     const sx = r.width / this.offsetWidth,
       sy = r.height / this.offsetHeight;
-    return { x: r.x + this.clientLeft * sx, y: r.y + this.clientTop * sy, sx, sy };
+    let left = r.left,
+      top = r.top,
+      right = r.right,
+      bottom = r.bottom;
+    for (let p = this; p; p = p.parentElement || p.getRootNode().host) {
+      const s = view.getComputedStyle(p),
+        b = p.getBoundingClientRect();
+      if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') right = left;
+      if (p !== this && /hidden|clip|auto|scroll/.test(s.overflowX)) {
+        left = Math.max(left, b.left);
+        right = Math.min(right, b.right);
+      }
+      if (p !== this && /hidden|clip|auto|scroll/.test(s.overflowY)) {
+        top = Math.max(top, b.top);
+        bottom = Math.min(bottom, b.bottom);
+      }
+    }
+    return {
+      x: r.x + this.clientLeft * sx,
+      y: r.y + this.clientTop * sy,
+      sx,
+      sy,
+      clip: {
+        x: left,
+        y: top,
+        width: Math.max(0, right - left),
+        height: Math.max(0, bottom - top),
+      },
+    };
   }
   if (action === 'point') {
     if (option === true || option?.scroll)

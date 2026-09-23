@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { test, vi } from 'vitest';
 import assert from 'node:assert/strict';
+import { observationCdp } from '../fixtures/observation-cdp.mjs';
 
 async function fixture() {
   const event = () => {
@@ -97,6 +98,8 @@ async function fixture() {
       onEvent: event(),
       sendCommand: async (target, method, params) => {
         calls.push({ tabId: target.tabId, method, params });
+        const observation = observationCdp(method, params);
+        if (observation) return observation;
         if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main' } } };
         if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 };
         if (method === 'Accessibility.getFullAXTree') return { nodes: [] };

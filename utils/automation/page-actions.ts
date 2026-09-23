@@ -3,6 +3,16 @@ import type { Point } from './types';
 import { collectFrames, frameAllowed, type Frame, type Send } from './frames';
 import domAction from './injected/dom-action.js?raw';
 import pageQuery from './injected/page-query.js?raw';
+import pageReadiness from './injected/page-readiness.js?raw';
+import type { PageProbe } from './page-stability';
+import {
+  hasArea,
+  intersect,
+  visibleLayout,
+  viewportStyles,
+  type LayoutSnapshot,
+  type Rect,
+} from './viewport';
 
 export type ElementRef = { backendNodeId: number; generation: number; frame: Frame };
 export type Target = { ref?: string; x?: number; y?: number };
@@ -164,7 +174,94 @@ export class PageActions {
     }
     return { matches, truncated: false };
   }
-  async snapshot(interactiveOnly: boolean, header: string[]) {
+  private async frameViewport(
+    frame: Frame,
+    frames: Frame[],
+    cache: Map<string, Rect>,
+  ): Promise<Rect> {
+    const cached = cache.get(frame.id);
+    if (cached) return cached;
+    let viewport: Rect = await this.query(frame, 'viewport');
+    if (frame.parentId) {
+      const parent = frames.find((f) => f.id === frame.parentId);
+      if (!parent) fail('FRAME_UNAVAILABLE');
+      const parentViewport = await this.frameViewport(parent, frames, cache);
+      const owner = await this.io.send(
+        'DOM.getFrameOwner',
+        { frameId: frame.id },
+        parent.sessionId,
+      );
+      const resolved = await this.io.send(
+        'DOM.resolveNode',
+        { backendNodeId: owner.backendNodeId, objectGroup: 'coco-browser' },
+        parent.sessionId,
+      );
+      const geometry = await this.call(
+        { objectId: resolved.object.objectId, frame: parent },
+        'frame-geometry',
+      );
+      if (!(geometry.sx > 0 && geometry.sy > 0)) return { x: 0, y: 0, width: 0, height: 0 };
+      const clip = intersect(parentViewport, geometry.clip);
+      viewport = intersect(viewport, {
+        x: (clip.x - geometry.x) / geometry.sx,
+        y: (clip.y - geometry.y) / geometry.sy,
+        width: clip.width / geometry.sx,
+        height: clip.height / geometry.sy,
+      });
+    }
+    cache.set(frame.id, viewport);
+    return viewport;
+  }
+  async readiness(target: Target = {}): Promise<PageProbe> {
+    const frames = await this.safeFrames();
+    const cache = new Map<string, Rect>();
+    const samples: {
+      frame: string;
+      signature: string;
+      busy: boolean;
+      limited: boolean;
+      scroll: PageProbe['scroll'];
+    }[] = [];
+    for (const frame of frames.slice(0, 12)) {
+      const viewport = await this.frameViewport(frame, frames, cache);
+      if (!hasArea(viewport)) continue;
+      const world = await this.io.send(
+        'Page.createIsolatedWorld',
+        { frameId: frame.id, worldName: 'coco-actions' },
+        frame.sessionId,
+      );
+      const response = await this.io.send(
+        'Runtime.callFunctionOn',
+        {
+          executionContextId: world.executionContextId,
+          functionDeclaration: pageReadiness,
+          arguments: [
+            { value: viewport },
+            { value: frame.parentId ? {} : { x: target.x, y: target.y } },
+          ],
+          returnByValue: true,
+        },
+        frame.sessionId,
+      );
+      if (response.exceptionDetails || !response.result?.value?.signature)
+        fail('OBSERVATION_UNAVAILABLE');
+      samples.push({ frame: frame.id, ...response.result.value });
+    }
+    let scroll = samples[0]?.scroll;
+    if (target.ref) {
+      // Keep the exact container being scrolled; do not confuse its bottom with the document's.
+      scroll = await this.call(await this.resolve(target.ref), 'scroll-state');
+    }
+    return {
+      signature: JSON.stringify([samples.map((s) => [s.frame, s.signature]), scroll]),
+      busy: samples.some((s) => s.busy),
+      limited: frames.length > 12 || !samples.length || samples.some((s) => s.limited),
+      frames: samples.map((s) => s.frame),
+      scroll,
+      atBoundary: !!scroll && scroll.y + scroll.clientHeight >= scroll.height - 2,
+    };
+  }
+  async snapshot(interactiveOnly: boolean, header: string[], viewportOnly = false) {
     this.io.refs.clear();
     const frames = await this.safeFrames();
     const lines = [...header],
@@ -187,8 +284,36 @@ export class PageActions {
       'option',
     ]);
     let count = 0;
+    let chars = lines.join('\n').length;
+    const layouts = new Map<string | undefined, LayoutSnapshot>();
+    const viewports = new Map<string, Rect>();
+    const result = (truncated = false) => ({
+      text: lines.join('\n'),
+      warnings,
+      scope: viewportOnly ? 'viewport' : 'document',
+      truncated,
+      nodeCount: count,
+    });
     for (const frame of frames) {
       try {
+        let visible: ReturnType<typeof visibleLayout> | undefined;
+        if (viewportOnly) {
+          const viewport = await this.frameViewport(frame, frames, viewports);
+          if (!hasArea(viewport)) continue;
+          let layout = layouts.get(frame.sessionId);
+          if (!layout) {
+            layout = (await this.io.send(
+              'DOMSnapshot.captureSnapshot',
+              { computedStyles: viewportStyles },
+              frame.sessionId,
+            )) as LayoutSnapshot;
+            layouts.set(frame.sessionId, layout);
+          }
+          const document = layout.documents.find((d) => layout!.strings[d.frameId] === frame.id);
+          if (!document)
+            fail('OBSERVATION_UNAVAILABLE', 'Frame layout changed; take a fresh observation');
+          visible = visibleLayout(document, layout.strings, viewport);
+        }
         await this.io.send(
           'Runtime.releaseObjectGroup',
           { objectGroup: 'coco-browser' },
@@ -232,6 +357,8 @@ export class PageActions {
           if (
             node.ignored ||
             hiddenNodes.has(node.nodeId) ||
+            (visible && !visible.has(node.backendDOMNodeId)) ||
+            role === 'InlineTextBox' ||
             !role ||
             (interactiveOnly && !interactive.has(role)) ||
             (!node.name?.value && !interactive.has(role))
@@ -239,7 +366,7 @@ export class PageActions {
             continue;
           if (++count > 600) {
             lines.push('[truncated: 600 nodes; use find for a specific element]');
-            return { text: lines.join('\n'), warnings };
+            return result(true);
           }
           const ref = `@${serial}-e${count}`;
           if (node.backendDOMNodeId)
@@ -260,8 +387,10 @@ export class PageActions {
                   'required',
                   'focused',
                   'protected',
+                  'url',
                 ].includes(p.name),
               )
+              .filter((p: any) => p.name !== 'url' || String(p.value?.value || '').length <= 4000)
               .map((p: any) => [p.name, p.value?.value]),
           );
           if (node.value) {
@@ -270,9 +399,19 @@ export class PageActions {
               : String(node.value.value).slice(0, 1000);
           }
           const state = Object.keys(props).length ? ` ${JSON.stringify(props)}` : '';
-          lines.push(
-            `${node.backendDOMNodeId ? ref : '-'} ${role} ${JSON.stringify(String(node.name?.value || '').slice(0, 400))}${state}`,
-          );
+          const name =
+            (role === 'StaticText' ? visible?.get(node.backendDOMNodeId)?.text : undefined) ??
+            node.name?.value ??
+            '';
+          const line = `${node.backendDOMNodeId ? ref : '-'} ${role} ${JSON.stringify(String(name).slice(0, 400))}${state}`;
+          if (viewportOnly && chars + line.length + 1 > 11500) {
+            lines.push(
+              '[truncated: visible text budget; use targeted find/inspect for this viewport]',
+            );
+            return result(true);
+          }
+          lines.push(line);
+          chars += line.length + 1;
         }
       } catch (error) {
         this.io.check();
@@ -280,7 +419,7 @@ export class PageActions {
         warnings.push(`Frame ${frame.id} changed during snapshot`);
       }
     }
-    return { text: lines.join('\n'), warnings };
+    return result();
   }
   private async topPoint(frame: Frame, local: Point, frames: Frame[]): Promise<Point> {
     if (!frame.parentId) return local;

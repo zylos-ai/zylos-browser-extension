@@ -19,9 +19,12 @@ export const actionParams = {
   tabs: z.object({}).strict(),
   frames: z.object({}).strict(),
   snapshot: z
-    .object({ interactive: z.boolean().default(false), viewport: z.boolean().optional() })
+    .object({ interactive: z.boolean().default(false), viewport: z.boolean().default(true) })
     .strict(),
   observe: z.object({ interactive: z.boolean().default(false) }).strict(),
+  'wait-for-page': z
+    .object({ timeoutMs: z.number().int().min(1000).max(8000).default(5000), ...target })
+    .strict(),
   screenshot: z.object({}).strict(),
   click: z.object({ ...target, modifiers }).strict(),
   hover: z.object(target).strict(),
@@ -131,6 +134,7 @@ export const commandSchema = z
     actionParams.frames.extend({ op: z.literal('frames') }),
     actionParams.snapshot.extend({ op: z.literal('snapshot') }),
     actionParams.observe.extend({ op: z.literal('observe') }),
+    actionParams['wait-for-page'].extend({ op: z.literal('wait-for-page') }),
     actionParams.screenshot.extend({ op: z.literal('screenshot') }),
     actionParams.click.extend({ op: z.literal('click') }),
     actionParams.hover.extend({ op: z.literal('hover') }),
@@ -163,8 +167,15 @@ export const commandSchema = z
       if (hasPoint && (p.x === undefined || p.y === undefined)) issue('Both x and y are required');
       if (!optional && !hasRef && !hasPoint) issue('A ref or x/y point is required');
     };
-    if (['click', 'hover', 'double-click', 'right-click', 'scroll'].includes(command.op))
-      validateTarget(command as { ref?: string; x?: number; y?: number }, command.op === 'scroll');
+    if (
+      ['click', 'hover', 'double-click', 'right-click', 'scroll', 'wait-for-page'].includes(
+        command.op,
+      )
+    )
+      validateTarget(
+        command as { ref?: string; x?: number; y?: number },
+        ['scroll', 'wait-for-page'].includes(command.op),
+      );
     if (command.op === 'drag') {
       validateTarget(command.from);
       validateTarget(command.to);

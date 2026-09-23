@@ -30,6 +30,7 @@ const IDEMPOTENT_METHODS = new Set<BrowserMethod>([
 // Refused outright while the task tab sits on a blocklisted page. Leaving the
 // page (open / new-tab / switch-tab) stays available. The owner can always stop.
 const GUARDED_METHODS = new Set<BrowserMethod>([
+  'wait-for-page',
   'snapshot',
   'observe',
   'find',

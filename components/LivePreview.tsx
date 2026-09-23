@@ -25,7 +25,44 @@ export function LivePreview({
   const [preview, setPreview] = useState<PreviewState | null | undefined>();
   const [frame, setFrame] = useState<PreviewFrame | null>(null);
   const [dismissedSession, setDismissedSession] = useState<string | null>(null);
+  const [activeTabId, setActiveTabId] = useState<number | null>(null);
   const portRef = useRef<chrome.runtime.Port | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    let revision = 0;
+    let windowId: number | undefined;
+    const refresh = async () => {
+      const version = ++revision;
+      try {
+        const win = await chrome.windows.getCurrent();
+        if (disposed || version !== revision) return;
+        windowId = win.id;
+        const [tab] = await chrome.tabs.query({ active: true, windowId });
+        if (!disposed && version === revision) setActiveTabId(tab?.id ?? null);
+      } catch {
+        // Wait for the next activation/visibility event if the window is closing.
+      }
+    };
+    const activated = (info: chrome.tabs.OnActivatedInfo) => {
+      if (windowId === undefined) void refresh();
+      else if (info.windowId === windowId) {
+        revision++;
+        setActiveTabId(info.tabId);
+      }
+    };
+    const visibility = () => {
+      if (document.visibilityState !== 'hidden') void refresh();
+    };
+    chrome.tabs.onActivated.addListener(activated);
+    document.addEventListener('visibilitychange', visibility);
+    void refresh();
+    return () => {
+      disposed = true;
+      chrome.tabs.onActivated.removeListener(activated);
+      document.removeEventListener('visibilitychange', visibility);
+    };
+  }, []);
 
   // Keep View/Stop usable even when the preview service is starting or unavailable.
   const state =
@@ -43,7 +80,11 @@ export function LivePreview({
           canStop: true,
         } as const)
       : null);
-  const hidden = !!state && state.sessionId === dismissedSession;
+  // Resolve this panel's active tab before showing a thumbnail; keep the metadata
+  // subscription alive so task/tab changes can make it visible again.
+  const viewingTarget = activeTabId === null || state?.tabId === activeTabId;
+  const dismissed = !!state && state.sessionId === dismissedSession;
+  const hidden = !state || viewingTarget || dismissed;
   const hiddenRef = useRef(hidden);
   hiddenRef.current = hidden;
 
@@ -127,8 +168,8 @@ export function LivePreview({
     return () => cancelAnimationFrame(id);
   }, [frame]);
 
-  if (!state) return null;
-  if (hidden)
+  if (!state || viewingTarget) return null;
+  if (dismissed)
     return (
       <div className="live-preview-collapsed" aria-label={t('previewLabel')}>
         <button

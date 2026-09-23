@@ -2,6 +2,7 @@
 // Deterministic lifecycle races against a fake Chrome API, no personal browser access.
 import { test, vi } from 'vitest';
 import assert from 'node:assert/strict';
+import { observationCdp } from '../fixtures/observation-cdp.mjs';
 const deferred = () => {
   let resolve;
   const promise = new Promise((r) => {
@@ -195,8 +196,10 @@ test('stop during debugger attachment cannot resurrect window consent', async ()
 async function observationSetup() {
   const s = await setup();
   const methods = [];
-  chrome.debugger.sendCommand = async (_target, method) => {
+  chrome.debugger.sendCommand = async (_target, method, params) => {
     methods.push(method);
+    const observation = observationCdp(method, params);
+    if (observation) return observation;
     if (method === 'Accessibility.getFullAXTree')
       return {
         nodes: [{ role: { value: 'button' }, name: { value: 'Save failed' }, backendDOMNodeId: 1 }],
@@ -370,6 +373,8 @@ test('stop during native cursor movement prevents the pending click', async () =
     proceed = deferred();
   const writes = [];
   chrome.debugger.sendCommand = async (_target, method, params) => {
+    const observation = observationCdp(method, params);
+    if (observation) return observation;
     if (method === 'Accessibility.getFullAXTree')
       return {
         nodes: [{ role: { value: 'button' }, name: { value: 'Save' }, backendDOMNodeId: 1 }],

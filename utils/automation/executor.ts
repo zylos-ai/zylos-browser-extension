@@ -1,4 +1,5 @@
-import { PageActions, type ElementRef } from './page-actions';
+import { PageActions, type ElementRef, type Target } from './page-actions';
+import { NetworkActivity, waitForStablePage } from './page-stability';
 import { frameEvent, frameSessions, enableFrames, clearFrameSessions } from './frames';
 import { isBlockedUrl } from '../guard';
 import { cursorExpression } from './cursor';
@@ -8,6 +9,7 @@ import type { Command } from '../commands';
 import type { CdpResults, Cursor, GrantedTab, Point, Scope } from './types';
 import { canReadPage, assertPageDocument } from '../page-reader';
 import { screenshotAttachment } from '../attachments';
+import { translate, workerLocale } from '../i18n';
 
 export const SCREENSHOT_TIMEOUT_MS = 12_000;
 
@@ -21,6 +23,8 @@ let attachmentQueue: Promise<unknown> = Promise.resolve();
 let consentRevision = 0;
 let operationRevision = 0;
 const refs = new Map<string, ElementRef>();
+const networkActivity = new NetworkActivity();
+let pendingScroll: Target | undefined;
 let dialog: {
   tabId: number;
   sessionId?: string;
@@ -53,6 +57,7 @@ export const onState = (fn: typeof changed) => {
 function invalidate() {
   generation++;
   refs.clear();
+  pendingScroll = undefined;
   pointerMotion.reset();
 }
 function allowed(url?: string) {
@@ -184,6 +189,7 @@ export async function useExistingTab(
   }
 }
 async function detachCurrent(strict = false) {
+  networkActivity.clear();
   const old = grant;
   clearFrameSessions();
   dialog = null;
@@ -321,7 +327,7 @@ export async function createTask(initial: {
     if (control !== session) fail('STOPPED');
     await chrome.action.setBadgeBackgroundColor({ color: '#326C53' });
     if (control !== session) fail('STOPPED');
-    await chrome.action.setBadgeText({ text: 'ON' });
+    await chrome.action.setBadgeText({ text: translate(workerLocale(), 'browserBadge') });
     await syncTarget();
     if (control !== session) fail('STOPPED');
   } catch (error) {
@@ -408,6 +414,7 @@ export function initializeExecutor() {
   chrome.debugger.onEvent.addListener((source, method, params) => {
     if (source.tabId !== grant?.id) return;
     const childSource = source as { tabId: number; sessionId?: string };
+    networkActivity.event(childSource.sessionId || '', method, params);
     frameEvent(childSource, method, params);
     if (method === 'Input.dragIntercepted') dragData = (params as { data: unknown }).data;
     if (method === 'Page.javascriptDialogOpening') {
@@ -883,7 +890,7 @@ export async function execute(command: Command, deadline: number) {
   await syncTarget();
   checkSession();
   if (!grant) fail('NO_CONTROLLABLE_TAB', '当前页不可操作；可用 open 打开普通网站，无需再次授权');
-  await chrome.action.setBadgeText({ text: 'ON' });
+  await chrome.action.setBadgeText({ text: translate(workerLocale(), 'browserBadge') });
   await markTask(session, 'ready');
   checkSession();
   const lease = grant;
@@ -1021,13 +1028,49 @@ export async function execute(command: Command, deadline: number) {
     generation: startGeneration,
     dragData: () => dragData,
   });
-  async function snapshot(interactiveOnly: boolean) {
-    return actions.snapshot(interactiveOnly, [
-      `URL: ${lease.url}`,
-      `Title: ${lease.title}`,
-      `Tab: ${lease.id}`,
-      'Scope: selected Agent work tab and its permitted frames. Coordinates use the top viewport in CSS pixels.',
-    ]);
+  let readiness:
+    Awaited<ReturnType<typeof waitForStablePage>> | { status: string; note: string } | undefined;
+  if (['snapshot', 'observe', 'find', 'inspect', 'wait-for-page'].includes(command.op)) {
+    const target =
+      command.op === 'wait-for-page' && (command.ref || command.x !== undefined)
+        ? command
+        : pendingScroll;
+    try {
+      readiness = await waitForStablePage({
+        probe: () => actions.readiness(target),
+        network: (frames) => networkActivity.sample(frames),
+        check,
+        timeoutMs: command.op === 'wait-for-page' ? command.timeoutMs : 4000,
+        minWaitMs: command.op === 'wait-for-page' ? 1000 : 350,
+        boundaryGrace: !!pendingScroll,
+      });
+    } catch (error) {
+      check();
+      const code = (error as { code?: string }).code;
+      if (
+        ['STOPPED', 'PAGE_CHANGED', 'COMMAND_EXPIRED', 'BLOCKED_URL', 'SENSITIVE_INPUT'].includes(
+          code || '',
+        )
+      )
+        throw error;
+      readiness = {
+        status: 'unavailable',
+        note: 'Could not establish content stability; inspect the returned evidence or use wait-for-page. No input was replayed.',
+      };
+    }
+    pendingScroll = undefined;
+  }
+  async function snapshot(interactiveOnly: boolean, viewportOnly = true) {
+    return actions.snapshot(
+      interactiveOnly,
+      [
+        `URL: ${lease.url}`,
+        `Title: ${lease.title}`,
+        `Tab: ${lease.id}`,
+        'Scope: selected Agent work tab and its permitted frames. Coordinates use the top viewport in CSS pixels.',
+      ],
+      viewportOnly,
+    );
   }
   async function screenshot() {
     screenshotDeadline = Date.now() + SCREENSHOT_TIMEOUT_MS;
@@ -1044,19 +1087,23 @@ export async function execute(command: Command, deadline: number) {
         fail('SCREENSHOT_TOO_LARGE', '截图过大，请缩小浏览器窗口后重新观察');
       // Also validate the active target after capture; never return a different tab's pixels.
       screenshotStage = 'Page.getLayoutMetrics';
-      await cdp('Page.getLayoutMetrics');
-      return result;
+      const layout = await cdp('Page.getLayoutMetrics');
+      return { ...result, layout };
     } finally {
       if (cursor && control === session && grant === lease)
         await showCursor('restore').catch(() => {});
     }
   }
-  if (command.op === 'snapshot') {
-    const result = await snapshot(command.interactive);
-    if (!command.viewport) return result;
+  if (command.op === 'snapshot' || command.op === 'wait-for-page') {
+    const result = await snapshot(
+      command.op === 'snapshot' ? command.interactive : false,
+      command.op === 'snapshot' ? command.viewport : true,
+    );
+    if (command.op === 'snapshot' && !command.viewport) return { ...result, readiness };
     const { cssLayoutViewport: v, cssContentSize: content } = await cdp('Page.getLayoutMetrics');
     return {
       ...result,
+      readiness,
       tabId: lease.id,
       url: lease.url,
       title: lease.title,
@@ -1106,8 +1153,8 @@ export async function execute(command: Command, deadline: number) {
     if (viewport.readyState === 'loading') fail('PAGE_LOADING');
     const startedAt = new Date().toISOString();
     try {
-      const { text } = await snapshot(command.interactive);
-      const { data } = await boundedCdp(screenshot, check);
+      const page = await snapshot(command.interactive);
+      const { data, layout } = await boundedCdp(screenshot, check);
       const fresh = await chrome.tabs.get(lease.id);
       check();
       if (fresh.status === 'loading' || fresh.pendingUrl) fail('PAGE_LOADING');
@@ -1119,8 +1166,20 @@ export async function execute(command: Command, deadline: number) {
         pageVersion: `${session.sessionId}:${startGeneration}`,
         startedAt,
         capturedAt: new Date().toISOString(),
-        viewport,
-        text,
+        viewport: {
+          ...viewport,
+          scrollX: layout.cssLayoutViewport.pageX,
+          scrollY: layout.cssLayoutViewport.pageY,
+          contentHeight: layout.cssContentSize.height,
+          remainingBelow: Math.max(
+            0,
+            layout.cssContentSize.height -
+              layout.cssLayoutViewport.pageY -
+              layout.cssLayoutViewport.clientHeight,
+          ),
+        },
+        ...page,
+        readiness,
         screenshot: screenshotAttachment(data),
       };
     } catch (error) {
@@ -1132,7 +1191,10 @@ export async function execute(command: Command, deadline: number) {
   dragData = null;
 
   try {
-    return await actions.run(command);
+    const result = await actions.run(command);
+    if (command.op === 'scroll') pendingScroll = { ref: command.ref, x: command.x, y: command.y };
+    else if (!['find', 'inspect', 'frames'].includes(command.op)) pendingScroll = undefined;
+    return readiness ? { ...result, readiness } : result;
   } catch (error) {
     // Click/Enter may navigate before CDP's post-dispatch check runs.
     // Report acknowledged input, without replaying it on the new page.

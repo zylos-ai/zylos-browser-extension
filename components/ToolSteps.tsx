@@ -1,195 +1,145 @@
 import { useEffect, useId, useState } from 'react';
-import { LONG_WAIT_MS, stageLabels, summarizeTools } from '../utils/tool-progress';
+import { summarizeTools, stageLabels } from '../utils/tool-progress';
 import type { TranslationKey } from '../utils/i18n';
-import type { ToolRun, ToolStep } from '../utils/remote';
-import type { BrowserMethod } from '../utils/tool-catalog';
+import type { ToolRun } from '../utils/remote';
 import { useI18n } from './LanguageProvider';
 
-const labels = {
-  'use-current-tab': 'toolUseCurrentTab',
-  open: 'toolOpen',
-  'new-tab': 'toolNewTab',
-  'switch-tab': 'toolSwitchTab',
-  tabs: 'toolTabs',
-  frames: 'toolFrames',
-  snapshot: 'toolSnapshot',
-  'read-page': 'toolSnapshot',
-  observe: 'toolObserve',
-  find: 'toolFind',
-  inspect: 'toolInspect',
-  click: 'toolClick',
-  hover: 'toolHover',
-  'double-click': 'toolDoubleClick',
-  'right-click': 'toolRightClick',
-  drag: 'toolDrag',
-  fill: 'toolFill',
-  type: 'toolType',
-  select: 'toolSelect',
-  check: 'toolCheck',
-  scroll: 'toolScroll',
-  keypress: 'toolKeypress',
-  back: 'toolBack',
-  forward: 'toolForward',
-  reload: 'toolReload',
-  dialog: 'toolDialog',
-} satisfies Record<BrowserMethod, TranslationKey>;
-const statuses: Record<ToolStep['status'], TranslationKey> = {
-  queued: 'stepQueued',
-  running: 'stepRunning',
-  success: 'stepSuccess',
-  error: 'stepError',
-  cancelled: 'stepCancelled',
-  interrupted: 'stepInterrupted',
-};
-
-function duration(ms: number) {
-  const seconds = Math.max(0, ms) / 1000;
-  return seconds < 60
-    ? `${seconds.toFixed(1)}s`
-    : `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
+function elapsed(ms: number) {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-export function ToolSteps({ run }: { run: ToolRun }) {
+function hostname(target: string) {
+  try {
+    return new URL(target).hostname;
+  } catch {
+    return '';
+  }
+}
+
+export function ToolSteps({
+  run,
+  startedAt = run.startedAt,
+  className = '',
+  label,
+}: {
+  run: ToolRun;
+  startedAt?: number;
+  className?: string;
+  label?: TranslationKey;
+}) {
   const { t } = useI18n();
   const listId = useId();
   const [toggle, setToggle] = useState<{ phase: ToolRun['status']; open: boolean }>();
   const open = toggle?.phase === run.status ? toggle.open : false;
-  const [, setClock] = useState(0);
-  const waitAt =
-    run.status === 'running'
-      ? Math.min(
-          ...run.steps
-            .filter((s) => s.method === 'wait' && s.status === 'running')
-            .map((s) => (s.startedAt ?? s.queuedAt) + LONG_WAIT_MS),
-        )
-      : Infinity;
-  // One timer at the long-wait boundary; no polling or extra Agent requests.
+  const [now, setNow] = useState(Date.now);
+  const active = run.status === 'running';
   useEffect(() => {
-    const delay = waitAt - Date.now();
-    if (!Number.isFinite(delay) || delay < 0) return;
-    const timer = setTimeout(() => setClock((n) => n + 1), delay + 1);
-    return () => clearTimeout(timer);
-  }, [waitAt]);
-  const progress = summarizeTools(run);
-  const successful = run.status === 'completed' && !progress.hasIssues;
-  const attention = progress.hasIssues && run.status !== 'stopped';
+    if (!active) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [active, startedAt]);
+
+  const progress = summarizeTools(run, now);
+  const overview = progress.stages.filter((stage) => stage.kind !== 'preparing');
+  const latestSummary = [...run.steps]
+    .reverse()
+    .find((step) => !step.replayed && typeof step.summary === 'string')?.summary;
+  const statusLabel =
+    label ??
+    (run.status === 'stopped'
+      ? 'activityStopped'
+      : run.status === 'interrupted'
+        ? 'progressEnded'
+        : active
+          ? progress.hasExecution
+            ? 'progressWorking'
+            : 'progressAwaiting'
+          : null);
+  const currentActivity =
+    progress.hasExecution &&
+    (latestSummary || (progress.phaseLabel !== statusLabel ? t(progress.phaseLabel) : ''));
+  const timing = elapsed((run.endedAt ?? now) - startedAt);
+  const heading = (
+    <>
+      {active && <span className="tool-activity-dot" aria-hidden="true" />}
+      {statusLabel && (
+        <span className="tool-activity-title" title={t(statusLabel)}>
+          {t(statusLabel)}
+        </span>
+      )}
+      {statusLabel && (
+        <span className="tool-activity-separator" aria-hidden="true">
+          ·
+        </span>
+      )}
+      <span className="tool-activity-time" aria-hidden={active || undefined}>
+        {active ? timing : t('progressElapsed', { time: timing })}
+      </span>
+      {overview.length > 0 && (
+        <svg
+          className="tool-activity-chevron"
+          data-open={open}
+          width="12"
+          height="12"
+          viewBox="0 0 12 12"
+          fill="none"
+          aria-hidden="true"
+        >
+          <path
+            d="m4.5 3 3 3-3 3"
+            stroke="currentColor"
+            strokeWidth="1.25"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )}
+    </>
+  );
+
   return (
     <section
-      className="tool-activity"
+      className={`tool-activity ${className}`}
       data-status={run.status}
-      data-outcome={attention ? 'attention' : successful ? 'success' : undefined}
-      aria-label={t('activityTitle')}
+      aria-label={t('progressTitle')}
     >
-      <button
-        type="button"
-        className="tool-activity-toggle"
-        aria-expanded={open}
-        aria-controls={listId}
-        onClick={() => setToggle({ phase: run.status, open: !open })}
-      >
-        <span className={`tool-activity-icon ${progress.busy ? 'is-busy' : ''}`} aria-hidden="true">
-          {successful ? '✓' : attention && !progress.busy ? '!' : '≡'}
-        </span>
-        <span className="tool-activity-heading">
-          <span className="tool-activity-title">{t(progress.label)}</span>
-          <span className="tool-activity-summary">
-            {t('activityTitle')}
-            {progress.stages.length > 0 && (
-              <span className="tool-activity-count">
-                {t(run.total > run.steps.length ? 'activityRecentCount' : 'activityCount', {
-                  count: progress.stages.length,
-                })}
-              </span>
-            )}
-            {run.endedAt !== undefined && ` · ${duration(run.endedAt - run.startedAt)}`}
-            {attention && run.status === 'running' && (
-              <span className="tool-activity-failures">
-                {' · '}
-                {t('activityIssues')}
-              </span>
-            )}
-          </span>
-        </span>
-        <span className="tool-activity-chevron" aria-hidden="true">
-          {open ? '⌃' : '⌄'}
-        </span>
-      </button>
-      <div id={listId} hidden={!open} className="tool-activity-body">
-        {progress.stages.length === 0 && (
-          <p className="tool-activity-note">{t('activityNoStages')}</p>
-        )}
-        {progress.omittedErrors > 0 && (
-          <p className="tool-activity-failures tool-activity-note">{t('activityEarlierIssues')}</p>
-        )}
-        <ol className="tool-step-list tool-stage-list" aria-label={t('activityStages')}>
-          {progress.stages.map((stage, index) => (
-            <li key={stage.id} className="tool-step tool-stage" data-status={stage.status}>
-              <span className="tool-step-marker" aria-hidden="true">
-                {stage.status === 'success' ? '✓' : stage.status === 'error' ? '!' : index + 1}
-              </span>
-              <div className="tool-step-content">
-                <div className="tool-step-heading">
-                  <span className="tool-step-label">{t(stageLabels[stage.kind])}</span>
-                  <span className="tool-step-status">
-                    {t(stage.status === 'error' ? 'stageIssue' : statuses[stage.status])}
-                  </span>
-                </div>
+      {overview.length > 0 ? (
+        <button
+          type="button"
+          className="tool-activity-toggle"
+          aria-expanded={open}
+          aria-controls={listId}
+          onClick={() => setToggle({ phase: run.status, open: !open })}
+        >
+          {heading}
+        </button>
+      ) : (
+        <div className="tool-activity-toggle" role={active ? 'status' : undefined}>
+          {heading}
+        </div>
+      )}
+      {active && !open && currentActivity && (
+        <p className="tool-activity-context" title={currentActivity}>
+          {currentActivity}
+        </p>
+      )}
+      {overview.length > 0 && (
+        <div id={listId} hidden={!open} className="tool-activity-body">
+          <ol className="tool-overview" aria-label={t('progressOverview')}>
+            {overview.map((stage) => (
+              <li key={stage.id}>
+                <span className="tool-overview-label">{t(stageLabels[stage.kind])}</span>
                 {stage.target && (
-                  <p className="tool-step-target" title={stage.target}>
-                    {stage.target}
-                  </p>
+                  <span className="tool-overview-site">{hostname(stage.target)}</span>
                 )}
-              </div>
-            </li>
-          ))}
-        </ol>
-        <details className="tool-diagnostics" key={run.status}>
-          <summary>
-            {t('activityLog')} · {t('activityCalls', { count: run.total })}
-          </summary>
-          {run.total > run.steps.length && (
-            <p className="tool-activity-note">
-              {t('activityOmitted', {
-                count: run.steps.length,
-                omitted: run.total - run.steps.length,
-              })}
-            </p>
-          )}
-          <ol className="tool-step-list tool-raw-list" aria-label={t('activityLog')}>
-            {run.steps.map((step) => (
-              <li key={step.id} className="tool-step tool-log-step" data-status={step.status}>
-                <span className="tool-step-marker" aria-hidden="true">
-                  {step.status === 'success' ? '✓' : step.status === 'error' ? '!' : step.number}
-                </span>
-                <div className="tool-step-content">
-                  <div className="tool-step-heading">
-                    <span className="tool-step-label">
-                      {Object.hasOwn(labels, step.method)
-                        ? t(labels[step.method as BrowserMethod])
-                        : step.method}
-                    </span>
-                    <span className="tool-step-status">
-                      {t(step.recovered ? 'stepRecovered' : statuses[step.status])}
-                    </span>
-                  </div>
-                  <p className="tool-step-detail">
-                    <code>{step.method}</code>
-                    {step.endedAt !== undefined &&
-                      ` · ${duration(step.endedAt - (step.startedAt ?? step.queuedAt))}`}
-                    {step.replayed && ` · ${t('stepReplayed')}`}
-                  </p>
-                  {step.target && (
-                    <p className="tool-step-target" title={step.target}>
-                      {step.target}
-                    </p>
-                  )}
-                  {step.errorCode && <p className="tool-step-error">{step.errorCode}</p>}
-                </div>
+                {stage.summary && <p className="tool-overview-summary">{stage.summary}</p>}
               </li>
             ))}
           </ol>
-        </details>
-      </div>
+        </div>
+      )}
     </section>
   );
 }

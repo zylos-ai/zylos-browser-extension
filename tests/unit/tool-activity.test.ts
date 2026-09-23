@@ -97,3 +97,19 @@ test('navigation and missing context prevent speculative error recovery', () => 
   }
   expect(withoutContext[0]!.toolRun!.steps[0]!.recovered).toBeUndefined();
 });
+
+test('public phase descriptions attach once per batch and stop cannot leak them into another task', () => {
+  const chat: ChatEntry[] = [{ role: 'user', text: 'Go', ts: 0 }];
+  const activity = new ToolActivity(() => chat, vi.fn());
+  activity.describe('  继续查看页面  内容  ');
+  activity.begin('scroll', {})!.finish();
+  activity.begin('snapshot', {})!.finish();
+  expect(chat[1]!.toolRun!.steps.map((s) => s.summary)).toEqual(['继续查看页面 内容', undefined]);
+  activity.describe(undefined);
+  activity.begin('find', {})!.finish();
+  expect(chat[1]!.toolRun!.steps.at(-1)?.summary).toBe('');
+  activity.describe('Never show after stop');
+  activity.end('stopped');
+  activity.begin('open', {})!.finish();
+  expect(chat.at(-1)!.toolRun!.steps[0]!.summary).toBeUndefined();
+});

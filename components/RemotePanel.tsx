@@ -25,15 +25,20 @@ export function RemotePanel() {
   const [error, setError] = useState('');
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const sendingRef = useRef(false);
+  const sendRevision = useRef(0);
   const pendingRef = useRef(false);
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
   const { selection, faviconUrl, clearSelection } = usePageSelection(
     state.connected && screen === 'chat',
   );
 
-  async function request(message: RemoteRequest): Promise<RemoteState | null> {
+  async function request(
+    message: RemoteRequest,
+    current = () => true,
+  ): Promise<RemoteState | null> {
     try {
       const response = await chrome.runtime.sendMessage(message);
+      if (!current()) return null;
       const parsed = response?.ok && remoteStateSchema.safeParse(response.value);
       if (parsed && parsed.success) {
         setState(parsed.data);
@@ -42,7 +47,7 @@ export function RemotePanel() {
       }
       setError(response?.error || 'ui.error.operationFailed');
     } catch {
-      setError('ui.error.serviceUnavailable');
+      if (current()) setError('ui.error.serviceUnavailable');
     }
     return null;
   }
@@ -72,6 +77,7 @@ export function RemotePanel() {
   }, []);
 
   const chatBusy = !!(state.chatBusy || state.loopActive || pending === 'remote-stop');
+  const stopping = !!state.stopping || pending === 'remote-stop';
 
   async function sendChat() {
     const text = draft.trim();
@@ -79,28 +85,33 @@ export function RemotePanel() {
     const submittedDraft = draft;
     const submittedSelection = selection;
     sendingRef.current = true;
+    const revision = ++sendRevision.current;
     setSending(true);
     try {
       const win = await chrome.windows.getCurrent();
       const [tab] = await chrome.tabs.query({ active: true, windowId: win.id });
-      const ok = await request({
-        type: 'remote-chat-send',
-        message: {
-          role: 'user',
-          content: [
-            { type: 'text', text },
-            ...(submittedSelection ? [selectionAttachment(submittedSelection)] : []),
-          ],
+      if (revision !== sendRevision.current) return;
+      const ok = await request(
+        {
+          type: 'remote-chat-send',
+          message: {
+            role: 'user',
+            content: [
+              { type: 'text', text },
+              ...(submittedSelection ? [selectionAttachment(submittedSelection)] : []),
+            ],
+          },
+          windowId: win.id,
+          tabId: tab?.id,
         },
-        windowId: win.id,
-        tabId: tab?.id,
-      });
+        () => revision === sendRevision.current,
+      );
       if (ok) {
         setDraft((current) => (current === submittedDraft ? '' : current));
         if (submittedSelection) clearSelection(submittedSelection);
       }
     } catch {
-      setError('ui.error.serviceUnavailable');
+      if (revision === sendRevision.current) setError('ui.error.serviceUnavailable');
     } finally {
       sendingRef.current = false;
       setSending(false);
@@ -109,6 +120,7 @@ export function RemotePanel() {
 
   async function action(message: RemoteRequest) {
     if (pendingRef.current) return false;
+    if (message.type === 'remote-stop') sendRevision.current++;
     pendingRef.current = true;
     setPending(message.type);
     const result = await request(message);
@@ -142,18 +154,67 @@ export function RemotePanel() {
             <span className="status-dot" aria-hidden="true" />
             {status}
           </span>
-          <button
-            ref={settingsButtonRef}
-            className="btn btn-ghost settings-button"
-            onClick={() => {
-              setScreen(settingsOpen ? 'chat' : 'settings');
-              setError('');
-            }}
-            aria-expanded={settingsOpen}
-            aria-controls={settingsOpen ? 'settings' : undefined}
-          >
-            {settingsOpen ? t('back') : t('settings')}
-          </button>
+          <div className="header-tools">
+            {state.configured && (
+              <button
+                type="button"
+                className="btn btn-ghost header-button clear-chat-button"
+                disabled={pending !== null || sending || chatBusy || state.chat.length === 0}
+                aria-label={t('clearChat')}
+                title={chatBusy || sending ? t('clearChatBusy') : t('clearChat')}
+                onClick={() => void action({ type: 'remote-chat-clear' })}
+              >
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5m4-5v5" />
+                </svg>
+                <span>{t('clearChatShort')}</span>
+              </button>
+            )}
+            <button
+              ref={settingsButtonRef}
+              type="button"
+              className="btn btn-ghost header-button settings-button"
+              onClick={() => {
+                setScreen(settingsOpen ? 'chat' : 'settings');
+                setError('');
+              }}
+              aria-expanded={settingsOpen}
+              aria-controls={settingsOpen ? 'settings' : undefined}
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                {settingsOpen ? (
+                  <path d="m14 6-6 6 6 6" />
+                ) : (
+                  <>
+                    <path d="M4 7h9m4 0h3M4 17h3m4 0h9" />
+                    <circle cx="15" cy="7" r="2" />
+                    <circle cx="9" cy="17" r="2" />
+                  </>
+                )}
+              </svg>
+              {settingsOpen ? t('back') : t('settings')}
+            </button>
+          </div>
         </div>
       </header>
       {visibleError && (
@@ -182,7 +243,6 @@ export function RemotePanel() {
             return ok;
           }}
           onToggle={() => void action({ type: 'remote-set-enabled', enabled: !state.enabled })}
-          onClear={() => void action({ type: 'remote-chat-clear' })}
         />
       ) : (
         <main className="chat-panel">
@@ -224,7 +284,7 @@ export function RemotePanel() {
                 task={state.task}
                 onReveal={() => void request({ type: 'remote-preview-reveal' })}
                 onStop={() => void action({ type: 'remote-stop' })}
-                stopping={pending === 'remote-stop'}
+                stopping={stopping}
               />
             }
             draft={draft}
@@ -232,11 +292,8 @@ export function RemotePanel() {
             connected={connected}
             sending={sending}
             busy={chatBusy}
-            onStop={
-              state.loopActive && !state.task
-                ? () => void action({ type: 'remote-stop' })
-                : undefined
-            }
+            onStop={() => void action({ type: 'remote-stop' })}
+            stopping={stopping}
             onSend={() => void sendChat()}
             inputRef={inputRef}
           />

@@ -15,6 +15,7 @@ export function ChatComposer({
   preview,
   attachments,
   onStop,
+  stopping = false,
 }: {
   draft: string;
   onDraftChange: (value: string) => void;
@@ -26,10 +27,12 @@ export function ChatComposer({
   preview?: React.ReactNode;
   attachments?: React.ReactNode;
   onStop?: () => void;
+  stopping?: boolean;
 }) {
   const { t } = useI18n();
   const composing = useRef(false);
-  const disabled = !connected || !draft.trim() || sending || busy;
+  const active = sending || busy || stopping;
+  const disabled = !connected || !draft.trim() || active;
   useLayoutEffect(() => {
     const input = inputRef.current;
     if (!input) return;
@@ -54,7 +57,6 @@ export function ChatComposer({
           id="message"
           rows={1}
           aria-label={t('message')}
-          aria-describedby="composer-hint"
           value={draft}
           maxLength={MAX_CHAT_TEXT}
           placeholder={connected ? t('messagePlaceholder') : t('disconnectedPlaceholder')}
@@ -76,36 +78,34 @@ export function ChatComposer({
           }}
         />
         <div className="composer-toolbar">
-          <span className="text-caption text-muted">{t('composerTagline')}</span>
-          {onStop && (
-            <button
-              type="button"
-              className="btn btn-ghost"
-              aria-label={t('stopTask')}
-              onClick={onStop}
-            >
-              ■
-            </button>
-          )}
           <button
             id="send"
-            className="btn btn-primary send-button"
-            type="submit"
-            disabled={disabled}
-            aria-label={sending ? t('sending') : busy ? t('chatInProgress') : t('sendMessage')}
-            title={busy ? t('chatBusy') : t('sendMessage')}
+            className="btn send-button"
+            type={active ? 'button' : 'submit'}
+            disabled={active ? stopping || !onStop : disabled}
+            onClick={active ? onStop : undefined}
+            aria-label={stopping ? t('stopping') : active ? t('stopTask') : t('sendMessage')}
+            title={stopping ? t('stopping') : active ? t('stopTask') : t('sendMessage')}
+            aria-busy={stopping || undefined}
           >
-            {sending ? (
+            {stopping ? (
               <span className="loading loading-spinner loading-xs" aria-hidden="true" />
+            ) : active ? (
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 18 18"
+                fill="currentColor"
+                aria-hidden="true"
+              >
+                <rect x="4" y="4" width="10" height="10" rx="2" />
+              </svg>
             ) : (
               <img src={disabled ? sendDisabledIcon : sendIcon} width="18" height="18" alt="" />
             )}
           </button>
         </div>
       </div>
-      <p id="composer-hint" className="text-caption text-muted">
-        {busy ? t('taskInProgressHint') : t('keyboardHint')}
-      </p>
     </form>
   );
 }

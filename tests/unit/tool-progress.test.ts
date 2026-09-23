@@ -47,19 +47,20 @@ test('groups page work without surfacing setup, refs, tiny waits, or cleanup', (
   );
   const original = JSON.stringify(r);
   const result = summarizeTools(r, 10000);
-  expect(result.stages.map((s) => s.kind)).toEqual(['opening', 'reading', 'operating']);
-  expect(result.stages[2]!.steps.map((s) => s.method)).toEqual([
-    'click',
-    'snapshot',
-    'find',
-    'fill',
-    'type',
-    'keypress',
+  expect(result.stages.map((s) => s.kind)).toEqual([
+    'opening',
+    'reading',
+    'locating',
+    'inspecting',
+    'operating',
+    'locating',
+    'typing',
+    'keyboard',
   ]);
-  expect(result.stages.map((s) => s.target)).toEqual([
+  expect(result.stages[4]!.steps.map((s) => s.method)).toEqual(['click', 'snapshot']);
+  expect(result.stages[6]!.steps.map((s) => s.method)).toEqual(['fill', 'type']);
+  expect(result.stages.flatMap((s) => (s.target ? [s.target] : []))).toEqual([
     'https://example.com/',
-    undefined,
-    undefined,
   ]);
   expect(result.label).toBe('activityWaiting');
   expect(JSON.stringify(r)).toBe(original);
@@ -78,7 +79,7 @@ test('navigation stays chronological, and changing tabs separates operations', (
     'operating',
     'switching',
     'reading',
-    'operating',
+    'scrolling',
     'back',
     'reading',
   ]);
@@ -138,4 +139,48 @@ test('idle, queued, stopped and preparation states reflect observed activity, ne
     summarizeTools(run([step('click', 1, { status: 'cancelled' })], { status: 'stopped' })).label,
   ).toBe('activityStopped');
   expect(summarizeTools(run([step('click', 1, { replayed: true })])).stages).toHaveLength(0);
+});
+
+test('execution requires a real tool start or response, including hidden preparation tools', () => {
+  const r = run([]);
+  expect(summarizeTools(r, 300_000).hasExecution).toBe(false);
+  expect(summarizeTools(r, 300_000).phaseLabel).toBe('progressAwaiting');
+  r.steps.push(step('describe', 1, { status: 'queued', startedAt: undefined, endedAt: undefined }));
+  expect(summarizeTools(r).hasExecution).toBe(false);
+  r.steps[0]!.status = 'running';
+  expect(summarizeTools(r).hasExecution).toBe(true);
+  r.steps[0]!.status = 'success';
+  expect(summarizeTools(r).hasExecution).toBe(true);
+  expect(summarizeTools(r).phaseLabel).toBe('progressWorking');
+  r.steps[0]!.replayed = true;
+  expect(summarizeTools(r).hasExecution).toBe(false);
+  expect(summarizeTools(r).phaseLabel).toBe('progressAwaiting');
+  r.steps[0]!.replayed = false;
+  r.steps[0]!.status = 'cancelled';
+  expect(summarizeTools(r).hasExecution).toBe(false);
+  r.steps[0]!.startedAt = 20;
+  expect(summarizeTools(r).hasExecution).toBe(true);
+});
+
+test('consecutive scroll observations merge but new phase descriptions and later revisits remain', () => {
+  const r = run([
+    step('scroll', 1, { summary: '继续查看后面的应用' }),
+    step('snapshot', 2),
+    step('tabs', 3),
+    step('scroll', 4),
+    step('snapshot', 5),
+    step('find', 6),
+    step('scroll', 7, { summary: '查看下一组下载量' }),
+    step('snapshot', 8),
+  ]);
+  const result = summarizeTools(r);
+  expect(result.stages.map((s) => s.kind)).toEqual(['scrolling', 'locating', 'scrolling']);
+  expect(result.stages.map((s) => s.summary)).toEqual([
+    '继续查看后面的应用',
+    undefined,
+    '查看下一组下载量',
+  ]);
+  expect(result.phaseLabel).toBe('progressReviewScroll');
+  r.steps.push(step('record-findings', 9, { status: 'running', endedAt: undefined }));
+  expect(summarizeTools(r).phaseLabel).toBe('progressRecording');
 });

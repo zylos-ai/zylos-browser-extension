@@ -79,6 +79,7 @@ export type AgentRequest = {
     instructions?: string;
     tools?: unknown[];
     memory: string;
+    research?: ReturnType<import('./research-ledger').ResearchLedger['summary']>;
     notice: string;
     observation?: unknown;
     results?: unknown[];

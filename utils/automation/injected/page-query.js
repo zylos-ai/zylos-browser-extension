@@ -14,6 +14,7 @@ function pageQuery(action, value) {
     return output.includes(value);
   }
   if (action === 'ready') return document.readyState;
+  if (action === 'viewport') return { x: 0, y: 0, width: innerWidth, height: innerHeight };
   if (action === 'focus') {
     let node = document.activeElement;
     while (node?.shadowRoot?.activeElement) node = node.shadowRoot.activeElement;

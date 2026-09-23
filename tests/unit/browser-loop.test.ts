@@ -1,12 +1,14 @@
 // @vitest-environment node
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   BrowserLoop,
   decisionSchema,
   type AgentRequest,
   type RoundResult,
+  type LoopAction,
 } from '../../utils/browser-loop';
 import { selectionAttachment } from '../../utils/attachments';
+import { setWorkerLanguage } from '../../utils/i18n';
 
 function setup(timeout = 300000) {
   const requests: AgentRequest[] = [];
@@ -15,7 +17,7 @@ function setup(timeout = 300000) {
       requests.push(request);
       return true;
     }),
-    execute: vi.fn(async (): Promise<RoundResult> => ({
+    execute: vi.fn(async (_actions: LoopAction[]): Promise<RoundResult> => ({
       observation: { text: 'new page' },
       results: [],
       failed: false,
@@ -23,6 +25,7 @@ function setup(timeout = 300000) {
     })),
     finish: vi.fn(async () => {}),
     cancel: vi.fn(),
+    progress: vi.fn(),
   };
   const loop = new BrowserLoop(io, timeout);
   loop.start(
@@ -37,7 +40,11 @@ const action = {
   actions: [{ method: 'open', params: { url: 'https://example.com' } }],
   memory: 'Need results',
 };
-afterEach(() => vi.useRealTimers());
+beforeEach(() => setWorkerLanguage('en'));
+afterEach(() => {
+  vi.useRealTimers();
+  setWorkerLanguage('auto');
+});
 describe('extension-owned loop', () => {
   it('sends owner attachments once, outside page observations, and retains the original task after actions', async () => {
     const { loop, requests } = setup();
@@ -160,9 +167,10 @@ describe('extension-owned loop', () => {
     await vi.advanceTimersByTimeAsync(15 * 60_000);
     expect(loop.active).toBe(false);
     expect(io.finish).toHaveBeenCalledWith(
-      expect.stringContaining('时间上限'),
+      expect.stringContaining('time limit'),
       'blocked',
       'task-1',
+      { kind: 'time-limit' },
     );
   });
   it('answers ordinary chat without any browser action', async () => {
@@ -185,6 +193,27 @@ describe('extension-owned loop', () => {
     });
     expect(requests[1]!.execution).toHaveProperty('tools');
     expect(() => loop.accept(id, { kind: 'done', text: 'changed' })).toThrow('different contents');
+    loop.cancel();
+  });
+  it('publishes user-facing summaries once after validation without exposing memory or adding requests', async () => {
+    const { loop, requests, io } = setup();
+    const id = requests[0]!.id;
+    expect(() => loop.accept(id, { ...action, summary: 'x'.repeat(161) })).toThrow();
+    expect(io.progress).not.toHaveBeenCalled();
+    const decision = { ...action, summary: '打开页面查找相关信息' };
+    loop.accept(id, decision);
+    loop.accept(id, decision);
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    expect(io.progress).toHaveBeenCalledExactlyOnceWith('打开页面查找相关信息');
+    expect(io.execute).toHaveBeenCalledTimes(1);
+    loop.accept(requests[1]!.id, {
+      kind: 'actions',
+      actions: [{ method: 'scroll', params: { direction: 'down', pixels: 500 } }],
+      memory: 'private task notes',
+    });
+    await vi.waitFor(() => expect(requests).toHaveLength(3));
+    expect(io.progress).toHaveBeenLastCalledWith(undefined);
+    expect(JSON.stringify(io.progress.mock.calls)).not.toContain('private task notes');
     loop.cancel();
   });
   it('delivers action constraints with the browser schemas, without resending them every round', async () => {
@@ -267,9 +296,23 @@ describe('extension-owned loop', () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(loop.active).toBe(false);
     expect(io.finish).toHaveBeenCalledWith(
-      expect.stringContaining('超时'),
+      expect.stringContaining('Timed out'),
       'interrupted',
       'task-1',
+      { kind: 'request-failed', code: 'DECISION_TIMEOUT' },
+    );
+  });
+  it('uses the worker language for interrupted task text and keeps localization metadata', async () => {
+    const { loop, requests, io } = setup();
+    setWorkerLanguage('zh-CN');
+    io.execute.mockRejectedValueOnce(new Error('Transport detail'));
+    loop.accept(requests[0]!.id, action);
+    await vi.waitFor(() => expect(loop.active).toBe(false));
+    expect(io.finish).toHaveBeenCalledWith(
+      expect.stringContaining('浏览器任务中断'),
+      'interrupted',
+      'task-1',
+      { kind: 'interrupted' },
     );
   });
   it('stops after three failed rounds without replaying any action automatically', async () => {
@@ -287,7 +330,12 @@ describe('extension-owned loop', () => {
     }
     await vi.waitFor(() => expect(loop.active).toBe(false));
     expect(requests).toHaveLength(3);
-    expect(io.finish).toHaveBeenCalledWith(expect.stringContaining('上限'), 'blocked', 'task-1');
+    expect(io.finish).toHaveBeenCalledWith(
+      expect.stringContaining('execution limit'),
+      'blocked',
+      'task-1',
+      { kind: 'execution-limit' },
+    );
   });
   it('permits known form edits plus one final action, but not speculative multi-page batches', () => {
     const fill = { method: 'fill', params: { ref: '@real', text: 'query' } };
@@ -304,4 +352,79 @@ describe('extension-owned loop', () => {
       false,
     );
   });
+});
+
+it('records findings before scroll, keeps notes across rounds and refuses incomplete done', async () => {
+  const { loop, requests, io } = setup();
+  loop.accept(requests[0]!.id, action);
+  await vi.waitFor(() => expect(requests).toHaveLength(2));
+  const finding = {
+    key: 'a',
+    title: 'App A',
+    summary: 'Observed candidate',
+    sourceUrl: 'https://example.com',
+    position: 1,
+  };
+  const record = {
+    method: 'record-findings',
+    params: { collection: 'list', targetCount: 2, items: [finding] },
+  };
+  const scroll = { method: 'scroll', params: { direction: 'down' } };
+  loop.accept(requests[1]!.id, { kind: 'actions', actions: [record, scroll] });
+  await vi.waitFor(() => expect(requests).toHaveLength(3));
+  expect(io.execute.mock.calls.at(-1)?.[0]).toEqual([scroll]);
+  expect(requests[2]!.execution.research?.collections[0]).toMatchObject({
+    collected: 1,
+    remaining: 1,
+  });
+  loop.accept(requests[2]!.id, { kind: 'done', text: 'All done' });
+  await vi.waitFor(() => expect(requests).toHaveLength(4));
+  expect(io.finish).not.toHaveBeenCalled();
+  expect(requests[3]!.execution.results).toContainEqual(
+    expect.objectContaining({ status: 'incomplete' }),
+  );
+  loop.accept(requests[3]!.id, {
+    kind: 'actions',
+    actions: [{ method: 'read-findings', params: {} }],
+  });
+  await vi.waitFor(() => expect(requests).toHaveLength(5));
+  expect(io.execute).toHaveBeenCalledTimes(2);
+  expect(requests[4]!.execution.results).toContainEqual(
+    expect.objectContaining({
+      result: expect.objectContaining({ items: [expect.objectContaining(finding)] }),
+    }),
+  );
+  loop.accept(requests[4]!.id, { kind: 'blocked', text: 'Only one of two entries could be read' });
+  await vi.waitFor(() => expect(loop.active).toBe(false));
+  expect(io.finish).toHaveBeenCalledWith(expect.any(String), 'blocked', 'task-1');
+  loop.start(
+    'new',
+    { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+    { type: 'current-page', status: 'unavailable' },
+  );
+  expect(requests.at(-1)!.execution.research).toBeUndefined();
+  loop.cancel();
+});
+
+it('notes reuse the last text observation without retransmitting screenshot bytes', async () => {
+  const { loop, requests, io } = setup();
+  io.execute.mockResolvedValueOnce({
+    mode: 'operating',
+    failed: false,
+    results: [],
+    observation: { page: { text: 'Observed page', screenshot: { type: 'image', data: 'pixels' } } },
+  });
+  loop.accept(requests[0]!.id, action);
+  await vi.waitFor(() => expect(requests).toHaveLength(2));
+  loop.accept(requests[1]!.id, {
+    kind: 'actions',
+    actions: [{ method: 'record-findings', params: { collection: 'notes', items: [] } }],
+  });
+  await vi.waitFor(() => expect(requests).toHaveLength(3));
+  expect(requests[2]!.execution.observation).toEqual({
+    reused: true,
+    page: { text: 'Observed page' },
+  });
+  expect(io.execute).toHaveBeenCalledTimes(1);
+  loop.cancel();
 });

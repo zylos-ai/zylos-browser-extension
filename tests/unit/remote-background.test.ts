@@ -157,7 +157,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function bootConnected(attachments = false) {
+async function bootConnected(attachments = false, interrupt = false) {
   startRemoteBackground();
   await flush();
   const ws = sockets[0]!;
@@ -169,6 +169,7 @@ async function bootConnected(attachments = false) {
       'browser-instance-v1',
       'agent-message-v2',
       ...(attachments ? ['attachments-v1'] : []),
+      ...(interrupt ? ['agent-interrupt-v1'] : []),
     ],
     endpointId: `abababababab.${storage.remoteBrowserId}`,
   });
@@ -195,6 +196,69 @@ const respond = async (ws: Socket, request: Record<string, unknown>, decision: u
 };
 
 describe('decision transport background', () => {
+  it('stops locally immediately and holds new sends until the correlated Agent interrupt receipt', async () => {
+    const ws = await bootConnected(false, true);
+    const request = await begin(ws);
+    const stopped = ask({ type: 'remote-stop' });
+    await flush();
+    expect(executor.release).toHaveBeenCalledOnce();
+    expect(ws.last('agent-turn-end')).toMatchObject({
+      taskId: request.taskId,
+      status: 'stopped',
+      interrupt: true,
+    });
+    expect(await state()).toMatchObject({ loopActive: false, chatBusy: true, stopping: true });
+    const duplicate = ask({ type: 'remote-stop' });
+    expect(await ask({ type: 'remote-chat-send', text: 'too soon' })).toMatchObject({
+      ok: false,
+      error: 'ui.error.chatBusy',
+    });
+    ws.receive({ type: 'agent-stop-result', taskId: 'wrong', ok: true });
+    await flush();
+    expect((await state()).stopping).toBe(true);
+    ws.receive({ type: 'ping', ts: 123 });
+    await flush();
+    expect(ws.last('pong')!.ts).toBe(123);
+    ws.receive({ type: 'agent-stop-result', taskId: request.taskId, ok: true });
+    expect((await stopped).ok).toBe(true);
+    expect((await duplicate).ok).toBe(true);
+    expect(executor.release).toHaveBeenCalledOnce();
+    expect(await state()).toMatchObject({ loopActive: false, chatBusy: false, stopping: false });
+    await begin(ws, 'next task');
+    await respond(ws, request, { kind: 'done', text: 'late old reply' });
+    expect((storage.remoteChatLog as ChatEntry[]).some((m) => m.text === 'late old reply')).toBe(
+      false,
+    );
+  });
+  it.each(['failure', 'timeout', 'disconnect'] as const)(
+    'reports an unconfirmed Agent stop on %s while revoking the browser',
+    async (mode) => {
+      const ws = await bootConnected(false, true);
+      const request = await begin(ws);
+      const stopped = ask({ type: 'remote-stop' });
+      await flush();
+      if (mode === 'failure')
+        ws.receive({ type: 'agent-stop-result', taskId: request.taskId, ok: false });
+      else {
+        if (mode === 'disconnect') ws.serverClose(4001);
+        await vi.advanceTimersByTimeAsync(11000);
+      }
+      expect((await stopped).ok).toBe(true);
+      expect(await state()).toMatchObject({
+        loopActive: false,
+        stopping: false,
+        error: 'ui.error.agentStopUnconfirmed',
+      });
+      expect(executor.release).toHaveBeenCalledOnce();
+    },
+  );
+  it('keeps local stopping compatible with older relays and reports that Agent interruption needs an update', async () => {
+    const ws = await bootConnected();
+    await begin(ws);
+    await ask({ type: 'remote-stop' });
+    expect(ws.last('agent-turn-end')).not.toHaveProperty('interrupt');
+    expect((await state()).error).toBe('ui.error.agentStopUnsupported');
+  });
   it('refuses an older Remote before any v2 message can be sent', async () => {
     startRemoteBackground();
     await flush();
@@ -558,6 +622,36 @@ describe('decision transport background', () => {
     await respond(ws, request, { kind: 'done', text: 'Result' });
     expect((await state()).error).toBe('ui.error.taskCleanupFailed');
     expect((storage.remoteChatLog as ChatEntry[]).at(-1)!.text).toBe('Result');
+  });
+
+  it('persists localizable notices but sends readable text to the relay', async () => {
+    storage.uiLanguage = 'en';
+    const ws = await bootConnected();
+    const request = await begin(ws);
+    ws.receive({
+      type: 'agent-status',
+      requestId: request.id,
+      state: 'failed',
+      code: 'ATTACHMENT_FAILED',
+    });
+    await flush();
+    const saved = (storage.remoteChatLog as ChatEntry[]).at(-1)!;
+    expect(saved.notice).toEqual({ kind: 'request-failed', code: 'ATTACHMENT_FAILED' });
+    expect(saved.text).toContain('attachment could not be processed');
+    expect(saved.text).not.toMatch(/\p{Script=Han}/u);
+    expect(ws.last('agent-turn-end')).toMatchObject({ text: saved.text, status: 'interrupted' });
+    expect(ws.last('agent-turn-end')).not.toHaveProperty('notice');
+  });
+
+  it('returns a translatable error when a task tab is unavailable', async () => {
+    await bootConnected();
+    executor.revealTask.mockRejectedValueOnce(
+      Object.assign(new Error('Raw tab diagnostic'), { code: 'TASK_TAB_UNAVAILABLE' }),
+    );
+    expect(await ask({ type: 'remote-reveal' })).toEqual({
+      ok: false,
+      error: 'ui.error.taskTabUnavailable',
+    });
   });
 
   it('does not report completed delivery when final answer persistence fails', async () => {

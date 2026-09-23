@@ -20,6 +20,10 @@ export function clearFrameSessions() {
   children.clear();
 }
 export async function enableFrames(target: { tabId: number; sessionId?: string }) {
+  await chrome.debugger.sendCommand(target, 'Network.enable', {
+    maxTotalBufferSize: 0,
+    maxResourceBufferSize: 0,
+  });
   await chrome.debugger.sendCommand(target, 'Target.setAutoAttach', autoAttach);
 }
 export function frameEvent(

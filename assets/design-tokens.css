@@ -101,6 +101,8 @@
   --color-primary-hover: var(--zylos-purple-600);
   --color-primary-soft: var(--zylos-purple-50);
   --color-primary-border: var(--zylos-purple-200);
+  --color-composer-action: var(--zylos-purple-muted-500);
+  --color-composer-action-hover: var(--zylos-purple-muted-600);
   --color-muted: var(--zylos-neutral-500);
   --color-border: var(--zylos-neutral-200);
   --color-control-border: var(--zylos-control-outline);

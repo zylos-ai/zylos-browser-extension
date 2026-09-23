@@ -6,6 +6,7 @@ import { RemotePanel } from '../../components/RemotePanel';
 import { initialRemoteState, type RemoteState } from '../../utils/remote';
 import markdownExample from '../fixtures/markdown-message.json';
 import { selectionAttachment } from '../../utils/attachments';
+import { formatTaskNotice } from '../../utils/task-notice';
 
 let root: Root;
 let container: HTMLDivElement;
@@ -15,6 +16,7 @@ let listener: (message: unknown) => void;
 let previewListener: (message: unknown) => void;
 let previewDisconnect: () => void;
 let previewPost: ReturnType<typeof vi.fn>;
+let queryTabs: ReturnType<typeof vi.fn<() => Promise<chrome.tabs.Tab[]>>>;
 let savedPreferences: Record<string, unknown>;
 const input = () => container.querySelector<HTMLTextAreaElement>('#message')!;
 async function click(selector: string) {
@@ -61,18 +63,19 @@ beforeEach(() => {
   send = vi.fn(async () => ({ ok: true, value: state }));
   savedPreferences = {};
   previewPost = vi.fn();
+  queryTabs = vi.fn(async () => [
+    {
+      id: 3,
+      windowId: 1,
+      url: 'https://example.com/',
+      title: 'Example',
+      favIconUrl: 'https://example.com/favicon.ico',
+    } as chrome.tabs.Tab,
+  ]);
   vi.stubGlobal('chrome', {
     windows: { getCurrent: vi.fn(async () => ({ id: 1 })) },
     tabs: {
-      query: vi.fn(async () => [
-        {
-          id: 3,
-          windowId: 1,
-          url: 'https://example.com/',
-          title: 'Example',
-          favIconUrl: 'https://example.com/favicon.ico',
-        },
-      ]),
+      query: queryTabs,
       onActivated: { addListener: vi.fn(), removeListener: vi.fn() },
       onUpdated: { addListener: vi.fn(), removeListener: vi.fn() },
     },
@@ -210,7 +213,7 @@ test('starter prompts fill the composer and require a separate send; IME and Shi
   expect(container.querySelector('.selection-chip')).toBeNull();
   send.mockClear();
   await click('.starter');
-  expect(input().value).toBe('找资料，整理成要点');
+  expect(input().value).toBe('把当前页面这篇文章总结成 5 个要点');
   expect(document.activeElement).toBe(input());
   expect(send).not.toHaveBeenCalled();
   await enter({ shiftKey: true });
@@ -220,7 +223,10 @@ test('starter prompts fill the composer and require a separate send; IME and Shi
   await enter();
   expect(send).toHaveBeenCalledExactlyOnceWith({
     type: 'remote-chat-send',
-    message: { role: 'user', content: [{ type: 'text', text: '找资料，整理成要点' }] },
+    message: {
+      role: 'user',
+      content: [{ type: 'text', text: '把当前页面这篇文章总结成 5 个要点' }],
+    },
     windowId: 1,
     tabId: 3,
   });
@@ -426,16 +432,15 @@ test('same-URL reload and switching tabs clear the old quote, and hidden panels 
 });
 
 test.each([{ loopActive: true }, { chatBusy: true }])(
-  'busy task or initial capture blocks button, Enter and form submission while preserving the draft: %j',
+  'busy task or initial capture replaces Send with Stop while Enter and submit preserve the draft: %j',
   async (busy) => {
     Object.assign(state, busy);
     await mount();
     await fill('#message', 'Next message draft');
     send.mockClear();
     expect(input().disabled).toBe(false);
-    expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(true);
-    expect(container.querySelector('#composer-hint')!.textContent).toContain('可先编辑下一条消息');
-    await click('#send');
+    expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(false);
+    expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('停止任务');
     await enter();
     await act(async () => {
       container
@@ -444,10 +449,25 @@ test.each([{ loopActive: true }, { chatBusy: true }])(
     });
     expect(send).not.toHaveBeenCalled();
     expect(input().value).toBe('Next message draft');
+    let stopped!: (value: unknown) => void;
+    send.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          stopped = resolve;
+        }),
+    );
+    await click('#send');
+    expect(send).toHaveBeenCalledExactlyOnceWith({ type: 'remote-stop' });
+    expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(true);
+    expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('正在停止…');
+    await click('#send');
+    await enter();
+    expect(send).toHaveBeenCalledTimes(1);
     state.loopActive = false;
     state.chatBusy = false;
-    await act(async () => listener({ type: 'remote-updated', state }));
+    await act(async () => stopped({ ok: true, value: state }));
     expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(false);
+    send.mockClear();
     expect(send).not.toHaveBeenCalled();
     await click('#send');
     expect(send).toHaveBeenCalledExactlyOnceWith({
@@ -459,7 +479,7 @@ test.each([{ loopActive: true }, { chatBusy: true }])(
   },
 );
 
-test('tool steps appear inline, update live, collapse on completion and can be reopened', async () => {
+test('compact progress shows only a broad overview and collapses neutrally on completion', async () => {
   state.chat = [
     { id: 'question', role: 'user', text: '看看当前页面', ts: 1 },
     {
@@ -499,19 +519,14 @@ test('tool steps appear inline, update live, collapse on completion and can be r
   const body = () => container.querySelector<HTMLElement>('.tool-activity-body')!;
   expect(toggle().getAttribute('aria-expanded')).toBe('false');
   expect(body().hidden).toBe(true);
-  expect(toggle().textContent).toContain('正在操作页面');
+  expect(toggle().textContent).toContain('思考执行中');
   await click('.tool-activity-toggle');
   expect(body().hidden).toBe(false);
   expect(container.querySelector('.message-list .tool-activity')).not.toBeNull();
   expect(body().textContent).toContain('读取页面内容');
-  expect(container.querySelector('.tool-stage-list')?.textContent).not.toContain('snapshot');
-  expect(container.querySelector<HTMLDetailsElement>('.tool-diagnostics')?.open).toBe(false);
-  await click('.tool-diagnostics summary');
-  expect(container.querySelector<HTMLDetailsElement>('.tool-diagnostics')?.open).toBe(true);
-  expect(body().textContent).toContain('snapshot · 0.2s');
-  expect(body().textContent).toContain('执行中');
-  await click('.tool-activity-toggle');
-  await click('.tool-activity-toggle');
+  expect(body().textContent).toContain('操作页面');
+  expect(container.querySelector('.tool-diagnostics')).toBeNull();
+  expect(body().textContent).not.toMatch(/snapshot|click|成功|失败|执行中/);
   const run = state.chat[1]!.toolRun!;
   run.status = 'completed';
   run.endedAt = 1402;
@@ -523,16 +538,105 @@ test('tool steps appear inline, update live, collapse on completion and can be r
   await act(async () => listener({ type: 'remote-updated', state }));
   expect(toggle().getAttribute('aria-expanded')).toBe('false');
   expect(body().hidden).toBe(true);
-  expect(toggle().textContent).toContain('2 个阶段');
-  expect(toggle().textContent).toContain('已结束，存在操作异常');
+  expect(toggle().textContent).toBe('用时 0:01');
   await click('.tool-activity-toggle');
   expect(body().hidden).toBe(false);
-  expect(container.querySelector('.tool-stage-list')?.textContent).not.toContain('STALE_REF');
-  expect(container.querySelector<HTMLDetailsElement>('.tool-diagnostics')?.open).toBe(false);
-  await click('.tool-diagnostics summary');
-  expect(body().textContent).toContain('STALE_REF');
+  expect(container.querySelector('.tool-activity')?.textContent).not.toMatch(
+    /STALE_REF|成功|异常|失败/,
+  );
+  expect(run.steps[1]!.errorCode).toBe('STALE_REF'); // Presentation keeps the original evidence intact.
   await act(async () => listener({ type: 'remote-updated', state }));
   expect(body().hidden).toBe(false);
+});
+
+test('progress includes the initial waiting time, freezes at completion and preserves navigation order', async () => {
+  vi.useFakeTimers();
+  const start = Date.now();
+  state.chat = [
+    { role: 'user', text: 'Read pages', ts: start },
+    {
+      role: 'system',
+      text: '',
+      ts: start + 1000,
+      toolRun: {
+        status: 'running',
+        total: 30,
+        failed: 0,
+        startedAt: start + 1000,
+        steps: Array.from({ length: 30 }, (_, i) => ({
+          id: `step-${i}`,
+          number: i + 1,
+          method: i % 2 ? 'back' : 'open',
+          status: i === 29 ? 'running' : 'success',
+          queuedAt: start + 1000,
+        })),
+      },
+    },
+  ];
+  await mount();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(69_000);
+  });
+  expect(container.querySelector('.tool-activity-time')?.textContent).toBe('1:09');
+  await click('.tool-activity-toggle');
+  expect(container.querySelectorAll('.tool-overview li')).toHaveLength(30);
+  expect(
+    [...container.querySelectorAll('.tool-overview li')].slice(0, 2).map((el) => el.textContent),
+  ).toEqual(['打开页面', '返回上一页']);
+  const run = state.chat[1]!.toolRun!;
+  run.status = 'completed';
+  run.endedAt = start + 689_000;
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(container.querySelector('.tool-activity-time')?.textContent).toBe('用时 11:29');
+  expect(container.querySelector('.tool-activity-dot')).toBeNull();
+  expect(container.querySelector<HTMLElement>('.tool-activity-body')?.hidden).toBe(true);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60_000);
+  });
+  expect(container.querySelector('.tool-activity-time')?.textContent).toBe('用时 11:29');
+});
+
+test('Agent phase descriptions appear as plain text and tool states remain specific', async () => {
+  state.chat = [
+    { role: 'user', text: '看看后面的内容', ts: Date.now() },
+    {
+      role: 'system',
+      text: '',
+      ts: Date.now(),
+      toolRun: {
+        status: 'running',
+        startedAt: Date.now(),
+        total: 1,
+        failed: 0,
+        steps: [
+          {
+            id: 's1',
+            number: 1,
+            method: 'scroll',
+            status: 'running',
+            queuedAt: Date.now(),
+            summary: '继续查看后面的应用，补齐下载量数据。 <b>原文</b>',
+          },
+        ],
+      },
+    },
+  ];
+  await mount();
+  expect(container.querySelector('.tool-activity-title')?.textContent).toBe('思考执行中');
+  expect(container.querySelector('.tool-activity-context')?.textContent).toContain('补齐下载量');
+  expect(container.querySelector('.tool-activity-context b')).toBeNull();
+  await click('.tool-activity-toggle');
+  expect(container.querySelector('.tool-overview')?.textContent).toContain('继续查看后面的应用');
+  const run = state.chat[1]!.toolRun!;
+  run.steps[0]!.status = 'success';
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(container.querySelector('.tool-activity-title')?.textContent).toBe('思考执行中');
+  run.status = 'completed';
+  run.endedAt = Date.now();
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(container.querySelector('.tool-activity-context')).toBeNull();
+  await click('.tool-activity-toggle');
+  expect(container.querySelector('.tool-overview')?.textContent).toContain('补齐下载量');
 });
 
 test('failed sends retain the draft; an in-flight send cannot erase the next message or submit twice', async () => {
@@ -557,6 +661,43 @@ test('failed sends retain the draft; an in-flight send cannot erase the next mes
     resolve({ ok: true, value: state });
   });
   expect(input().value).toBe('接着输入的新消息');
+});
+
+test('Stop during tab capture prevents a late send and retains the unsent draft', async () => {
+  await mount();
+  let finishWindow!: (value: chrome.windows.Window) => void;
+  vi.mocked(chrome.windows.getCurrent).mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finishWindow = resolve;
+      }),
+  );
+  await fill('#message', 'Still gathering the current tab');
+  send.mockClear();
+  await enter();
+  expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('停止任务');
+  await click('#send');
+  await act(async () => finishWindow({ id: 1 } as chrome.windows.Window));
+  expect(send).toHaveBeenCalledExactlyOnceWith({ type: 'remote-stop' });
+  expect(input().value).toBe('Still gathering the current tab');
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+});
+
+test('a cancelled in-flight send cannot restore busy state or display a late send error', async () => {
+  await mount();
+  let finishSend!: (value: unknown) => void;
+  send.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finishSend = resolve;
+      }),
+  );
+  await fill('#message', 'Pending send');
+  await enter();
+  await click('#send');
+  await act(async () => finishSend({ ok: false, error: 'ui.error.sendFailed' }));
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+  expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('发送消息');
 });
 
 test('runtime updates render real tasks, stop/reveal remain wired, and disconnect disables sending', async () => {
@@ -603,25 +744,27 @@ test('runtime updates render real tasks, stop/reveal remain wired, and disconnec
   expect(container.querySelector('#stop-task')).toBeNull();
 });
 
-test('waiting for a reply is separate from browser work and becomes a delay notice without resending', async () => {
+test('waiting uses one quiet waiting timer without delay warnings or resending', async () => {
   vi.useFakeTimers();
   state.chat = [{ role: 'user', text: '帮我看一下美股', ts: Date.now(), delivery: 'queued' }];
   await mount();
-  expect(container.querySelector('.reply-status')?.textContent).toContain('等待 Agent 回复');
+  expect(container.querySelector('.reply-status')?.textContent).toContain('接通中·0:00');
   expect(container.querySelector('.live-preview')).toBeNull();
   const sent = send.mock.calls.length;
   await act(async () => {
     await vi.advanceTimersByTimeAsync(120_001);
   });
-  expect(container.querySelector('.reply-status')?.textContent).toContain('超过 2 分钟');
+  expect(container.querySelector('.reply-status')?.textContent).toContain('接通中');
+  expect(container.querySelectorAll('.tool-activity')).toHaveLength(1);
   expect(send.mock.calls.length).toBe(sent);
   state.chat.push({ role: 'assistant', text: '收到，正在查询', ts: Date.now(), final: false });
   await act(async () => listener({ type: 'remote-updated', state }));
-  expect(container.querySelector('.reply-status')?.textContent).toContain('等待最终回复');
+  expect(container.querySelector('.reply-status')?.textContent).toContain('接通中·2:00');
   await act(async () => {
     await vi.advanceTimersByTimeAsync(120_001);
   });
-  expect(container.querySelector('.reply-status')?.textContent).toContain('超过 2 分钟');
+  expect(container.querySelector('.reply-status')?.textContent).toContain('接通中');
+  expect(container.querySelectorAll('.tool-activity')).toHaveLength(1);
   state.chat.push({ role: 'assistant', text: '查询完成', ts: Date.now() });
   await act(async () => listener({ type: 'remote-updated', state }));
   expect(container.querySelector('.reply-status')).toBeNull();
@@ -642,6 +785,52 @@ test('delivery failure remains visible beside the user message after reopening t
     '未能送入 Agent 队列',
   );
   expect(container.querySelector('.reply-status')).toBeNull();
+});
+
+test('a new turn waits until a tool starts, then keeps working between tool responses', async () => {
+  const now = Date.now();
+  state.chat = [
+    { role: 'user', text: '上一个任务', ts: now - 3000 },
+    {
+      role: 'system',
+      text: '',
+      ts: now - 2000,
+      toolRun: {
+        status: 'completed',
+        startedAt: now - 2000,
+        endedAt: now - 1000,
+        total: 1,
+        failed: 0,
+        steps: [
+          { id: 'old', number: 1, method: 'snapshot', status: 'success', queuedAt: now - 2000 },
+        ],
+      },
+    },
+    { role: 'assistant', text: '已完成', ts: now - 1000, final: true },
+    { role: 'user', text: '新的任务', ts: now, delivery: 'queued' },
+  ];
+  await mount();
+  expect(container.querySelector('.reply-status .tool-activity-title')?.textContent).toBe('接通中');
+  const run: NonNullable<RemoteState['chat'][number]['toolRun']> = {
+    status: 'running',
+    startedAt: now,
+    total: 1,
+    failed: 0,
+    steps: [{ id: 'new', number: 1, method: 'snapshot', status: 'queued', queuedAt: now }],
+  };
+  state.chat.push({ role: 'system', text: '', ts: now, toolRun: run });
+  const title = () => [...container.querySelectorAll('.tool-activity-title')].at(-1)?.textContent;
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(title()).toBe('接通中');
+  expect(container.querySelector('.tool-activity-context')).toBeNull();
+  run.steps[0]!.status = 'running';
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(title()).toBe('思考执行中');
+  expect(container.querySelector('.tool-activity-context')?.textContent).toBe('正在读取页面');
+  run.steps[0]!.status = 'success';
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(title()).toBe('思考执行中');
+  expect(container.querySelector('.tool-activity-context')?.textContent).toBe('正在分析页面内容');
 });
 
 test('reply delays keep the current task locked while still accepting its eventual answer', async () => {
@@ -678,22 +867,27 @@ test('reply delays keep the current task locked while still accepting its eventu
   await act(async () => {
     await vi.advanceTimersByTimeAsync(121_000);
   });
-  expect(container.querySelector('.reply-status')?.textContent).toContain('正在操作浏览器');
+  expect(container.querySelector('.reply-status')).toBeNull();
+  expect(container.querySelectorAll('.tool-activity')).toHaveLength(1);
+  expect(container.querySelector('.tool-activity-title')?.textContent).toBe('思考执行中');
+  expect(container.querySelector('.tool-activity-time')?.textContent).toBe('3:51');
   const step = state.chat[1]!.toolRun!.steps[0]!;
   step.status = 'success';
   step.endedAt = Date.now();
   await act(async () => listener({ type: 'remote-updated', state }));
-  expect(container.querySelector('.reply-status')?.textContent).toContain('步骤已更新');
+  expect(container.querySelector('.tool-activity-context')?.textContent).toBe('正在分析页面内容');
   await act(async () => {
     await vi.advanceTimersByTimeAsync(120_001);
   });
-  expect(container.querySelector('.reply-status')?.textContent).toContain('不会停止任务或阻止回复');
+  expect(container.querySelector('.tool-activity-context')?.textContent).toBe('正在分析页面内容');
+  expect(container.querySelector('.reply-status')).toBeNull();
   expect(input().disabled).toBe(false);
   await fill('#message', 'Continue');
   send.mockClear();
   await enter();
   expect(send).not.toHaveBeenCalled();
-  expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(true);
+  expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(false);
+  expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('停止任务');
   state.loopActive = false;
   state.chat.push({
     role: 'assistant',
@@ -706,6 +900,33 @@ test('reply delays keep the current task locked while still accepting its eventu
   expect(container.textContent).toContain('The late reply arrived');
   expect(input().value).toBe('Continue');
   expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(false);
+});
+
+test('header clear stays out of settings and cannot interrupt an active task', async () => {
+  state.chat = [{ role: 'assistant', text: 'Keep until finished', ts: Date.now() }];
+  state.loopActive = true;
+  await mount();
+  const clear = () =>
+    container.querySelector<HTMLButtonElement>('.sidebar-header .clear-chat-button')!;
+  expect(clear().disabled).toBe(true);
+  send.mockClear();
+  await click('.clear-chat-button');
+  expect(send).not.toHaveBeenCalled();
+  await click('.settings-button');
+  expect(container.querySelector('#settings .clear-chat-button')).toBeNull();
+  state.loopActive = false;
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(clear().disabled).toBe(false);
+  state = { ...state, chat: [] };
+  await click('.clear-chat-button');
+  expect(send).toHaveBeenLastCalledWith({ type: 'remote-chat-clear' });
+  expect(clear().disabled).toBe(true);
+  expect(container.querySelector('#settings')).not.toBeNull();
+  expect(container.querySelector<HTMLInputElement>('#relay-url')?.value).toBe(
+    'ws://localhost:3802/ext',
+  );
+  await click('#connection-enabled');
+  expect(send).toHaveBeenLastCalledWith({ type: 'remote-set-enabled', enabled: false });
 });
 
 test('settings show the saved URL without exposing the key and return to chat after saving', async () => {
@@ -752,7 +973,7 @@ test('language selection updates immediately, persists after reopening, and can 
   });
   expect(savedPreferences.uiLanguage).toBe('en');
   expect(document.documentElement.lang).toBe('en');
-  expect(container.querySelector('#settings h1')?.textContent).toBe('Connect your Agent');
+  expect(container.querySelector('#settings h1')?.textContent).toBe('Settings');
   await act(async () => {
     root.unmount();
   });
@@ -769,7 +990,35 @@ test('language selection updates immediately, persists after reopening, and can 
   expect(savedPreferences.uiLanguage).toBe('auto');
 });
 
+test('switching language updates saved task notices while preserving Agent replies and owner input', async () => {
+  savedPreferences.uiLanguage = 'en';
+  const notice = { kind: 'request-failed' as const, code: 'DECISION_TIMEOUT' };
+  const original = formatTaskNotice('zh-CN', notice);
+  state.chat = [
+    { role: 'user', text: '保留我输入的中文', ts: 1 },
+    { role: 'assistant', text: original, notice, ts: 2, final: true },
+    { role: 'assistant', text: original, ts: 3, final: true },
+  ];
+  await mount();
+  const replies = () =>
+    [...container.querySelectorAll('.message.assistant .message-text')].map((el) => el.textContent);
+  expect(replies()).toEqual([formatTaskNotice('en', notice), original]);
+  await click('.settings-button');
+  await act(async () => {
+    const select = container.querySelector<HTMLSelectElement>('#interface-language')!;
+    select.value = 'zh-CN';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await click('.settings-button');
+  expect(replies()).toEqual([original, original]);
+  expect(container.querySelector('.message.user .message-text')?.textContent).toBe(
+    '保留我输入的中文',
+  );
+  expect(state.chat[1]!.text).toBe(original);
+});
+
 test('preview shows only matching frames, retains completed image, and removes Stop after completion', async () => {
+  queryTabs.mockResolvedValue([{ id: 99, windowId: 1 } as chrome.tabs.Tab]);
   await mount();
   const preview = {
     targetKey: 'task:3:1',
@@ -837,6 +1086,7 @@ test('preview shows only matching frames, retains completed image, and removes S
 });
 
 test('preview failure retains controls; stopped and interrupted tasks do not show success', async () => {
+  queryTabs.mockResolvedValue([{ id: 99, windowId: 1 } as chrome.tabs.Tab]);
   await mount();
   const preview = {
     targetKey: 'task:3:1',
@@ -871,6 +1121,7 @@ test('preview failure retains controls; stopped and interrupted tasks do not sho
 });
 
 test('closing preview suspends frames without stopping the task and keeps lifecycle controls accurate', async () => {
+  queryTabs.mockResolvedValue([{ id: 99, windowId: 1 } as chrome.tabs.Tab]);
   await mount();
   const preview = {
     targetKey: 'task:3:1',
@@ -920,5 +1171,64 @@ test('closing preview suspends frames without stopping the task and keeps lifecy
     }),
   );
   expect(container.querySelector('.live-preview')).not.toBeNull();
+  expect(previewPost).toHaveBeenLastCalledWith({ type: 'visibility', visible: true });
+});
+
+test('preview follows this window active tab without losing manual dismissal or task controls', async () => {
+  state.loopActive = true;
+  await mount();
+  const preview = {
+    targetKey: 'task:3:1',
+    sessionId: 'task',
+    tabId: 3,
+    windowId: 1,
+    title: 'Task page',
+    url: 'https://example.com',
+    status: 'running',
+    availability: 'live',
+    canReveal: true,
+    canStop: true,
+  };
+  const activate = async (tabId: number, windowId = 1) => {
+    await act(async () => {
+      if (windowId === 1) queryTabs.mockResolvedValue([{ id: tabId, windowId } as chrome.tabs.Tab]);
+      for (const [handler] of vi.mocked(chrome.tabs.onActivated.addListener).mock.calls)
+        handler({ tabId, windowId });
+    });
+  };
+  await act(async () => previewListener({ type: 'preview-state', preview }));
+  expect(container.querySelector('.live-preview')).toBeNull();
+  expect(container.querySelector('.preview-restore')).toBeNull();
+  expect(previewPost).toHaveBeenLastCalledWith({ type: 'visibility', visible: false });
+  expect(container.querySelector('#send')?.getAttribute('aria-label')).toBe('停止任务');
+  await activate(4);
+  expect(container.querySelector('.live-preview')?.getAttribute('data-tab-id')).toBe('3');
+  expect(previewPost).toHaveBeenLastCalledWith({ type: 'visibility', visible: true });
+  await activate(3, 2); // An activation in another Chrome window does not affect this panel.
+  expect(container.querySelector('.live-preview')).not.toBeNull();
+  await activate(3);
+  expect(container.querySelector('.live-preview')).toBeNull();
+  expect(previewPost).toHaveBeenLastCalledWith({ type: 'visibility', visible: false });
+  await activate(4);
+  await click('.preview-close');
+  await activate(3);
+  expect(container.querySelector('.preview-restore')).toBeNull();
+  await activate(4);
+  expect(container.querySelector('.live-preview')).toBeNull();
+  expect(container.querySelector('.preview-restore')).not.toBeNull();
+  await act(async () =>
+    previewListener({
+      type: 'preview-state',
+      preview: {
+        ...preview,
+        tabId: 4,
+        sessionId: 'next-task',
+        targetKey: 'next-task:4:1',
+      },
+    }),
+  );
+  expect(container.querySelector('.live-preview')).toBeNull();
+  await activate(5);
+  expect(container.querySelector('.live-preview')?.getAttribute('data-tab-id')).toBe('4');
   expect(previewPost).toHaveBeenLastCalledWith({ type: 'visibility', visible: true });
 });

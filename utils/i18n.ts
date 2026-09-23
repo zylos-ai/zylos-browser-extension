@@ -35,6 +35,22 @@ export function localizeError(locale: Locale, message: string): string {
     })
     .join(locale === 'en' ? '; ' : '；');
 }
+// Translate known browser failures at the panel boundary. Agent tool diagnostics
+// keep their original error codes and details.
+const panelErrorKeys: Record<string, TranslationKey> = {
+  CLEANUP_PENDING: 'taskTabsCleanupPending',
+  DEBUGGER_DETACH_FAILED: 'debuggerDetachFailed',
+  CONTROL_NOT_GRANTED: 'noActiveTask',
+  TASK_TAB_UNAVAILABLE: 'taskTabUnavailable',
+  STALE_TASK: 'taskAlreadyEnded',
+  STOPPED: 'activityStopped',
+};
+export function panelErrorMessage(error: unknown): string {
+  const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+  if (typeof code === 'string' && Object.hasOwn(panelErrorKeys, code))
+    return `ui.error.${panelErrorKeys[code]}`;
+  return error instanceof Error ? error.message : String(error);
+}
 export function formatMessageDate(ts: number, locale: Locale, now = Date.now()): string {
   const date = new Date(ts);
   if (date.toDateString() === new Date(now).toDateString()) return translate(locale, 'today');

@@ -112,6 +112,10 @@ test('only visible authenticated side panels start capture; hide/disconnect stop
   expect(rejected.port.disconnect).toHaveBeenCalledOnce();
   const a = client();
   const b = client();
+  expect(a.state().tabId).toBe(3);
+  await tick();
+  expect(a.frames()).toHaveLength(0);
+  expect(command).not.toHaveBeenCalled();
   a.visible(true);
   b.visible(true);
   await tick();

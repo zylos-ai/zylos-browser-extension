@@ -23,8 +23,16 @@ Responses:
 
 - `{"kind":"done","text":"Your answer"}` for ordinary chat, a question answered
   by the page excerpt, or a browser goal confirmed by the returned evidence.
-- `{"kind":"actions","actions":[{"method":"...","params":{}}],"memory":"Brief facts already collected and remaining user goals"}`.
+- `{"kind":"actions","actions":[{"method":"...","params":{}}],"memory":"Brief facts already collected and remaining user goals","summary":"Short user-facing description of this phase"}`.
 - `{"kind":"blocked","text":"Completed parts and the specific blocker / needed user input"}`.
+
+Include `summary` in actions responses: one short sentence (up to 160 characters)
+in the owner's language describing the next concrete activity and its purpose,
+for example “Continue through the results to collect the remaining download figures.”
+This is displayed as progress, so describe the work rather than private reasoning,
+raw tool names, refs, credentials, or copied page text. Do not claim success before
+checking the result. Keep `memory` separate; it is never a UI progress message.
+Do not make extra calls for progress. Older responses without summary remain valid.
 
 The first request carries a DOM excerpt and the entry tools read-page,
 use-current-tab and open. Reading more text does not enter browser control.
@@ -43,10 +51,10 @@ For a request to open another site, use open. Use new-tab to retain a selected
 page. Only task tabs and the message's explicitly captured page are available.
 
 Every actions response is validated in full before input. Up to five actions are
-allowed, but only already-known form edits (fill/type/check/select) may precede
-another action. Clicks, navigation, reads and scrolling end the batch. Use only
+allowed, but only already-known form edits (fill/type/check/select) or one initial
+record-findings may precede another action. Clicks, navigation, reads and scrolling end the batch. Use only
 observed refs, URLs and selectors. Do not predict post-navigation refs, guess a
-destination URL or content ID, or add waits. The extension handles page load,
+destination URL or content ID. The extension handles page load,
 same-tab redirects and a single new popup from the selected task tab, then
 returns the actual page and scoped tabs. Multiple popups require a decision.
 It interrupts the remaining batch on navigation or failure. Completed inputs
@@ -54,15 +62,49 @@ are never automatically replayed, even when observation failed. Inspect the
 actual state before considering a retry. A dispatched click is not proof that
 a goal was achieved. Page changes before input acknowledgement remain errors.
 
-Once operating, the default observation is bounded accessibility text, viewport/scroll metrics,
-and task tabs. Accessibility text can include offscreen loaded content. When
+Once operating, the default observation is current-viewport accessibility text,
+clipped to visible frame regions and scrolling containers, viewport/scroll metrics,
+and task tabs. `scope: viewport` is one screen, never the whole document. When
 more results are needed, scroll about one viewport and inspect the next state;
 this also triggers lazy loading. Use scroll with a ref for a nested container.
 Do not scroll after sufficient evidence has been collected. Prefer targeted
 find/inspect when text was truncated or facts such as playback/form state are
-needed. observe requests an image only when visual evidence is necessary. Image
-paths returned by the transport are on the Agent host; use the image tool to
-read them. Do not claim to have seen pixels from JSON metadata alone.
+needed. `truncated: true` means even this viewport is incomplete: use targeted
+find/inspect for the required region. find can return hidden/offscreen elements;
+never click visible:false matches. A clickable:false match is not proof of an
+operable control. Inspect the visible controls and overlays instead.
+Before each operating-mode text observation the extension samples visible content,
+scroll geometry, loading indicators and relevant network activity with a bounded
+wait. `page.readiness.status` is stable, partial, loading or unavailable. Stable
+means the sampled state settled, NOT that the task succeeded or all data loaded.
+When loading, or when expected asynchronous content is absent, use wait-for-page:
+it waits and returns fresh text/refs without replaying the previous input. Use the
+container ref when appropriate. If repeated waits still show no progress, inspect
+the actual loading/pagination controls or report the limitation; do not spin.
+A geometric bottom (`remainingBelow: 0` or `readiness.atBoundary`) is provisional:
+lazy lists may grow, and virtualized lists may reuse the same height. When the
+requested coverage is incomplete, re-observe a provisional bottom before claiming
+there are no further entries. Track actual new items, not just page height.
+No screenshot is captured automatically. Manual observe remains available only
+when visual evidence is needed and an image tool is available. Image paths from
+the transport are on the Agent host; read them before claiming to have seen pixels.
+
+For multi-screen research, create a stable collection with record-findings and
+set targetCount to the requested number of entries to REVIEW (e.g. 200), not the
+number of recommendations (e.g. 5). Record each reviewed entry using a stable key,
+actual position/rank when present, observed sourceUrl, and a concise factual
+summary; excluded candidates can include the reason for exclusion. Separate list
+filters/categories into separate collections. Never invent entries to fill gaps.
+Record current findings BEFORE leaving the viewport; record-findings may precede
+one scroll/navigation in the same actions response, avoiding an extra model round.
+`execution.research` retains counts and remaining coverage across subsequent
+rounds even when memory changes. Read saved details with read-findings and its
+nextOffset when composing the report. These are your recorded notes, not automatic
+fact verification. Duplicate keys/positions do not increase coverage. A declared
+target cannot be lowered, and done is refused while recorded coverage is below
+it; use blocked for an honest partial result if the target cannot be reached.
+Notes-only actions return `observation.reused: true`: the prior page was not
+refreshed and its screenshot is not retransmitted. Use wait-for-page for fresh state.
 
 Use memory for concise accumulated findings, not raw old snapshots. Latest
 observation replaces old refs/state. Before choosing another action, compare

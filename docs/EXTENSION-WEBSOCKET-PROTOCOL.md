@@ -229,9 +229,14 @@ Remote 通过同一 WebSocket 下发：
 {
   "kind": "actions",
   "actions": [{ "method": "open", "params": { "url": "https://example.com/" } }],
-  "memory": "任务记忆"
+  "memory": "任务记忆",
+  "summary": "打开资料页面，查找相关信息"
 }
 ```
+
+`summary` 是可选的用户可见阶段说明，最多 160 个字符，使用用户的语言。
+它随已有决策一起返回，不增加调用；不提供时界面按真实动作显示状态。
+`memory` 仍只用于任务续接，不显示为思考过程。Remote 原样转发，无需更新。
 
 插件验证当前请求 ID、动作参数和权限。已接受的相同决策可幂等重试，冲突内容
 拒绝；过期 ID 和停止后的请求也拒绝。先返回接受回执：
@@ -263,6 +268,18 @@ Remote 通过同一 WebSocket 下发：
 agent-event 记录真实执行步骤，工具参数和结果有体积限制，不发送截图 Base64。
 agent-turn-end 的 status 为 done、blocked、interrupted 或 stopped。
 断线、停止和插件重载不会自动重放尚未确认的动作。
+
+Remote 在 `ready.capabilities` 中声明 `agent-interrupt-v1` 后，用户点击输入框或预览中的
+停止按钮会发送 `{type:"agent-turn-end",taskId,status:"stopped",interrupt:true}`。
+插件立即取消本地任务并释放浏览器控制；Remote 复用 Core 控制队列向当前运行时发送一次
+Escape，再返回 `{type:"agent-stop-result",taskId,ok,code?}`。
+`ok:true` 表示中断按键已投递，不表示所有子进程都已退出；它中断的是 Agent 当前主会话，
+不提供指定其他 Channel 任务的取消或原地恢复推理。
+
+输入框在任务执行期间将发送按钮替换为停止按钮；等待中断回执期间显示“正在停止”，
+继续保留草稿并禁止提交新消息，最长等待 11 秒。投递失败或超时会说明 Agent 中断未确认。
+旧版 Remote 不支持此能力时仍会停止浏览器操作，并提示更新 Remote。正常结束、断线、
+重载以及没有 `interrupt:true` 的结束消息不会触发运行时按键。
 
 ## 8. Remote 转交给 Agent
 

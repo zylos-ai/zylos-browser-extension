@@ -207,6 +207,9 @@ export class LivePreview {
       this.clients.delete(client);
       this.reconcile();
     });
+    // Metadata is needed even when the panel initially hides the thumbnail.
+    // Frame delivery still requires explicit visibility from that panel.
+    this.post(client, { type: 'preview-state', preview: this.state });
   }
 
   private post(client: Client, message: unknown) {

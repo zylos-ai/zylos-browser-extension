@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { actionParams } from './commands';
 import { REMOTE_VERSION } from './remote';
+import { researchParams } from './research-ledger';
 
 // The same schemas validate local actions and generate the Agent's live reference.
 const {
@@ -13,6 +14,7 @@ const {
 } = actionParams;
 export const browserParams = {
   ...loopActionParams,
+  ...researchParams,
   'use-current-tab': z.object({ contextId: z.string().uuid() }).strict(),
   'read-page': z
     .object({
@@ -39,6 +41,25 @@ const targetRule =
 // Adding a method without documentation is a TypeScript error. All browser
 // semantics stay in this extension; the transport has no copy of this table.
 export const toolHelp = {
+  'wait-for-page': {
+    description:
+      'Wait for content to settle, then return fresh viewport text and refs. Does not scroll, navigate, replay input or capture an image.',
+    constraints: [
+      'Use when evidence is still loading or an expected asynchronous update has not appeared. timeoutMs is a bounded waiting budget, not a guaranteed delay. A stable sample or geometric bottom does not prove dataset completion. Target is optional. If supplied: ' +
+        targetRule,
+    ],
+  },
+  'record-findings': {
+    description:
+      'Save source-linked findings in this task, deduplicated by collection and item key. Record reviewed entries before scrolling; summaries can explain why an entry was excluded.',
+    constraints: [
+      'Use a stable collection name for one list/filter scope and a stable item key. For a requested scan of N entries declare targetCount=N and include actual rank as position. Record actual observations only; include observed sourceUrl. Targets cannot later be lowered. Up to 50 items/call, 500 items/160 KB/task. May precede one browser action in the same batch. Counts are recorded coverage, not independent factual verification.',
+    ],
+  },
+  'read-findings': {
+    description:
+      'Read saved findings in bounded pages for analysis or the final report, without rereading or changing the browser. Continue with nextOffset until null.',
+  },
   'read-page': {
     description:
       'Read loaded text and links from the page attached to a user message, without debugger attachment, scrolling, navigation or screenshots.',
@@ -71,20 +92,21 @@ export const toolHelp = {
   frames: { description: 'List permitted frame IDs and URLs for scoped element queries.' },
   snapshot: {
     description:
-      'Read page text and element refs across permitted frames. Use when no image is needed.',
+      'Read current-viewport text and element refs across permitted frames, clipped to scrolling containers. Includes scroll metrics, scope and truncation status. Use when no image is needed; viewport:false reads the loaded document with a bounded output.',
     examples: [{ interactive: true }],
   },
   observe: {
     description:
-      'Read text, fresh refs, PNG screenshot, viewport and page version together. Read the returned image with an image tool; do not request a second screenshot.',
+      'Read current-viewport text, fresh refs, PNG screenshot, scroll metrics and page version together. Read the returned image with an image tool; do not request a second screenshot.',
     examples: [{ interactive: true }],
   },
   find: {
     description:
-      'Find elements by CSS selector, traversing open Shadow DOM; return usable refs and state, including native video/audio playback facts in state.media.',
+      'Find elements by CSS selector, traversing open Shadow DOM; return refs and state, including actual link destinations in state.href and native video/audio playback facts in state.media.',
     examples: [{ selector: 'input[type="search"]' }, { selector: 'video,audio' }],
     constraints: [
       'Quote CSS attribute values containing punctuation: a[href*="/comments/"] is valid; a[href*=/comments/] is not.',
+      'Matches can include hidden or offscreen elements. visible:false is not an action target; clickable:false requires fresh inspection of visibility/occlusion before clicking. Use the visible page controls instead of hidden duplicates.',
     ],
   },
   inspect: {

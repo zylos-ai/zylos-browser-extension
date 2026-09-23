@@ -39,6 +39,7 @@ function endRun(run: ToolRun, status: Exclude<ToolRun['status'], 'running'>) {
 export class ToolActivity {
   private active?: ChatEntry;
   private sequence = 0;
+  private summary?: string;
   // Retry evidence lives only in memory; raw arguments must never enter chat storage.
   private failures = new Map<string, { step: ToolStep; signature: string; context: string }>();
   constructor(
@@ -46,6 +47,10 @@ export class ToolActivity {
     private changed: () => void,
     private context: () => string | undefined = () => undefined,
   ) {}
+
+  describe(summary: string | undefined) {
+    this.summary = summary?.replace(/\s+/g, ' ').trim().slice(0, 160) || '';
+  }
 
   begin(method: string, params: Record<string, unknown>) {
     const chat = this.chat();
@@ -77,10 +82,12 @@ export class ToolActivity {
       id: `${entry.id}-${++run.total}`,
       number: run.total,
       method,
+      ...(this.summary !== undefined ? { summary: this.summary } : {}),
       target: targetHint(params),
       status: 'queued',
       queuedAt: Date.now(),
     };
+    this.summary = undefined;
     run.steps.push(step);
     if (run.steps.length > TOOL_STEPS_CAP) run.steps.splice(0, run.steps.length - TOOL_STEPS_CAP);
     for (const [id, entry] of this.failures)
@@ -171,6 +178,7 @@ export class ToolActivity {
   }
 
   end(status: Exclude<ToolRun['status'], 'running'>) {
+    this.summary = undefined;
     const entry = this.active;
     this.active = undefined;
     this.failures.clear();

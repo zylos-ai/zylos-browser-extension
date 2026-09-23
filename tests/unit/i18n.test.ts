@@ -3,6 +3,7 @@ import {
   formatMessageDate,
   languagePreference,
   localizeError,
+  panelErrorMessage,
   messages,
   resolveLocale,
   translate,
@@ -16,6 +17,24 @@ test('browser language chooses Chinese variants or English, while an explicit ch
   expect(resolveLocale('en', 'zh-CN')).toBe('en');
   expect(resolveLocale('zh-CN', 'en-US')).toBe('zh-CN');
   expect(languagePreference('unsupported')).toBe('auto');
+});
+
+test('known panel failures translate by code without rewriting external diagnostics', () => {
+  for (const code of [
+    'CLEANUP_PENDING',
+    'DEBUGGER_DETACH_FAILED',
+    'CONTROL_NOT_GRANTED',
+    'TASK_TAB_UNAVAILABLE',
+    'STALE_TASK',
+    'STOPPED',
+  ]) {
+    const message = panelErrorMessage(Object.assign(new Error('Raw diagnostic'), { code }));
+    expect(message).toMatch(/^ui\.error\./);
+    expect(localizeError('en', message)).not.toMatch(/ui\.error|\p{Script=Han}/u);
+    expect(localizeError('zh-CN', message)).toMatch(/\p{Script=Han}/u);
+  }
+  const custom = Object.assign(new Error('Agent 自定义错误'), { code: 'CUSTOM_ERROR' });
+  expect(panelErrorMessage(custom)).toBe(custom.message);
 });
 
 test('both dictionaries have the same keys and interpolation placeholders', () => {

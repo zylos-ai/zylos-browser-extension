@@ -1,10 +1,12 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { REPLY_NOTICE_MS, type RemoteState } from '../utils/remote';
+import { Fragment, useLayoutEffect, useRef, useState } from 'react';
+import { type RemoteState } from '../utils/remote';
 import { Brand } from './Brand';
+import { WelcomeMascot } from './WelcomeMascot';
 import { useI18n } from './LanguageProvider';
 import { formatMessageDate } from '../utils/i18n';
 import { ToolSteps } from './ToolSteps';
 import { MarkdownMessage } from './MarkdownMessage';
+import { formatTaskNotice } from '../utils/task-notice';
 
 const dayKey = (ts: number) => new Date(ts).toDateString();
 
@@ -16,7 +18,7 @@ export function Conversation({
   onStarter: (value: string) => void;
 }) {
   const { t, locale, errorText } = useI18n();
-  const starters = [t('starterResearch'), t('starterCompare'), t('starterForm')];
+  const starters = [t('starterSummary'), t('starterVideo'), t('starterCompare')];
   const historyRef = useRef<HTMLDivElement>(null);
   const following = useRef(true);
   const [unread, setUnread] = useState(false);
@@ -30,47 +32,16 @@ export function Conversation({
       (message) =>
         message.role === 'user' || (message.role === 'assistant' && message.final !== false),
     );
-  const progress = [...chat]
-    .reverse()
-    .find((message) => message.role === 'assistant' && message.final === false);
-  const hasProgress = !!progress && !!turn && chat.indexOf(progress) > chat.indexOf(turn);
   const turnActivity =
     turn &&
     chat
       .slice(chat.indexOf(turn) + 1)
       .flatMap((message) => (message.toolRun ? [message.toolRun] : []));
-  const browserActivityTs = Math.max(
-    0,
-    ...(turnActivity ?? []).flatMap((run) => [
-      run.startedAt,
-      run.endedAt ?? 0,
-      ...run.steps.map((step) => step.endedAt ?? step.startedAt ?? step.queuedAt),
-    ]),
-  );
-  const browserBusy = (turnActivity ?? []).some(
-    (run) =>
-      run.status === 'running' &&
-      run.steps.some((step) => step.status === 'running' || step.status === 'queued'),
-  );
-  const hasBrowserActivity = browserActivityTs > 0;
-  const activityTs = Math.max(hasProgress ? progress!.ts : (turn?.ts ?? 0), browserActivityTs);
-  const [now, setNow] = useState(Date.now);
   const awaiting =
     turn?.role === 'user' &&
     turn.delivery !== 'failed' &&
     turn.delivery !== 'unknown' &&
     (!turn.loopStatus || turn.loopStatus === 'active');
-  const delayed = awaiting && !browserBusy && now - activityTs >= REPLY_NOTICE_MS;
-  useEffect(() => {
-    setNow(Date.now());
-    if (!awaiting) return;
-    const timer = setTimeout(
-      () => setNow(Date.now()),
-      Math.max(0, activityTs + REPLY_NOTICE_MS - Date.now()),
-    );
-    return () => clearTimeout(timer);
-  }, [awaiting, activityTs]);
-
   function scrollToLatest() {
     const el = historyRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -88,7 +59,6 @@ export function Conversation({
     chat.length,
     task?.sessionId,
     task?.phase,
-    delayed,
     activityRevision,
   ]);
 
@@ -107,7 +77,7 @@ export function Conversation({
         {chat.length === 0 && !task ? (
           <section className="empty-chat" aria-labelledby="welcome-title">
             <div className="welcome">
-              <Brand large />
+              <WelcomeMascot />
               <h1 id="welcome-title" className="text-title">
                 {t('welcomeTitle')}
               </h1>
@@ -145,7 +115,10 @@ export function Conversation({
                   </p>
                 )}
                 {message.toolRun ? (
-                  <ToolSteps run={message.toolRun} />
+                  <ToolSteps
+                    run={message.toolRun}
+                    startedAt={chat.slice(0, index).findLast((entry) => entry.role === 'user')?.ts}
+                  />
                 ) : (
                   <article
                     className={`message ${message.role}`}
@@ -166,7 +139,9 @@ export function Conversation({
                     {message.role === 'system' && (
                       <span className="system-label">{t('system')}</span>
                     )}
-                    {message.role === 'assistant' ? (
+                    {message.role !== 'user' && message.notice ? (
+                      <p className="message-text">{formatTaskNotice(locale, message.notice)}</p>
+                    ) : message.role === 'assistant' ? (
                       <MarkdownMessage text={message.text} />
                     ) : (
                       <p className="message-text">{message.text}</p>
@@ -182,22 +157,18 @@ export function Conversation({
             ))}
           </div>
         )}
-        {awaiting && (
-          <p className="reply-status" role="status">
-            {!state.connected
-              ? t('replyDisconnected')
-              : browserBusy
-                ? t('replyBrowserWorking')
-                : delayed
-                  ? t('replyDelayed')
-                  : hasBrowserActivity
-                    ? t('replyBrowserProgress')
-                    : hasProgress
-                      ? t('replyProgress')
-                      : turn?.delivery === 'queued'
-                        ? t('replyQueued')
-                        : t('replyWaiting')}
-          </p>
+        {awaiting && !turnActivity?.length && (
+          <ToolSteps
+            className="reply-status"
+            label={!state.connected ? 'progressDisconnected' : undefined}
+            run={{
+              status: state.connected ? 'running' : 'interrupted',
+              startedAt: turn.ts,
+              total: 0,
+              failed: 0,
+              steps: [],
+            }}
+          />
         )}
       </div>
       {unread && (

@@ -13,7 +13,7 @@ type Call = (
   requestId: string,
 ) => Promise<unknown>;
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-const reads = new Set(['find', 'inspect', 'frames', 'observe']);
+const reads = new Set(['find', 'inspect', 'frames', 'observe', 'wait-for-page']);
 const navigations = new Set([
   'open',
   'new-tab',
@@ -118,24 +118,25 @@ export async function runBrowserRound(
       failed,
     };
   let observation: unknown = suppliedObservation;
-  // find/inspect refs remain valid: do not clear them with a redundant snapshot.
-  if (observation === undefined) {
+  const readSnapshot = async (stage = 'state') => {
     for (let attempt = 0; attempt < 3; attempt++) {
       assertActive();
       try {
-        observation = await call('snapshot', { viewport: true }, `${requestId}:state:${attempt}`);
-        break;
+        return await call('snapshot', { viewport: true }, `${requestId}:${stage}:${attempt}`);
       } catch (error) {
         const info = errorInfo(error);
+        if (['STOPPED', 'TASK_TAB_UNAVAILABLE'].includes(info.code)) throw error;
         if (['PAGE_CHANGED', 'PAGE_LOADING'].includes(info.code) && attempt < 2) {
           await delay(200);
           continue;
         }
-        observation = { available: false, error: info };
         failed = true;
+        return { available: false, error: info };
       }
     }
-  }
+  };
+  // find/inspect refs remain valid: do not clear them with a redundant snapshot.
+  if (observation === undefined) observation = await readSnapshot();
   assertActive();
   const tabs = await call('tabs', {}, `${requestId}:tabs`);
   assertActive();
@@ -164,7 +165,11 @@ export async function runBrowserRound(
   };
   return {
     mode: 'operating',
-    observation: { page: bounded(observation), tabs, target: currentGrant() },
+    observation: {
+      page: bounded(observation),
+      tabs,
+      target: currentGrant(),
+    },
     results: results.map(bounded),
     failed,
   };

@@ -1,4 +1,4 @@
-import { LANGUAGE_STORAGE_KEY, setWorkerLanguage } from '../../utils/i18n';
+import { LANGUAGE_STORAGE_KEY, setWorkerLanguage, panelErrorMessage } from '../../utils/i18n';
 // Extension-owned conversations: request Agent decisions, execute locally, and
 // return observations over the authenticated Remote connection.
 import { captureCurrentPage, clearPageContexts, forgetPageContext } from '../../utils/page-context';
@@ -17,6 +17,7 @@ import {
   CHAT_LOG_CAP,
   BROWSER_ID_RE,
   INSTANCE_CAPABILITY,
+  INTERRUPT_CAPABILITY,
   REMOTE_BROWSER_ID_KEY,
   REMOTE_CHAT_LOG_KEY,
   REMOTE_CONFIG_KEY,
@@ -69,7 +70,10 @@ export function startRemoteBackground() {
   let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
   let loopReady = false;
   let attachmentsReady = false;
+  let interruptReady = false;
   let sendingChat = false;
+  let stopTaskPromise: Promise<void> | undefined;
+  let pendingStop: { taskId: string; resolve: (ok: boolean) => void } | undefined;
   let chatRevision = 0;
   let loop: BrowserLoop;
 
@@ -79,7 +83,8 @@ export function startRemoteBackground() {
   };
   function snapshot(): RemoteState {
     state.loopActive = loop?.active ?? false;
-    state.chatBusy = sendingChat || state.loopActive;
+    state.stopping = !!stopTaskPromise;
+    state.chatBusy = sendingChat || state.loopActive || state.stopping;
     const control = currentControl();
     const grant = currentGrant();
     const previous =
@@ -201,7 +206,27 @@ export function startRemoteBackground() {
   };
 
   loop = new BrowserLoop({
+    progress: (summary) => activity.describe(summary),
     send: (request) => send({ type: 'agent-request', ...request }),
+    record: (method, result) => {
+      const taskId = loop.taskId;
+      const id = crypto.randomUUID();
+      const step = activity.begin(method, {});
+      step?.start();
+      send({ type: 'agent-event', phase: 'start', taskId, id, method, params: {} });
+      step?.finish();
+      send({
+        type: 'agent-event',
+        phase: 'end',
+        taskId,
+        id,
+        method,
+        result: {
+          completed: true,
+          outputBytes: new TextEncoder().encode(JSON.stringify(result)).length,
+        },
+      });
+    },
     cancel: () => idem.cancel(),
     error: () => {
       state.error = 'ui.error.chatSaveFailed';
@@ -262,7 +287,7 @@ export function startRemoteBackground() {
         assertActive,
         requestId,
       ),
-    finish: async (text, status, taskId) => {
+    finish: async (text, status, taskId, notice) => {
       idem.cancel();
       preview.finish(status === 'done' ? 'completed' : 'error');
       activity.end(status === 'done' ? 'completed' : 'interrupted');
@@ -276,6 +301,7 @@ export function startRemoteBackground() {
         id: crypto.randomUUID(),
         role: 'assistant',
         text,
+        ...(notice ? { notice } : {}),
         final: true,
         ts: Date.now(),
       });
@@ -285,16 +311,61 @@ export function startRemoteBackground() {
     },
   });
 
-  function cancelLoop(status: 'stopped' | 'interrupted') {
+  function cancelLoop(status: 'stopped' | 'interrupted', interrupt = false) {
     chatRevision++; // Also invalidate a message still collecting its initial DOM excerpt.
     const taskId = loop.taskId;
     loop.cancel();
     if (taskId) {
       const message = state.chat.find((entry) => entry.role === 'user' && entry.id === taskId);
       if (message) message.loopStatus = status;
-      send({ type: 'agent-turn-end', taskId, status });
+      send({ type: 'agent-turn-end', taskId, status, ...(interrupt ? { interrupt: true } : {}) });
       void persistChat().catch(() => {});
     }
+  }
+
+  function stopCurrentTask(): Promise<void> {
+    if (stopTaskPromise) return stopTaskPromise;
+    stopTaskPromise = Promise.resolve()
+      .then(async () => {
+        const taskId = loop.taskId;
+        const canInterrupt = interruptReady;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const confirmation =
+          taskId && canInterrupt
+            ? new Promise<boolean>((resolve) => {
+                pendingStop = { taskId, resolve };
+                timer = setTimeout(() => resolve(false), 11000);
+              })
+            : null;
+        cancelLoop('stopped', !!confirmation);
+        preview.finish('stopped');
+        clearPageContexts();
+        idem.cancel();
+        activity.end('stopped');
+        try {
+          // Revoke browser control immediately, independently of the runtime key
+          // receipt and storage. Hold the send lock until both operations settle.
+          const [cleanup, remote] = await Promise.allSettled([
+            release(),
+            confirmation ?? Promise.resolve(false),
+          ]);
+          if (taskId && (remote.status !== 'fulfilled' || !remote.value))
+            state.error = canInterrupt
+              ? 'ui.error.agentStopUnconfirmed'
+              : 'ui.error.agentStopUnsupported';
+          if (cleanup.status === 'rejected') throw cleanup.reason;
+        } finally {
+          clearTimeout(timer);
+          pendingStop = undefined;
+          await persistChat();
+        }
+      })
+      .finally(() => {
+        stopTaskPromise = undefined;
+        publish();
+      });
+    publish();
+    return stopTaskPromise;
   }
 
   function scheduleReconnect() {
@@ -311,6 +382,7 @@ export function startRemoteBackground() {
       void completeTask().catch(() => {});
     }
     loopReady = false;
+    interruptReady = false;
     clearTimeout(handshakeTimer);
     preview.finish('interrupted');
     clearTimeout(reconnectTimer);
@@ -376,6 +448,7 @@ export function startRemoteBackground() {
         void completeTask().catch(() => {});
       }
       loopReady = false;
+      interruptReady = false;
       clearTimeout(handshakeTimer);
       preview.finish('interrupted');
       socket = null;
@@ -427,10 +500,14 @@ export function startRemoteBackground() {
         }
         state.endpointId = m.endpointId;
         attachmentsReady = m.capabilities.includes(ATTACHMENT_CAPABILITY);
+        interruptReady = m.capabilities.includes(INTERRUPT_CAPABILITY);
         loopReady = true;
         state.connected = true;
         state.connecting = false;
         publish();
+        return;
+      case 'agent-stop-result':
+        if (pendingStop?.taskId === m.taskId) pendingStop.resolve(m.ok);
         return;
       case 'agent-status':
         if (loop.pendingId !== m.requestId) return;
@@ -546,7 +623,7 @@ export function startRemoteBackground() {
     publish();
   })();
   void boot.catch((e) => {
-    state.error = `ui.error.initializationFailed\n${e instanceof Error ? e.message : String(e)}`;
+    state.error = `ui.error.initializationFailed\n${panelErrorMessage(e)}`;
     publish();
   });
 
@@ -600,7 +677,7 @@ export function startRemoteBackground() {
           if (!state.connected || !loopReady) throw new Error('ui.error.messageNotSent');
           const text = messageText(m.message).trim();
           if (!text) throw new Error('ui.error.emptyMessage');
-          if (sendingChat || loop.active) throw new Error('ui.error.chatBusy');
+          if (sendingChat || loop.active || stopTaskPromise) throw new Error('ui.error.chatBusy');
           const attachments = messageAttachments(m.message);
           if (!attachmentsReady && attachments.some((a) => a.type !== 'quote'))
             throw new Error('ui.error.attachmentsUnsupported');
@@ -666,17 +743,7 @@ export function startRemoteBackground() {
           await preview.reveal();
           return snapshot();
         case 'remote-stop':
-          cancelLoop('stopped');
-          preview.finish('stopped');
-          clearPageContexts();
-          idem.cancel();
-          activity.end('stopped');
-          // Revoking control must not depend on history storage being available.
-          try {
-            await release();
-          } finally {
-            await persistChat();
-          }
+          await stopCurrentTask();
           return snapshot();
       }
     })().then(
@@ -685,9 +752,7 @@ export function startRemoteBackground() {
         const message =
           e instanceof z.ZodError
             ? e.issues.map((i) => i.message).join('；')
-            : e instanceof Error
-              ? e.message
-              : String(e);
+            : panelErrorMessage(e);
         reply({ ok: false, error: message });
       },
     );

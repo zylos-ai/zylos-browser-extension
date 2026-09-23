@@ -64,7 +64,8 @@
       },
       "expected": {
         "op": "snapshot",
-        "interactive": false
+        "interactive": false,
+        "viewport": true
       }
     },
     {
@@ -74,7 +75,8 @@
       },
       "expected": {
         "op": "snapshot",
-        "interactive": true
+        "interactive": true,
+        "viewport": true
       }
     },
     {

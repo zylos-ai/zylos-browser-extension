@@ -26,6 +26,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const checks = [];
 const measurements = [];
 const chatMessages = [];
+const stopMessages = [];
 let browser, relay, socket, site;
 async function eventually(work, timeout = 10000) {
   const until = Date.now() + timeout;
@@ -64,6 +65,43 @@ function cdpClient(ws) {
     });
 }
 function fixture(url, port) {
+  if (url.startsWith('/lazy-list'))
+    return `<!doctype html><meta charset="utf-8"><title>Delayed 200 app list</title>
+    <style>body{margin:0;font:16px system-ui}.row{height:70px;margin:0}#loading{height:20px}</style>
+    <main id="list"></main><div id="loading" role="status"></div>
+    <script>
+    let count=0,busy=false;const list=document.querySelector('#list'),status=document.querySelector('#loading');
+    function append(){for(let i=0;i<40;i++){count++;const p=document.createElement('p');p.className='row';p.textContent='Lazy App '+String(count).padStart(3,'0')+' Revenue USD '+count*100+' Downloads '+count*1000;list.append(p)}}
+    append();addEventListener('scroll',async()=>{if(busy||count>=200||scrollY+innerHeight<document.documentElement.scrollHeight-350)return;
+      busy=true;status.textContent='Loading more';list.setAttribute('aria-busy','true');
+      await new Promise(r=>setTimeout(r,450));await fetch('/delayed-data?ms=850');append();
+      list.removeAttribute('aria-busy');status.textContent=count===200?'End of list':'';busy=false;
+    });</script>`;
+  if (url.startsWith('/async-controls'))
+    return `<!doctype html><title>Asynchronous controls</title>
+    <button id="filter" onclick="load(1100,'Filtered results')">Filter</button>
+    <button id="slow" onclick="load(6500,'Slow results')">Slow filter</button>
+    <button id="forever" onclick="document.querySelector('#result').setAttribute('aria-busy','true')">Keep loading</button>
+    <p id="result">Initial results</p><div id="inner" style="height:240px;overflow:auto">${Array.from({ length: 4 }, (_, i) => `<p style="height:80px;margin:0">Nested ${i + 1}</p>`).join('')}</div>
+    <script>
+    window.filterClicks=0;async function load(ms,text){window.filterClicks++;const r=document.querySelector('#result');r.setAttribute('aria-busy','true');await fetch('/delayed-data?ms='+ms);r.textContent=text;r.removeAttribute('aria-busy')}
+    let loaded=false;const panel=document.querySelector('#inner');panel.addEventListener('scroll',async()=>{if(loaded)return;loaded=true;panel.setAttribute('aria-busy','true');await fetch('/delayed-data?ms=950');for(let i=5;i<=8;i++){const p=document.createElement('p');p.style='height:80px;margin:0';p.textContent='Nested '+i;panel.append(p)}panel.removeAttribute('aria-busy')});
+    </script>`;
+  if (url.startsWith('/observation-list'))
+    return `<!doctype html><meta charset="utf-8"><title>200 app observations</title>
+    <style>body{margin:0;font:16px system-ui}table{border-collapse:collapse;width:100%}td{height:90px;border-bottom:1px solid #ccc;padding:4px}button{position:fixed;right:30px;top:5px}</style>
+    <a hidden id="hidden-apps" href="/observation-list?category=apps">Hidden application tab</a>
+    <a id="visible-category" href="/observation-list?category=health">Health category</a>
+    <table><thead><tr><th>App</th><th>Revenue</th><th>Downloads</th></tr></thead><tbody>
+    ${Array.from({ length: 200 }, (_, i) => `<tr><td>App ${String(i + 1).padStart(3, '0')}</td><td>Revenue USD ${(i + 1) * 100}</td><td>Downloads ${(i + 1) * 1000}</td></tr>`).join('')}</tbody></table>`;
+  if (url.startsWith('/observation-containers'))
+    return `<!doctype html><title>Clipped observation</title><style>body{margin:0}#inner{height:180px;overflow:auto}iframe{height:130px;width:500px}p{margin:0;height:90px}</style>
+    <div id="inner">${Array.from({ length: 40 }, (_, i) => `<p>Inner row ${i + 1}</p>`).join('')}</div>
+    <iframe src="http://localhost:${port}/frame"></iframe>
+    <div id="shadow"></div><script>document.querySelector('#shadow').attachShadow({mode:'open'}).innerHTML='<p>Visible shadow content</p>';</script>
+    <p style="visibility:hidden">HIDDEN_LAYOUT_TEXT</p><div style="opacity:0"><p>TRANSPARENT_LAYOUT_TEXT</p></div>
+    <input type="password" value="PRIVATE_PASSWORD"><input autocomplete="one-time-code" value="PRIVATE_OTP">
+    <div style="height:3000px"></div><iframe src="http://localhost:${port}/frame?offscreen=1"></iframe>`;
   if (url.startsWith('/selection-mixed'))
     return `<!doctype html><meta charset="utf-8"><title>Mixed video-page selection</title><section>
     <h1>007初露锋芒格斗场获取拍卖费6万-游戏通关攻略解说</h1>
@@ -140,6 +178,17 @@ body{font:16px sans-serif;margin:20px}button,input,select{margin:5px;padding:8px
 }
 try {
   site = http.createServer((req, res) => {
+    if (req.url.startsWith('/delayed-data')) {
+      const ms = Math.min(
+        8000,
+        Number(new URL(req.url, 'http://localhost').searchParams.get('ms')) || 0,
+      );
+      setTimeout(() => {
+        res.setHeader('content-type', 'application/json');
+        res.end('{"loaded":true}');
+      }, ms);
+      return;
+    }
     if (req.url === '/fixture-icon.svg') {
       res.setHeader('content-type', 'image/svg+xml');
       res.end(
@@ -163,6 +212,11 @@ try {
     monitor: true,
     monitorFile: path.join(profile, 'monitor.json'),
     agentMonitorDir: null,
+    onStop: async (event) => {
+      stopMessages.push(event);
+      await sleep(300);
+      return { ok: true }; // Never interrupt the developer's live Agent.
+    },
     onRequest: async (message) => {
       chatMessages.push(message);
       if (message.text === 'fixture:fail-delivery')
@@ -788,6 +842,11 @@ try {
       };
       await action('open', { url: url + 'preview' });
       const tab = (await panelState()).task.tabId;
+      await eventually(() => previewPanel("!document.querySelector('.live-preview')"));
+      assert.equal(await previewPanel("!!document.querySelector('.preview-restore')"), false);
+      const other = await previewPanel(
+        `chrome.tabs.create({url:${JSON.stringify(url + 'next')},active:true})`,
+      );
       await eventually(() =>
         previewPanel("document.querySelector('.live-preview-image')?.naturalWidth > 0"),
       );
@@ -801,9 +860,10 @@ try {
           )) >
           first + 2,
       );
-      const other = await previewPanel(
-        `chrome.tabs.create({url:${JSON.stringify(url + 'next')},active:true})`,
-      );
+      await previewPanel(`chrome.tabs.update(${tab},{active:true})`);
+      await eventually(() => previewPanel("!document.querySelector('.live-preview')"));
+      await previewPanel(`chrome.tabs.update(${other.id},{active:true})`);
+      await eventually(() => previewPanel("!!document.querySelector('.live-preview-image')"));
       const second = await previewPanel(
         "Number(document.querySelector('.live-preview').dataset.frameSequence)",
       );
@@ -887,6 +947,8 @@ try {
       const secondTab = (await panelState()).task.tabId;
       assert.notEqual(secondTab, tab);
       assert.equal(await previewPanel("!!document.querySelector('.live-preview')"), false);
+      await previewPanel(`chrome.tabs.update(${other.id},{active:true})`);
+      await eventually(() => previewPanel("!!document.querySelector('.preview-restore')"));
       await previewPanel("document.querySelector('.preview-restore').click()");
       await eventually(() =>
         previewPanel(
@@ -894,6 +956,10 @@ try {
         ),
       );
       await action('switch-tab', { tabId: tab });
+      // The Agent changes its target without changing the user's active tab.
+      await previewPanel(`chrome.tabs.update(${tab},{active:true})`);
+      await eventually(() => previewPanel("!document.querySelector('.live-preview')"));
+      await previewPanel(`chrome.tabs.update(${other.id},{active:true})`);
       await eventually(() =>
         previewPanel(
           `Number(document.querySelector('.live-preview')?.dataset.tabId) === ${tab} && document.querySelector('.live-preview-image')?.naturalWidth > 0`,
@@ -919,9 +985,10 @@ try {
       await save('live-preview-completed-320');
       await previewPanel("document.querySelector('.preview-view').click()");
       await eventually(async () => (await previewPanel(`chrome.tabs.get(${tab})`)).active);
-      assert.equal(
-        await previewPanel("document.querySelector('.live-preview').dataset.status"),
-        'completed',
+      await eventually(() => previewPanel("!document.querySelector('.live-preview')"));
+      await previewPanel(`chrome.tabs.update(${other.id},{active:true})`);
+      await eventually(() =>
+        previewPanel("document.querySelector('.live-preview')?.dataset.status === 'completed'"),
       );
       await previewPanel(`chrome.tabs.remove([${tab},${other.id},${secondTab}])`);
       await eventually(() => previewPanel("document.querySelector('.preview-view').disabled"));
@@ -947,9 +1014,9 @@ try {
         input.dispatchEvent(new Event('input', {bubbles:true}));
       })()`);
       assert.equal(await previewPanel("document.querySelector('#message').disabled"), false);
-      assert.equal(await previewPanel("document.querySelector('#send').disabled"), true);
+      assert.equal(await previewPanel("document.querySelector('#send').disabled"), false);
+      assert.equal(await previewPanel("document.querySelector('#send').type"), 'button');
       await previewPanel(`(() => {
-        document.querySelector('#send').click();
         document.querySelector('#message').dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true, cancelable:true}));
         document.querySelector('#chat-form').dispatchEvent(new Event('submit', {bubbles:true, cancelable:true}));
       })()`);
@@ -971,6 +1038,30 @@ try {
         (await previewPanel('chrome.tabs.query({})')).map((tab) => tab.id),
         before,
       );
+    },
+  );
+  await check(
+    'composer stops plain chat, waits for the runtime key receipt, and preserves the next draft',
+    async () => {
+      const request = await askLoop('Stop this pending reply');
+      await eventually(() => previewPanel("document.querySelector('#send').type === 'button'"));
+      const draft = await previewPanel("document.querySelector('#message').value");
+      const before = stopMessages.length;
+      await previewPanel("document.querySelector('#send').click()");
+      await eventually(async () => (await panelState()).stopping);
+      assert.equal(await previewPanel("document.querySelector('#send').disabled"), true);
+      await previewPanel("document.querySelector('#send').click()");
+      await eventually(async () => !(await panelState()).chatBusy);
+      assert.equal(stopMessages.length, before + 1);
+      assert.equal(stopMessages.at(-1).taskId, request.chatId);
+      assert.equal(await previewPanel("document.querySelector('#message').value"), draft);
+      assert.equal(await previewPanel("document.querySelector('#send').type"), 'submit');
+      assert.equal(
+        (await panelState()).chat.find((m) => m.id === request.chatId).loopStatus,
+        'stopped',
+      );
+      const next = await askLoop('New task after stopping');
+      await finishLoop(next, 'Next task completed');
     },
   );
   await check(
@@ -1141,7 +1232,11 @@ try {
         JSON.stringify(request.request.execution),
       );
       assert.ok(request.request.execution.observation.page.viewport.scrollY > 0);
-      assert.ok(request.request.execution.observation.page.text.includes('Lazy result loaded'));
+      assert.equal(request.request.execution.observation.page.scope, 'viewport');
+      assert.ok(
+        !request.request.execution.observation.page.text.includes('Lazy result loaded'),
+        'new content below the viewport is not visible yet',
+      );
       await decision(request, { kind: 'actions', actions: [{ method: 'observe', params: {} }] });
       request = await nextRound(request);
       const image = request.request.execution.observation.page.screenshot;
@@ -1227,6 +1322,690 @@ try {
     assert.ok(matches[0].ref);
     await finishLoop(request, 'Frame read; sensitive input left to the user');
   });
+  await check(
+    'viewport observation reads all 200 rows and keeps screenshots explicit',
+    async () => {
+      const started = performance.now();
+      let request = await askLoop('Viewport: collect 200 app rows');
+      const action = async (method, params = {}) => {
+        await decision(request, { kind: 'actions', actions: [{ method, params }] });
+        request = await nextRound(request);
+        return request.request.execution;
+      };
+      let e = await action('open', { url: url + 'observation-list' });
+      const seen = new Set();
+      let outputBytes = 0,
+        screens = 0;
+      for (;;) {
+        assert.equal(e.failed, false, JSON.stringify(e));
+        const page = e.observation.page;
+        assert.equal(page.scope, 'viewport');
+        assert.equal(page.truncated, false);
+        assert.equal(page.screenshot, undefined, 'successful reading does not request screenshots');
+        outputBytes += Buffer.byteLength(JSON.stringify(e));
+        const ranks = [...page.text.matchAll(/App (\d{3})/g)].map((m) => Number(m[1]));
+        assert.ok(ranks.length > 0, page.text);
+        assert.ok(
+          page.text.includes('Revenue USD') && page.text.includes('Downloads'),
+          'injected data columns remain readable',
+        );
+        if (screens === 0)
+          assert.ok(
+            page.text.includes('/observation-list?category=health'),
+            'actual visible link URL is supplied',
+          );
+        if (screens === 0)
+          assert.ok(
+            !ranks.includes(200) && ranks.length < 60,
+            'only the current screen is returned',
+          );
+        const size = seen.size;
+        ranks.forEach((rank) => seen.add(rank));
+        assert.ok(seen.size > size, 'each scroll reveals new app rows');
+        screens++;
+        if (!page.viewport.remainingBelow) break;
+        assert.ok(screens < 25, 'bounded 200-row scan');
+        e = await action('scroll', {
+          direction: 'down',
+          pixels: Math.min(2000, Math.floor(page.viewport.height * 0.85)),
+        });
+      }
+      assert.equal(seen.size, 200, 'every app row was observed');
+      const hidden = (await action('find', { selector: '#hidden-apps' })).observation.page
+        .matches[0];
+      assert.equal(hidden.state.visible, false);
+      assert.equal(hidden.state.href, url + 'observation-list?category=apps');
+      e = await action('click', { ref: hidden.ref });
+      assert.equal(e.failed, true);
+      assert.equal(
+        e.observation.page.screenshot,
+        undefined,
+        'errors never trigger automatic images',
+      );
+      const image = (await action('observe')).observation.page.screenshot;
+      assert.equal(image.data, undefined, 'Base64 must not appear in Agent output');
+      assert.equal(image.imageReadRequired, true);
+      assert.equal(path.dirname(image.path), process.env.BROWSER_REMOTE_OBS_DIR);
+      const png = await fs.readFile(image.path);
+      assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+      const preview = path.join(os.tmpdir(), 'zylos-viewport-recovery.png');
+      await fs.writeFile(preview, png);
+      measurements.push({
+        scenario: 'viewport-200-rows',
+        screens,
+        rows: seen.size,
+        outputBytes,
+        elapsedMs: Math.round(performance.now() - started),
+        imageBytes: png.length,
+        preview,
+      });
+      await finishLoop(request, '200 rows collected; hidden control correctly rejected');
+    },
+  );
+  await check(
+    'viewport observation clips nested scrolling, frames and shadow content without automatic images',
+    async () => {
+      let request = await askLoop('Viewport: inspect clipped containers');
+      const action = async (method, params = {}) => {
+        await decision(request, { kind: 'actions', actions: [{ method, params }] });
+        request = await nextRound(request);
+        assert.equal(
+          request.request.execution.failed,
+          false,
+          JSON.stringify(request.request.execution),
+        );
+        return request.request.execution.observation;
+      };
+      let observation = await action('open', { url: url + 'observation-containers' });
+      let text = observation.page.text;
+      assert.ok(text.includes('Inner row 1') && !text.includes('Inner row 30'), text);
+      assert.ok(text.includes('Visible shadow content'), text);
+      assert.ok(text.includes('Frame button'), text);
+      assert.equal(
+        (text.match(/Frame:.*\/frame/g) || []).length,
+        1,
+        'offscreen iframe contents are excluded',
+      );
+      for (const privateText of [
+        'HIDDEN_LAYOUT_TEXT',
+        'TRANSPARENT_LAYOUT_TEXT',
+        'PRIVATE_PASSWORD',
+        'PRIVATE_OTP',
+      ])
+        assert.ok(!text.includes(privateText), privateText);
+      const ref = (await action('find', { selector: '#inner' })).page.matches[0].ref;
+      observation = await action('scroll', { direction: 'down', pixels: 600, ref });
+      text = observation.page.text;
+      assert.ok(!text.includes('"Inner row 1"') && text.includes('Inner row 8'), text);
+      assert.equal(observation.page.viewport.scrollY, 0, 'only the inner container moved');
+      await action('scroll', { direction: 'up' });
+      observation = await action('scroll', { direction: 'up' });
+      assert.equal(
+        observation.page.screenshot,
+        undefined,
+        'unchanged observations do not trigger images',
+      );
+      observation = await action('scroll', { direction: 'up' });
+      assert.equal(observation.page.screenshot, undefined, 'no consecutive automatic images');
+      await finishLoop(request, 'Nested viewport verified');
+    },
+  );
+  await check(
+    'delayed lazy rows are retained across screens and incomplete completion is refused',
+    async () => {
+      const started = performance.now();
+      let request = await askLoop('Read all 200 lazy app entries and retain sources');
+      const step = async (actions) => {
+        await decision(request, { kind: 'actions', actions });
+        request = await nextRound(request);
+        const e = request.request.execution;
+        assert.equal(e.failed, false, JSON.stringify(e));
+        return e;
+      };
+      let e = await step([{ method: 'open', params: { url: url + 'lazy-list' } }]);
+      let screens = 0,
+        outputBytes = 0;
+      const seen = new Set();
+      for (;;) {
+        const page = e.observation.page;
+        assert.equal(page.readiness.status, 'stable', JSON.stringify(page.readiness));
+        assert.equal(page.screenshot, undefined);
+        const ranks = [...page.text.matchAll(/Lazy App (\d{3})/g)].map((m) => +m[1]);
+        assert.ok(ranks.length, page.text);
+        ranks.forEach((n) => seen.add(n));
+        screens++;
+        outputBytes += Buffer.byteLength(JSON.stringify(e));
+        const record = {
+          method: 'record-findings',
+          params: {
+            collection: 'US app chart',
+            targetCount: 200,
+            items: ranks.map((n) => ({
+              key: String(n),
+              position: n,
+              title: `App ${n}`,
+              summary: `Revenue USD ${n * 100}; Downloads ${n * 1000}`,
+              sourceUrl: url + 'lazy-list',
+            })),
+          },
+        };
+        if (seen.size === 200) {
+          e = await step([record]);
+          break;
+        }
+        assert.ok(screens < 24, 'bounded scan');
+        e = await step([
+          record,
+          {
+            method: 'scroll',
+            params: {
+              direction: 'down',
+              pixels: Math.min(2000, Math.floor(page.viewport.height * 0.85)),
+            },
+          },
+        ]);
+        if (screens === 1) {
+          await decision(request, { kind: 'done', text: 'Premature completion' });
+          request = await nextRound(request);
+          assert.ok(request.request.execution.results.some((r) => r.status === 'incomplete'));
+          assert.equal(
+            request.request.execution.research.collections[0].remaining,
+            200 - seen.size,
+          );
+        }
+      }
+      assert.deepEqual(e.research.collections[0], {
+        name: 'US app chart',
+        collected: 200,
+        covered: 200,
+        targetCount: 200,
+        remaining: 0,
+      });
+      e = await step([
+        { method: 'read-findings', params: { collection: 'US app chart', offset: 195, limit: 10 } },
+      ]);
+      const saved = e.results.find((r) => r.method === 'read-findings').result;
+      assert.equal(saved.total, 200);
+      assert.equal(saved.nextOffset, null);
+      assert.ok(saved.items.some((i) => i.position === 200));
+      measurements.push({
+        scenario: 'lazy-200-rows',
+        rows: seen.size,
+        screens,
+        elapsedMs: Math.round(performance.now() - started),
+        outputBytes,
+      });
+      await finishLoop(request, 'All 200 entries recorded');
+    },
+  );
+  await check(
+    'shared observation waits for async filters and container loading; slow results can be re-observed without replay',
+    async () => {
+      let request = await askLoop('Observe asynchronous page updates');
+      const action = async (method, params = {}) => {
+        await decision(request, { kind: 'actions', actions: [{ method, params }] });
+        request = await nextRound(request);
+        const e = request.request.execution;
+        assert.equal(e.failed, false, JSON.stringify(e));
+        return e.observation.page;
+      };
+      let page = await action('open', { url: url + 'async-controls' });
+      const filter = (await action('find', { selector: '#filter' })).matches[0].ref;
+      page = await action('click', { ref: filter });
+      assert.ok(page.text.includes('Filtered results'), page.text);
+      assert.equal(page.readiness.status, 'stable');
+      const ref = (await action('find', { selector: '#inner' })).matches[0].ref;
+      page = await action('scroll', { ref, direction: 'down', pixels: 700 });
+      assert.equal(page.viewport.scrollY, 0);
+      assert.equal(page.readiness.scroll.height, 640, 'waited for delayed nested rows');
+      const nextRef = (await action('find', { selector: '#inner' })).matches[0].ref;
+      page = await action('scroll', { ref: nextRef, direction: 'down', pixels: 700 });
+      assert.ok(page.text.includes('Nested 8'), page.text);
+      const slow = (await action('find', { selector: '#slow' })).matches[0].ref;
+      page = await action('click', { ref: slow });
+      assert.equal(page.readiness.status, 'loading', JSON.stringify(page.readiness));
+      assert.ok(!page.text.includes('Slow results'));
+      page = await action('wait-for-page');
+      assert.equal(page.readiness.status, 'stable');
+      assert.ok(page.text.includes('Slow results'), page.text);
+      const info = (await previewPanel('chrome.tabs.query({})')).find(
+        (t) => t.url === url + 'async-controls',
+      );
+      assert.equal(
+        await previewPanel(
+          `chrome.scripting.executeScript({target:{tabId:${info.id}},world:'MAIN',func:()=>window.filterClicks}).then(r=>r[0].result)`,
+        ),
+        2,
+        'inputs were never replayed',
+      );
+      const forever = (await action('find', { selector: '#forever' })).matches[0].ref;
+      page = await action('click', { ref: forever });
+      assert.equal(page.readiness.status, 'loading');
+      const pending = decision(request, {
+        kind: 'actions',
+        actions: [{ method: 'wait-for-page', params: { timeoutMs: 8000 } }],
+      });
+      await sleep(250);
+      await previewPanel(`chrome.runtime.sendMessage({type:'remote-stop'})`);
+      await pending;
+      assert.equal((await panelState()).task, null, 'stop revoked control during the wait');
+    },
+  );
+  await check(
+    'Agent progress descriptions pass through the relay without extra decisions',
+    async () => {
+      const request = await askLoop('Read the fixture page with a public progress description');
+      const summary = '读取资料页面，查找本次任务需要的信息。';
+      await decision(request, {
+        kind: 'actions',
+        actions: [{ method: 'open', params: { url: url + 'next' } }],
+        memory: 'Internal task continuation notes',
+        summary,
+      });
+      const next = await nextRound(request);
+      const steps = (await panelState()).chat.flatMap((entry) => entry.toolRun?.steps || []);
+      assert.equal(steps.filter((step) => step.summary === summary).length, 1);
+      await eventually(() =>
+        previewPanel(
+          `document.querySelector('.tool-activity-context')?.textContent === ${JSON.stringify(summary)}`,
+        ),
+      );
+      assert.equal(
+        await previewPanel(
+          "document.querySelector('.tool-activity').textContent.includes('Internal task continuation notes')",
+        ),
+        false,
+      );
+      assert.equal(next.request.round, request.request.round + 1);
+      await finishLoop(next, 'Fixture read complete');
+    },
+  );
+  await check(
+    'compact progress stays quiet at sidebar widths and collapses after completion',
+    async () => {
+      // Render fixture events through the real panel listener in this disposable profile.
+      // Keep raw tool failures in the event, so presentation is checked independently.
+      await workerEval("chrome.storage.local.set({uiLanguage:'zh-CN'})");
+      await cdp(
+        'Emulation.setDeviceMetricsOverride',
+        { width: 360, height: 760, deviceScaleFactor: 1, mobile: false },
+        sessionId,
+      );
+      const now = Date.now();
+      const state = {
+        ...(await panelState()),
+        task: null,
+        loopActive: true,
+        chatBusy: true,
+        error: '',
+        chat: [
+          {
+            role: 'user',
+            text: '帮我看看当前页面，整理几个适合个人开发者的方向。',
+            ts: now - 689000,
+          },
+          {
+            role: 'system',
+            text: '',
+            ts: now - 680000,
+            toolRun: {
+              status: 'running',
+              startedAt: now - 680000,
+              total: 30,
+              failed: 1,
+              steps: [
+                {
+                  id: 'open',
+                  number: 1,
+                  method: 'open',
+                  status: 'success',
+                  queuedAt: now - 680000,
+                },
+                {
+                  id: 'read',
+                  number: 2,
+                  method: 'snapshot',
+                  status: 'success',
+                  queuedAt: now - 679000,
+                },
+                {
+                  id: 'old-click',
+                  number: 3,
+                  method: 'click',
+                  status: 'error',
+                  errorCode: 'ELEMENT_ERROR',
+                  queuedAt: now - 678000,
+                },
+                {
+                  id: 'click',
+                  number: 4,
+                  method: 'click',
+                  status: 'running',
+                  queuedAt: now - 1000,
+                },
+              ],
+            },
+          },
+        ],
+      };
+      const update = () =>
+        workerEval(
+          `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-updated', state })})`,
+        );
+      const screenshot = async (name) => {
+        if (!process.env.E2E_SCREENSHOT_DIR) return;
+        await fs.mkdir(process.env.E2E_SCREENSHOT_DIR, { recursive: true });
+        const { data } = await cdp('Page.captureScreenshot', { format: 'png' }, sessionId);
+        await fs.writeFile(
+          path.join(process.env.E2E_SCREENSHOT_DIR, name + '.png'),
+          Buffer.from(data, 'base64'),
+        );
+      };
+      const activity = state.chat.pop();
+      await update();
+      await eventually(() =>
+        previewPanel("document.querySelector('.tool-activity-title')?.textContent === '接通中'"),
+      );
+      assert.equal(await previewPanel("!!document.querySelector('.tool-activity-context')"), false);
+      await screenshot('progress-waiting');
+      state.chat.push(activity);
+      await update();
+      await eventually(() =>
+        previewPanel(
+          "document.querySelector('.tool-activity-context')?.textContent === '正在操作页面'",
+        ),
+      );
+      const compact = await previewPanel(`(() => {
+      const el=document.querySelector('.tool-activity');
+      return { height:el.getBoundingClientRect().height, border:getComputedStyle(el).borderTopWidth,
+        count:document.querySelectorAll('.tool-activity').length, text:el.textContent,
+        overflow:document.documentElement.scrollWidth > innerWidth };
+    })()`);
+      assert.ok(compact.height <= 72, JSON.stringify(compact));
+      assert.equal(compact.border, '0px');
+      assert.equal(compact.count, 1);
+      assert.equal(compact.overflow, false);
+      assert.match(compact.text, /思考执行中/);
+      assert.doesNotMatch(compact.text, /ELEMENT_ERROR|失败|成功|snapshot|工具调用/);
+      await screenshot('progress-running');
+      state.chat[1].toolRun.steps[3].status = 'success';
+      state.chat[1].toolRun.steps.push(
+        {
+          id: 'find',
+          number: 5,
+          method: 'find',
+          status: 'success',
+          queuedAt: now - 800,
+          summary: '查找榜单筛选条件，确认当前地区。',
+        },
+        { id: 'fill', number: 6, method: 'fill', status: 'success', queuedAt: now - 700 },
+        { id: 'type', number: 7, method: 'type', status: 'success', queuedAt: now - 600 },
+        { id: 'confirm', number: 8, method: 'click', status: 'success', queuedAt: now - 500 },
+        {
+          id: 'scroll',
+          number: 9,
+          method: 'scroll',
+          status: 'running',
+          queuedAt: now - 400,
+          summary: '继续查看后面的应用，补齐下载量数据。',
+        },
+      );
+      await update();
+      await eventually(() =>
+        previewPanel(
+          "document.querySelector('.tool-activity-title')?.textContent === '思考执行中'",
+        ),
+      );
+      assert.equal(
+        await previewPanel("document.querySelector('.tool-activity-context')?.textContent"),
+        '继续查看后面的应用，补齐下载量数据。',
+      );
+      await screenshot('progress-phase');
+
+      await previewPanel("document.querySelector('.tool-activity-toggle').click()");
+      assert.equal(
+        await previewPanel("document.querySelector('.tool-activity-body').hidden"),
+        false,
+      );
+      assert.equal(await previewPanel("document.querySelectorAll('.tool-overview li').length"), 7);
+      state.loopActive = false;
+      state.chatBusy = false;
+      state.chat[1].toolRun.steps.at(-1).status = 'success';
+      state.chat[1].toolRun.status = 'completed';
+      state.chat[1].toolRun.endedAt = now;
+      state.chat.push({
+        role: 'assistant',
+        text: '已整理好当前页面的信息。接下来可以从轻量记录和提醒类应用开始比较。',
+        ts: now,
+        final: true,
+      });
+      await update();
+      await eventually(() =>
+        previewPanel(
+          "document.querySelector('.tool-activity-toggle')?.textContent === '用时 11:29'",
+        ),
+      );
+      assert.equal(
+        await previewPanel("document.querySelector('.tool-activity-body').hidden"),
+        true,
+      );
+      await screenshot('progress-completed');
+      await previewPanel("document.querySelector('.tool-activity-toggle').click()");
+      await screenshot('progress-expanded');
+      await cdp('Emulation.clearDeviceMetricsOverride', {}, sessionId);
+      await workerEval(
+        `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-updated', state: await panelState() })})`,
+      );
+    },
+  );
+  await check(
+    'welcome mascot rests between loops while examples fit the sidebar and respect reduced motion',
+    async () => {
+      const initial = await panelState();
+      const state = { ...initial, chat: [], task: null, loopActive: false, chatBusy: false };
+      await workerEval("chrome.storage.local.set({uiLanguage:'zh-CN'})");
+      await workerEval(
+        `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-updated', state })})`,
+      );
+      await cdp(
+        'Emulation.setEmulatedMedia',
+        {
+          features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
+        },
+        sessionId,
+      );
+      await eventually(() => previewPanel("!!document.querySelector('.welcome-mascot-head')"));
+      await previewPanel('document.activeElement.blur()');
+      const seek = (time) =>
+        previewPanel(`(() => {
+        const scene=document.querySelector('.welcome-scene');
+        const animations=scene.getAnimations({subtree:true});
+        animations.forEach(a => { a.pause(); a.currentTime=${time}; });
+        return {count:animations.length,arm:getComputedStyle(scene.querySelector('.welcome-arm-click')).d,
+          otherArm:getComputedStyle(scene.querySelector('.welcome-arm-scroll')).d,
+          scroll:getComputedStyle(scene.querySelector('.welcome-browser-list')).transform};
+      })()`);
+      const snapshot = async (name) => {
+        if (!process.env.E2E_SCREENSHOT_DIR) return;
+        await fs.mkdir(process.env.E2E_SCREENSHOT_DIR, { recursive: true });
+        const { data } = await cdp('Page.captureScreenshot', { format: 'png' }, sessionId);
+        await fs.writeFile(
+          path.join(process.env.E2E_SCREENSHOT_DIR, name + '.png'),
+          Buffer.from(data, 'base64'),
+        );
+      };
+      for (const width of [320, 380]) {
+        await cdp(
+          'Emulation.setDeviceMetricsOverride',
+          { width, height: 760, deviceScaleFactor: 1, mobile: false },
+          sessionId,
+        );
+        const start = await seek(0);
+        assert.ok(start.count > 0);
+        assert.equal(
+          await previewPanel("document.querySelectorAll('.welcome-mascot .welcome-arm').length"),
+          2,
+        );
+        assert.equal(await previewPanel("document.querySelector('.welcome-mascot image')"), null);
+        await snapshot(`welcome-rest-${width}`);
+        await seek(1380);
+        await snapshot(`welcome-unroll-${width}`);
+        const click = await seek(2160);
+        assert.notEqual(click.arm, start.arm, 'the tentacle reaches the browser button');
+        await snapshot(`welcome-click-${width}`);
+        const scroll = await seek(4200);
+        assert.notEqual(
+          scroll.scroll,
+          start.scroll,
+          'browser content moves with the second tentacle',
+        );
+        await snapshot(`welcome-scroll-${width}`);
+        const end = await seek(6000);
+        assert.equal(end.arm, start.arm, 'the same arm curls back into its original pose');
+        for (const time of [6100, 7500, 8999]) {
+          assert.deepEqual(await seek(time), start, 'the scene rests for 3 seconds between loops');
+        }
+        await snapshot(`welcome-pause-${width}`);
+        assert.equal((await seek(11160)).arm, click.arm, 'the next loop repeats the same gesture');
+        const fits = await previewPanel(`(() => {
+          const scene=document.querySelector('.welcome-scene'), r=scene.getBoundingClientRect();
+          const input=document.querySelector('#message').getBoundingClientRect();
+          return {hidden:scene.getAttribute('aria-hidden'),overflow:document.documentElement.scrollWidth>innerWidth,
+            fits:r.left>=0&&r.right<=innerWidth&&r.bottom<input.top,input:input.bottom<=innerHeight};
+        })()`);
+        assert.deepEqual(fits, { hidden: 'true', overflow: false, fits: true, input: true });
+      }
+      for (const language of ['zh-CN', 'en']) {
+        await workerEval(`chrome.storage.local.set({uiLanguage:${JSON.stringify(language)}})`);
+        await eventually(() =>
+          previewPanel(
+            `document.querySelector('.starter')?.textContent.includes(${JSON.stringify(language === 'en' ? 'Summarize' : '总结')})`,
+          ),
+        );
+        await cdp(
+          'Emulation.setDeviceMetricsOverride',
+          { width: 320, height: 760, deviceScaleFactor: 1, mobile: false },
+          sessionId,
+        );
+        const examples = await previewPanel(`(() => {
+          const buttons=[...document.querySelectorAll('.starter')];
+          return {count:buttons.length, fits:buttons.every(b => {
+            const label=b.firstElementChild,r=b.getBoundingClientRect(),t=label.getBoundingClientRect();
+            return t.left>=r.left&&t.right<=r.right&&t.bottom<=r.bottom&&label.scrollHeight<=label.clientHeight;
+          }), text:buttons.map(b=>b.firstElementChild.textContent)};
+        })()`);
+        assert.equal(examples.count, 3);
+        assert.equal(examples.fits, true);
+        const sent = chatMessages.length;
+        await previewPanel("document.querySelectorAll('.starter')[2].click()");
+        assert.equal(
+          await previewPanel("document.querySelector('#message').value"),
+          examples.text[2],
+        );
+        assert.equal(chatMessages.length, sent, 'choosing an example only drafts it');
+        await snapshot(`welcome-examples-${language}-320`);
+      }
+      await previewPanel(
+        "document.querySelector('.welcome-scene').getAnimations({subtree:true}).forEach(a=>a.play());document.querySelector('#message').focus()",
+      );
+      assert.equal(
+        await previewPanel(
+          "getComputedStyle(document.querySelector('.welcome-arm-click')).animationPlayState",
+        ),
+        'running',
+      );
+      await cdp(
+        'Emulation.setEmulatedMedia',
+        { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] },
+        sessionId,
+      );
+      assert.equal(
+        await previewPanel(
+          "getComputedStyle(document.querySelector('.welcome-arm-click')).animationName",
+        ),
+        'none',
+      );
+      await snapshot('welcome-reduced-motion');
+      await cdp('Emulation.setEmulatedMedia', { features: [] }, sessionId);
+      await cdp('Emulation.clearDeviceMetricsOverride', {}, sessionId);
+      await workerEval(
+        `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-updated', state: initial })})`,
+      );
+    },
+  );
+  await check(
+    'settings and header stay aligned in narrow Chinese and English sidebars',
+    async () => {
+      const state = {
+        ...(await panelState()),
+        chat: [{ role: 'assistant', text: 'A saved reply', ts: Date.now(), final: true }],
+      };
+      await workerEval(
+        `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-updated', state })})`,
+      );
+      await eventually(() =>
+        previewPanel("!document.querySelector('.clear-chat-button').disabled"),
+      );
+      await previewPanel("document.querySelector('.settings-button').click()");
+      await eventually(() => previewPanel("!!document.querySelector('#settings')"));
+      assert.equal(
+        await previewPanel("!!document.querySelector('#settings .clear-chat-button')"),
+        false,
+      );
+      assert.equal(await previewPanel("document.querySelector('#access-key').value"), '');
+      assert.equal(await previewPanel("document.querySelector('#access-key').type"), 'password');
+      for (const language of ['zh-CN', 'en']) {
+        await previewPanel(
+          `(() => { const select=document.querySelector('#interface-language');select.value=${JSON.stringify(language)};select.dispatchEvent(new Event('change',{bubbles:true})); })()`,
+        );
+        await eventually(() =>
+          previewPanel(`document.documentElement.lang === ${JSON.stringify(language)}`),
+        );
+        for (const width of [320, 380]) {
+          await cdp(
+            'Emulation.setDeviceMetricsOverride',
+            { width, height: 760, deviceScaleFactor: 1, mobile: false },
+            sessionId,
+          );
+          await previewPanel(
+            "document.activeElement.blur(); document.querySelector('#settings').scrollTop=0",
+          );
+          const layout = await previewPanel(`(() => {
+          const main=document.querySelector('#settings'),input=document.querySelector('#relay-url');
+          const header=document.querySelector('.sidebar-header'),clear=header.querySelector('.clear-chat-button');
+          const boxes=[...main.querySelectorAll('input,select,button')].map(el=>el.getBoundingClientRect());
+          return {overflow:document.documentElement.scrollWidth>innerWidth || main.scrollWidth>main.clientWidth,
+            fits:boxes.every(box=>box.x>=0 && box.right<=innerWidth), font:getComputedStyle(input).fontSize,
+            inputHeight:input.getBoundingClientRect().height, clearInHeader:header.contains(clear),
+            controlsFit:boxes.every(box=>box.bottom<=innerHeight)};
+        })()`);
+          assert.equal(layout.overflow, false, JSON.stringify(layout));
+          assert.equal(layout.fits, true, JSON.stringify(layout));
+          assert.equal(layout.controlsFit, true, JSON.stringify(layout));
+          assert.equal(layout.font, '13px');
+          assert.equal(layout.inputHeight, 44);
+          assert.equal(layout.clearInHeader, true);
+          if (process.env.E2E_SCREENSHOT_DIR) {
+            await fs.mkdir(process.env.E2E_SCREENSHOT_DIR, { recursive: true });
+            const { data } = await cdp('Page.captureScreenshot', { format: 'png' }, sessionId);
+            await fs.writeFile(
+              path.join(process.env.E2E_SCREENSHOT_DIR, `settings-${language}-${width}.png`),
+              Buffer.from(data, 'base64'),
+            );
+          }
+        }
+      }
+      await previewPanel("document.querySelector('.settings-button').click()");
+      await eventually(() => previewPanel("!document.querySelector('#settings')"));
+      assert.equal(
+        await previewPanel(
+          "document.querySelector('.message.assistant').textContent.includes('A saved reply')",
+        ),
+        true,
+      );
+      await cdp('Emulation.clearDeviceMetricsOverride', {}, sessionId);
+    },
+  );
   console.log(
     JSON.stringify(
       { passed: checks.length, checks, measurements, browser: await cdp('Browser.getVersion') },

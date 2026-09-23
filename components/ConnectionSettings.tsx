@@ -9,35 +9,34 @@ export function ConnectionSettings({
   pending,
   onSave,
   onToggle,
-  onClear,
 }: {
   state: RemoteState;
   saving: boolean;
   pending: boolean;
   onSave: (relayUrl: string, key: string) => Promise<boolean>;
   onToggle: () => void;
-  onClear: () => void;
 }) {
   const { t, preference, changeLanguage, savingLanguage, languageError } = useI18n();
   const [relayUrl, setRelayUrl] = useState(state.relayUrl || 'ws://127.0.0.1:3802/ext');
   const [key, setKey] = useState('');
   return (
-    <main id="settings" className="settings-page">
+    <main id="settings" className="settings-page" aria-labelledby="settings-title">
       <div className="settings-intro">
-        <h1 className="text-title">{t('connectTitle')}</h1>
-        <p className="text-muted localized-description">{t('connectDescription')}</p>
+        <h1 id="settings-title">{state.configured ? t('settings') : t('connectTitle')}</h1>
+        <p>{state.configured ? t('settingsDescription') : t('connectDescription')}</p>
       </div>
-      <form
-        className="settings-form"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (!saving && relayUrl.trim() && key.trim())
-            void onSave(relayUrl, key).then((ok) => {
-              if (ok) setKey('');
-            });
-        }}
-      >
-        <div className="settings-fields">
+      <section className="settings-section" aria-labelledby="connection-heading">
+        <h2 id="connection-heading">{t('agentConnection')}</h2>
+        <form
+          className="settings-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!pending && relayUrl.trim() && key.trim())
+              void onSave(relayUrl, key).then((ok) => {
+                if (ok) setKey('');
+              });
+          }}
+        >
           <label className="form-field" htmlFor="relay-url">
             <span>{t('relayUrl')}</span>
             <input
@@ -49,7 +48,7 @@ export function ConnectionSettings({
               autoComplete="off"
               spellCheck={false}
               required
-              disabled={saving}
+              disabled={pending}
             />
           </label>
           <label className="form-field" htmlFor="access-key">
@@ -65,28 +64,33 @@ export function ConnectionSettings({
               autoComplete="off"
               spellCheck={false}
               required
-              disabled={saving}
+              disabled={pending}
             />
+            <span id="key-hint" className="settings-hint">
+              {t('keyHint')}
+            </span>
           </label>
-          <p id="key-hint" className="text-caption text-muted">
-            {t('keyHint')}
-          </p>
-        </div>
-        <button
-          className="btn btn-primary save-button"
-          type="submit"
-          disabled={saving || !relayUrl.trim() || !key.trim()}
-        >
-          {saving ? t('saving') : state.enabled ? t('saveConnect') : t('saveSettings')}
-        </button>
-      </form>
-      <aside className="card connection-note">
-        <h2 className="text-label">{t('connectionNoteTitle')}</h2>
-        <p className="text-muted">{t('connectionNote')}</p>
-      </aside>
-      <section className="language-settings" aria-label={t('language')}>
-        <label className="form-field" htmlFor="interface-language">
-          <span>{t('language')}</span>
+          <button
+            className="btn btn-primary save-button"
+            type="submit"
+            disabled={pending || !relayUrl.trim() || !key.trim()}
+          >
+            {saving ? t('saving') : state.enabled ? t('saveConnect') : t('saveSettings')}
+          </button>
+        </form>
+      </section>
+      <section
+        className="settings-section preferences-settings"
+        aria-labelledby="preferences-heading"
+      >
+        <h2 id="preferences-heading">{t('preferences')}</h2>
+        <div className="settings-row language-settings">
+          <div className="settings-copy">
+            <label htmlFor="interface-language">{t('language')}</label>
+            <p id="language-hint" className="settings-hint">
+              {t('languageHint')}
+            </p>
+          </div>
           <select
             id="interface-language"
             className="select"
@@ -99,32 +103,40 @@ export function ConnectionSettings({
             <option value="zh-CN">中文</option>
             <option value="en">English</option>
           </select>
-        </label>
-        <p id="language-hint" className="text-caption text-muted">
-          {t('languageHint')}
-        </p>
+        </div>
         {languageError && (
-          <p className="language-error text-caption" role="alert">
+          <p className="language-error settings-hint" role="alert">
             {t('languageSaveFailed')}
           </p>
         )}
-      </section>
-      {state.configured && (
-        <section className="connection-management" aria-label={t('manageConnection')}>
-          <button className="btn secondary-button" disabled={pending} onClick={onToggle}>
-            {state.enabled ? t('disableExtension') : t('enableExtension')}
-          </button>
-          {state.chat.length > 0 && (
+        {state.configured && (
+          <div className="settings-row connection-management">
+            <div className="settings-copy">
+              <label id="connection-enabled-label" htmlFor="connection-enabled">
+                {t('connectionEnabled')}
+              </label>
+              <p id="connection-enabled-hint" className="settings-hint">
+                {t('connectionEnabledHint')}
+              </p>
+            </div>
             <button
-              className="btn btn-ghost clear-chat-button"
+              id="connection-enabled"
+              className="connection-toggle"
+              type="button"
+              role="switch"
+              aria-checked={state.enabled}
+              aria-labelledby="connection-enabled-label"
+              aria-describedby="connection-enabled-hint"
               disabled={pending}
-              onClick={onClear}
+              onClick={onToggle}
             >
-              {t('clearChat')}
+              <span className="settings-switch-track" aria-hidden="true">
+                <span />
+              </span>
             </button>
-          )}
-        </section>
-      )}
+          </div>
+        )}
+      </section>
     </main>
   );
 }

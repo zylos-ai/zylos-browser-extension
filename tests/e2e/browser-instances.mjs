@@ -155,6 +155,7 @@ try {
     extPort: 0,
     agentPort: 0,
     monitor: true,
+    onStop: async () => ({ ok: true }), // Isolate runtime control from the real Agent.
     onRequest: async (message) => {
       messages.push(message);
       return { ok: true };

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { translate, workerLocale } from '../i18n';
 
 const recordSchema = z.object({
   taskId: z.string().uuid(),
@@ -15,17 +16,16 @@ const receipts = new Map<string, unknown>();
 let browser = '';
 let loaded: Promise<void> | undefined;
 let queue: Promise<unknown> = Promise.resolve();
-let warning = '';
-export const cleanupWarning = () => warning;
+let needsCleanup = false;
+export const cleanupWarning = () =>
+  needsCleanup ? translate(workerLocale(), 'taskTabsCleanupPending') : '';
 function serial<T>(work: () => Promise<T>) {
   const next = queue.catch(() => {}).then(work);
   queue = next.catch(() => {});
   return next;
 }
 function refreshWarning() {
-  warning = [...records.values()].some((r) => r.pending || r.browser !== browser)
-    ? '部分工作标签尚未清理；控制已撤销。无法核验归属的旧标签请手动关闭。'
-    : '';
+  needsCleanup = [...records.values()].some((r) => r.pending || r.browser !== browser);
 }
 async function load() {
   if (!loaded)
@@ -41,7 +41,7 @@ async function load() {
         .array(recordSchema)
         .max(100)
         .safeParse(stored[key] ?? []);
-      if (!parsed.success) throw new Error('Invalid task cleanup journal');
+      if (!parsed.success) throw new Error('ui.error.taskCleanupInvalid');
       for (const r of parsed.data) records.set(r.taskId, { ...r, pending: true });
       refreshWarning();
     })();
@@ -60,14 +60,13 @@ export async function recordTask(
 ) {
   await serial(async () => {
     await load();
-    if (records.size >= 100 && !records.has(taskId))
-      throw new Error('Too many pending cleanup tasks');
+    if (records.size >= 100 && !records.has(taskId)) throw new Error('ui.error.taskCleanupLimit');
     let r = records.get(taskId);
     if (!r) {
       r = { taskId, browser, windowId, groupId, pending: false, tabs: [] };
       records.set(taskId, r);
     }
-    if (r.pending) throw new Error('Task already ended');
+    if (r.pending) throw new Error('ui.error.taskAlreadyEnded');
     r.groupId = groupId;
     if (!r.tabs.some((t) => t.id === id)) r.tabs.push({ id, owned, keep: false });
     await save();
@@ -88,7 +87,7 @@ export async function cleanupTask(taskId: string, keep: number[] = [], recovery 
       (r.browser !== browser || (recovery && r.groupId === null)) &&
       r.tabs.some((t) => t.owned)
     ) {
-      throw Object.assign(new Error(warning), { code: 'CLEANUP_PENDING' });
+      throw Object.assign(new Error(cleanupWarning()), { code: 'CLEANUP_PENDING' });
     }
     const closed: number[] = [],
       retained: number[] = [],
@@ -129,7 +128,8 @@ export async function cleanupTask(taskId: string, keep: number[] = [], recovery 
     r.tabs = remaining;
     if (!remaining.length) records.delete(taskId);
     await save();
-    if (remaining.length) throw Object.assign(new Error(warning), { code: 'CLEANUP_PENDING' });
+    if (remaining.length)
+      throw Object.assign(new Error(cleanupWarning()), { code: 'CLEANUP_PENDING' });
     const receipt = { finalized: true, taskId, closed, retained, handedOff };
     receipts.set(taskId, receipt);
     if (receipts.size > 32) receipts.delete(receipts.keys().next().value!);
