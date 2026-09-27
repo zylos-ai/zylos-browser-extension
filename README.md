@@ -68,16 +68,27 @@ Zylos Browser 是 Zylos Agent 的 Chrome 插件。在同一个侧边栏里，你
 
 ### 1. 安装插件
 
+装**最新的正式发布版本**，不要停在 `main` 分支 —— `main` 上是尚未发版的改动，也没有和对应版本的 Browser Remote 一起验证过。
+
 ```sh
 git clone https://github.com/zylos-ai/zylos-browser-extension.git
 cd zylos-browser-extension
+git checkout "$(git describe --tags --abbrev=0)"   # 切到最新正式版本
 npm ci
 npm run build
 ```
 
 打开 `chrome://extensions`，开启 **开发者模式** → **加载已解压的扩展程序**，选择本仓库的 **`.output/chrome-mv3`** 目录。
 
-建议将 Zylos 固定到 Chrome 工具栏，点击章鱼图标即可打开侧边栏。更新源码并重新构建后，需要在扩展管理页点击 **重新加载**。
+建议将 Zylos 固定到 Chrome 工具栏，点击章鱼图标即可打开侧边栏。
+
+需要升级时，同样切到新的正式版本再重新构建，然后在扩展管理页点击 **重新加载**：
+
+```sh
+git fetch origin --tags
+git checkout "$(git describe --tags --abbrev=0 origin/main)"
+npm ci && npm run build
+```
 
 <details>
 <summary>macOS 中找不到 .output 目录？</summary>
