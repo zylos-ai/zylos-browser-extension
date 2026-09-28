@@ -233,6 +233,22 @@ export default {
   agentStopUnsupported:
     'Browser actions stopped. Update Browser Remote to also interrupt the Agent.',
   message: 'Message',
+  addAttachments: 'Add attachments',
+  addAttachmentsHint: 'Add any file · Up to 8 attachments, 5.25 MB total',
+  attachedFiles: 'Attachments',
+  removeAttachment: 'Remove attachment: {name}',
+  dropAttachments: 'Drop to add attachments',
+  readingAttachments: 'Reading attachments…',
+  attachmentMessagePlaceholder: 'Add a description or send the attachments…',
+  imageMessage: 'Please look at the attached images.',
+  attachmentMessage: 'Please look at the attached files.',
+  tooManyAttachments:
+    'A message can contain up to 8 attachments, including selected-text quotes. Remove some and try again.',
+  attachmentsTooLarge: 'Attachments must total no more than 5.25 MB. Choose smaller files.',
+  attachmentEmpty: 'This file is empty. Choose another file.',
+  attachmentReadFailed: 'This file could not be read. Choose it again.',
+  imageReadFailed:
+    'This image could not be read. It may be damaged or have the wrong format. Choose another image.',
   messagePlaceholder: 'Tell me what you want to do…',
   disconnectedPlaceholder: 'Connect your Agent to start chatting…',
   sending: 'Sending',

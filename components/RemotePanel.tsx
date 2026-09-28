@@ -12,7 +12,8 @@ import { ConnectionSettings } from './ConnectionSettings';
 import { LivePreview } from './LivePreview';
 import { usePageSelection } from './usePageSelection';
 import { SelectionChip } from './SelectionChip';
-import { selectionAttachment } from '../utils/attachments';
+import { MAX_ATTACHMENTS, selectionAttachment } from '../utils/attachments';
+import { useFileAttachments } from './useFileAttachments';
 
 /** Owns the sidebar state; all browser operations still run in the background. */
 export function RemotePanel() {
@@ -31,6 +32,7 @@ export function RemotePanel() {
   const { selection, faviconUrl, clearSelection } = usePageSelection(
     state.connected && screen === 'chat',
   );
+  const fileAttachments = useFileAttachments(selection ? 1 : 0);
 
   async function request(
     message: RemoteRequest,
@@ -80,10 +82,24 @@ export function RemotePanel() {
   const stopping = !!state.stopping || pending === 'remote-stop';
 
   async function sendChat() {
-    const text = draft.trim();
-    if (!state.connected || !text || sendingRef.current || chatBusy) return;
+    const text =
+      draft.trim() ||
+      (fileAttachments.files.length
+        ? t(
+            fileAttachments.files.every((file) => file.attachment.type === 'image')
+              ? 'imageMessage'
+              : 'attachmentMessage',
+          )
+        : '');
+    if (!state.connected || !text || sendingRef.current || chatBusy || fileAttachments.isReading())
+      return;
+    if (fileAttachments.files.length + (selection ? 1 : 0) > MAX_ATTACHMENTS) {
+      setError('ui.error.tooManyAttachments');
+      return;
+    }
     const submittedDraft = draft;
     const submittedSelection = selection;
+    const submittedFiles = fileAttachments.files;
     sendingRef.current = true;
     const revision = ++sendRevision.current;
     setSending(true);
@@ -99,8 +115,18 @@ export function RemotePanel() {
             content: [
               { type: 'text', text },
               ...(submittedSelection ? [selectionAttachment(submittedSelection)] : []),
+              ...submittedFiles.map((image) => image.attachment),
             ],
           },
+          ...(submittedFiles.length
+            ? {
+                imagePreviews: Object.fromEntries(
+                  submittedFiles.flatMap((file) =>
+                    file.preview ? [[file.attachment.id, file.preview]] : [],
+                  ),
+                ),
+              }
+            : {}),
           windowId: win.id,
           tabId: tab?.id,
         },
@@ -109,6 +135,7 @@ export function RemotePanel() {
       if (ok) {
         setDraft((current) => (current === submittedDraft ? '' : current));
         if (submittedSelection) clearSelection(submittedSelection);
+        fileAttachments.remove(submittedFiles.map((image) => image.attachment.id));
       }
     } catch {
       if (revision === sendRevision.current) setError('ui.error.serviceUnavailable');
@@ -270,6 +297,11 @@ export function RemotePanel() {
             }}
           />
           <ChatComposer
+            files={fileAttachments.files}
+            onAddFiles={fileAttachments.addFiles}
+            onRemoveFile={(id) => fileAttachments.remove([id])}
+            readingAttachments={fileAttachments.reading}
+            attachmentError={fileAttachments.error}
             attachments={
               selection && (
                 <SelectionChip

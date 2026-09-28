@@ -1,8 +1,10 @@
-import { useLayoutEffect, useRef } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import sendIcon from '../assets/brand/send.svg';
 import sendDisabledIcon from '../assets/brand/send-disabled.svg';
 import { useI18n } from './LanguageProvider';
 import { MAX_CHAT_TEXT } from '../utils/remote';
+import { type DraftAttachment } from '../utils/file-attachments';
+import { FileAttachment } from './FileAttachment';
 
 export function ChatComposer({
   draft,
@@ -16,6 +18,11 @@ export function ChatComposer({
   attachments,
   onStop,
   stopping = false,
+  files = [],
+  onAddFiles,
+  onRemoveFile,
+  readingAttachments = false,
+  attachmentError = '',
 }: {
   draft: string;
   onDraftChange: (value: string) => void;
@@ -28,11 +35,19 @@ export function ChatComposer({
   attachments?: React.ReactNode;
   onStop?: () => void;
   stopping?: boolean;
+  files?: DraftAttachment[];
+  onAddFiles?: (files: File[]) => void;
+  onRemoveFile?: (id: string) => void;
+  readingAttachments?: boolean;
+  attachmentError?: string;
 }) {
-  const { t } = useI18n();
+  const { t, errorText } = useI18n();
   const composing = useRef(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const dragDepth = useRef(0);
+  const [dragging, setDragging] = useState(false);
   const active = sending || busy || stopping;
-  const disabled = !connected || !draft.trim() || active;
+  const disabled = !connected || (!draft.trim() && !files.length) || active || readingAttachments;
   useLayoutEffect(() => {
     const input = inputRef.current;
     if (!input) return;
@@ -43,7 +58,36 @@ export function ChatComposer({
   return (
     <form
       id="chat-form"
-      className="composer"
+      className={`composer${dragging ? ' is-dragging' : ''}`}
+      onPaste={(event) => {
+        const files = Array.from(event.clipboardData.files);
+        if (!files.length || !onAddFiles) return;
+        event.preventDefault();
+        if (connected) onAddFiles(files);
+      }}
+      onDragEnter={(event) => {
+        if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+        event.preventDefault();
+        dragDepth.current++;
+        if (connected && onAddFiles) setDragging(true);
+      }}
+      onDragOver={(event) => {
+        if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = connected && onAddFiles ? 'copy' : 'none';
+      }}
+      onDragLeave={(event) => {
+        event.preventDefault();
+        dragDepth.current = Math.max(0, dragDepth.current - 1);
+        if (!dragDepth.current) setDragging(false);
+      }}
+      onDrop={(event) => {
+        dragDepth.current = 0;
+        setDragging(false);
+        if (!event.dataTransfer.files.length) return;
+        event.preventDefault();
+        if (connected) onAddFiles?.(Array.from(event.dataTransfer.files));
+      }}
       onSubmit={(e) => {
         e.preventDefault();
         if (!disabled) onSend();
@@ -52,6 +96,16 @@ export function ChatComposer({
       <div className="composer-field">
         {preview}
         {attachments}
+        {readingAttachments && (
+          <p className="attachment-status" role="status">
+            {t('readingAttachments')}
+          </p>
+        )}
+        {attachmentError && (
+          <p className="attachment-error" role="alert">
+            {errorText(attachmentError)}
+          </p>
+        )}
         <textarea
           ref={inputRef}
           id="message"
@@ -59,7 +113,11 @@ export function ChatComposer({
           aria-label={t('message')}
           value={draft}
           maxLength={MAX_CHAT_TEXT}
-          placeholder={connected ? t('messagePlaceholder') : t('disconnectedPlaceholder')}
+          placeholder={
+            connected
+              ? t(files.length ? 'attachmentMessagePlaceholder' : 'messagePlaceholder')
+              : t('disconnectedPlaceholder')
+          }
           disabled={!connected}
           onChange={(e) => onDraftChange(e.target.value)}
           onCompositionStart={() => (composing.current = true)}
@@ -78,6 +136,72 @@ export function ChatComposer({
           }}
         />
         <div className="composer-toolbar">
+          {onAddFiles && (
+            <>
+              <input
+                ref={fileInputRef}
+                id="attachment-upload"
+                type="file"
+                multiple
+                hidden
+                disabled={!connected || readingAttachments}
+                onChange={(event) => {
+                  const files = Array.from(event.currentTarget.files ?? []);
+                  event.currentTarget.value = '';
+                  onAddFiles(files);
+                  inputRef.current?.focus();
+                }}
+              />
+              <button
+                type="button"
+                className="btn btn-ghost attach-button"
+                disabled={!connected || readingAttachments}
+                onClick={() => fileInputRef.current?.click()}
+                aria-label={t('addAttachments')}
+                title={t('addAttachmentsHint')}
+              >
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+              </button>
+            </>
+          )}
+          {files.length > 0 && (
+            <ul className="attachment-list draft-attachments" aria-label={t('attachedFiles')}>
+              {files.map(({ attachment, preview }) => (
+                <li
+                  key={attachment.id}
+                  className={`attachment-item${attachment.type === 'file' ? ' is-file' : ''}`}
+                  title={attachment.name}
+                >
+                  {preview ? (
+                    <img src={preview} alt={attachment.name} width="40" height="40" />
+                  ) : (
+                    <FileAttachment name={attachment.name} bytes={attachment.bytes} compact />
+                  )}
+                  <button
+                    type="button"
+                    className="attachment-item-remove"
+                    aria-label={t('removeAttachment', { name: attachment.name })}
+                    title={t('removeAttachment', { name: attachment.name })}
+                    onClick={() => onRemoveFile?.(attachment.id)}
+                  >
+                    <span aria-hidden="true">×</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
           <button
             id="send"
             className="btn send-button"
@@ -105,6 +229,11 @@ export function ChatComposer({
             )}
           </button>
         </div>
+        {dragging && (
+          <div className="attachment-drop-hint" role="status">
+            {t('dropAttachments')}
+          </div>
+        )}
       </div>
     </form>
   );

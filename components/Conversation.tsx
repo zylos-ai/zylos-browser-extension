@@ -7,6 +7,7 @@ import { formatMessageDate } from '../utils/i18n';
 import { ToolSteps } from './ToolSteps';
 import { MarkdownMessage } from './MarkdownMessage';
 import { formatTaskNotice } from '../utils/task-notice';
+import { FileAttachment } from './FileAttachment';
 
 const dayKey = (ts: number) => new Date(ts).toDateString();
 
@@ -143,6 +144,52 @@ export function Conversation({
                     )}
                     {message.role === 'system' && (
                       <span className="system-label">{t('system')}</span>
+                    )}
+                    {message.attachments?.some((attachment) => attachment.type !== 'quote') && (
+                      <ul
+                        className="attachment-list message-attachments"
+                        aria-label={t('attachedFiles')}
+                      >
+                        {message.attachments
+                          .filter((attachment) => attachment.type !== 'quote')
+                          .map((attachment) => (
+                            <li
+                              className={`attachment-item${attachment.type === 'file' ? ' is-file' : ''}`}
+                              key={attachment.id}
+                              title={attachment.name}
+                            >
+                              {attachment.type === 'file' ? (
+                                <FileAttachment name={attachment.name} bytes={attachment.bytes} />
+                              ) : attachment.preview ? (
+                                <img
+                                  src={attachment.preview}
+                                  alt={attachment.name}
+                                  width="128"
+                                  height="96"
+                                  loading="lazy"
+                                />
+                              ) : (
+                                <span className="attachment-item-placeholder" aria-hidden="true">
+                                  <svg
+                                    width="24"
+                                    height="24"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="1.5"
+                                  >
+                                    <rect x="3" y="3" width="18" height="18" rx="3" />
+                                    <circle cx="8" cy="8" r="1" />
+                                    <path d="m3 17 5-5 4 4 4-6 5 7" />
+                                  </svg>
+                                </span>
+                              )}
+                              {attachment.type === 'image' && (
+                                <span className="attachment-item-name">{attachment.name}</span>
+                              )}
+                            </li>
+                          ))}
+                      </ul>
                     )}
                     {message.role !== 'user' && message.notice ? (
                       <p className="message-text">{formatTaskNotice(locale, message.notice)}</p>

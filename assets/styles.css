@@ -1032,15 +1032,169 @@ html[data-theme='zylos'] > body {
   }
   .composer-toolbar {
     display: flex;
-    align-items: center;
+    align-items: flex-end;
     justify-content: flex-end;
     gap: 8px;
+  }
+  .attach-button {
+    width: var(--zylos-primary-control-size);
+    height: var(--zylos-primary-control-size);
+    min-height: var(--zylos-primary-control-size);
+    padding: 0;
+    flex-shrink: 0;
+    border: 0;
+    border-radius: 50%;
+    color: var(--color-muted);
+  }
+  .attach-button:hover:not(:disabled) {
+    color: var(--color-primary);
+    background: var(--color-primary-soft);
+  }
+  .attachment-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    min-width: 0;
+  }
+  .draft-attachments {
+    flex: 1;
+    padding: 4px;
+  }
+  .attachment-item {
+    position: relative;
+    min-width: 0;
+    width: 68px;
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    background: var(--color-base-100);
+  }
+  .attachment-item img {
+    display: block;
+    width: 100%;
+    height: 64px;
+    object-fit: contain;
+    border-radius: 9px 9px 0 0;
+    background: white;
+  }
+  .attachment-item-name {
+    display: block;
+    padding: 3px 5px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 10px;
+    line-height: 16px;
+    color: var(--color-muted);
+  }
+  .attachment-item-remove {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border: 1px solid var(--color-border);
+    border-radius: 50%;
+    background: var(--color-base-100);
+    color: var(--color-base-content);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .attachment-item-remove:hover {
+    color: var(--color-error);
+    background: var(--color-error-soft);
+  }
+  .draft-attachments .attachment-item {
+    flex: 0 0 40px;
+  }
+  .draft-attachments img {
+    height: 38px;
+    border-radius: 9px;
+  }
+  .message-attachments {
+    margin-bottom: 8px;
+  }
+  .message-attachments .attachment-item {
+    width: min(128px, 100%);
+  }
+  .message-attachments .attachment-item.is-file {
+    width: min(220px, 100%);
+  }
+  .file-attachment {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 38px;
+    padding: 4px 8px;
+  }
+  .file-attachment svg {
+    flex-shrink: 0;
+    color: var(--color-muted);
+  }
+  .file-attachment.is-compact {
+    display: grid;
+    place-items: center;
+    width: 38px;
+    height: 38px;
+    padding: 0;
+  }
+  .file-attachment-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .file-attachment-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    line-height: 16px;
+  }
+  .file-attachment-size {
+    color: var(--color-muted);
+    font-size: 10px;
+    line-height: 14px;
+  }
+  .message-attachments img,
+  .attachment-item-placeholder {
+    height: 96px;
+  }
+  .attachment-item-placeholder {
+    display: grid;
+    place-items: center;
+    color: var(--color-muted);
+  }
+  .attachment-status,
+  .attachment-error {
+    font-size: var(--text-caption);
+    line-height: var(--text-caption--line-height);
+    color: var(--color-muted);
+  }
+  .attachment-error {
+    color: var(--color-error);
+  }
+  .attachment-drop-hint {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    border: 2px dashed var(--color-primary);
+    border-radius: inherit;
+    background: var(--color-primary-soft);
+    color: var(--color-primary);
+    pointer-events: none;
   }
   .send-button {
     width: var(--zylos-primary-control-size);
     height: var(--zylos-primary-control-size);
     min-height: var(--zylos-primary-control-size);
     padding: 0;
+    margin-left: auto;
     border: 0;
     border-radius: 50%;
     background: var(--color-composer-action);

@@ -5,7 +5,7 @@
 import { z } from 'zod';
 import { agentActivityFrameSchema, agentActivitySchema } from './agent-activity';
 import { pageSelectionSchema } from './page-selection';
-import { storedAttachmentsSchema, selectionAttachment } from './attachments';
+import { storedAttachmentsSchema, selectionAttachment, imagePreviewsSchema } from './attachments';
 import { userMessageSchema } from './agent-message';
 import { taskNoticeSchema } from './task-notice';
 
@@ -152,6 +152,7 @@ export const remoteRequestSchema = z.discriminatedUnion('type', [
     .object({
       type: z.literal('remote-chat-send'),
       message: userMessageSchema,
+      imagePreviews: imagePreviewsSchema.optional(),
       windowId: z.number().int().nonnegative().optional(),
       tabId: z.number().int().nonnegative().optional(),
     })

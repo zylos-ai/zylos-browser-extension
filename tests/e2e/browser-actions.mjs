@@ -488,6 +488,227 @@ try {
     assert.equal((await panelState()).task, null);
   };
   await check(
+    'mixed attachments support picker, paste, drop, persistent previews and task cleanup',
+    async () => {
+      const images = await previewPanel(`(() => {
+        const canvas = document.createElement('canvas'); canvas.width = 480; canvas.height = 300;
+        const c = canvas.getContext('2d');
+        c.fillStyle = '#f2e6fc'; c.fillRect(0,0,480,300);
+        c.fillStyle = '#702d91'; c.fillRect(28,28,424,120);
+        c.fillStyle = '#fff'; c.font = '28px sans-serif'; c.fillText('Image attachment',50,100);
+        c.fillStyle = '#492b58'; c.font = '20px sans-serif'; c.fillText('Original pixels reach the Agent',28,210);
+        return ['image/png','image/jpeg','image/webp'].map((type,i) => ({
+          name:['reference.png','photo.jpg','design.webp'][i],type,data:canvas.toDataURL(type).split(',')[1]
+        }));
+      })()`);
+      const gif = {
+        name: 'animation.gif',
+        type: 'image/gif',
+        data: 'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7',
+      };
+      const attach = (files, method = 'picker') =>
+        previewPanel(`(() => {
+        const transfer = new DataTransfer();
+        for (const file of ${JSON.stringify(files)}) transfer.items.add(new File([
+          Uint8Array.from(atob(file.data), c => c.charCodeAt(0))
+        ],file.name,{type:file.type}));
+        if (${JSON.stringify(method)} === 'picker') {
+          const input = document.querySelector('#attachment-upload'); input.files = transfer.files;
+          input.dispatchEvent(new Event('change',{bubbles:true}));
+        } else if (${JSON.stringify(method)} === 'paste') {
+          document.querySelector('#message').dispatchEvent(new ClipboardEvent('paste',{clipboardData:transfer,bubbles:true,cancelable:true}));
+        } else {
+          document.querySelector('#chat-form').dispatchEvent(new DragEvent('drop',{dataTransfer:transfer,bubbles:true,cancelable:true}));
+        }
+      })()`);
+      await attach(images);
+      await eventually(() =>
+        previewPanel("document.querySelectorAll('.draft-attachments img').length === 3"),
+      );
+      await attach([gif], 'drop');
+      await eventually(() =>
+        previewPanel("document.querySelectorAll('.draft-attachments img').length === 4"),
+      );
+      await attach([{ ...images[0], name: 'clipboard.png' }], 'paste');
+      await eventually(() =>
+        previewPanel("document.querySelectorAll('.draft-attachments img').length === 5"),
+      );
+      await attach([{ name: 'empty.pdf', type: 'application/pdf', data: '' }]);
+      await eventually(() => previewPanel("!!document.querySelector('.attachment-error')"));
+      await attach([{ name: 'broken.png', type: 'image/png', data: 'aGVsbG8=' }]);
+      await eventually(() =>
+        previewPanel(
+          "document.querySelector('.attachment-error')?.textContent.includes('图片无法读取') || document.querySelector('.attachment-error')?.textContent.includes('could not be read')",
+        ),
+      );
+      await previewPanel("document.querySelectorAll('.attachment-item-remove')[4].click()");
+      assert.equal(
+        await previewPanel("document.querySelectorAll('.draft-attachments img').length"),
+        4,
+      );
+      const documents = [
+        {
+          name: 'report.pdf',
+          type: 'application/pdf',
+          data: Buffer.from('%PDF-1.7\nattachment test').toString('base64'),
+        },
+        {
+          name: 'report.docx',
+          type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          data: 'UEsDBAECAwQ=',
+        },
+        {
+          name: 'budget.xlsx',
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          data: 'UEsDBAUCAwQ=',
+        },
+        { name: 'archive.zip', type: 'application/zip', data: 'UEsDBAYCAwQ=' },
+      ];
+      await attach(documents.slice(0, 2));
+      await attach(documents.slice(2), 'drop');
+      await eventually(() =>
+        previewPanel(
+          "document.querySelectorAll('.draft-attachments .file-attachment').length === 4",
+        ),
+      );
+      await previewPanel(`(() => {
+        const input = document.querySelector('#message');
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input,'Images: compare these pictures');
+        input.dispatchEvent(new Event('input',{bubbles:true}));
+      })()`);
+      const screenshot = async (name) => {
+        if (!process.env.E2E_SCREENSHOT_DIR) return;
+        await fs.mkdir(process.env.E2E_SCREENSHOT_DIR, { recursive: true });
+        const { data } = await cdp('Page.captureScreenshot', { format: 'png' }, sessionId);
+        await fs.writeFile(
+          path.join(process.env.E2E_SCREENSHOT_DIR, name + '.png'),
+          Buffer.from(data, 'base64'),
+        );
+      };
+      for (const width of [320, 400]) {
+        await cdp(
+          'Emulation.setDeviceMetricsOverride',
+          { width, height: 820, deviceScaleFactor: 1, mobile: false },
+          sessionId,
+        );
+        assert.equal(
+          await previewPanel(`(() => {
+          const r = document.querySelector('#chat-form').getBoundingClientRect();
+          return document.documentElement.scrollWidth <= innerWidth && r.bottom <= innerHeight &&
+            [...document.querySelectorAll('.draft-attachments img')].every(img => img.complete && img.naturalWidth > 0);
+        })()`),
+          true,
+          'image composer fits the narrow sidebar and previews decode',
+        );
+        await screenshot('attachment-list-draft-' + width);
+        await previewPanel("document.querySelector('.draft-attachments').scrollLeft = 10000");
+        await screenshot('file-attachments-draft-' + width);
+        await previewPanel("document.querySelector('.draft-attachments').scrollLeft = 0");
+      }
+      await previewPanel("document.querySelector('#send').click()");
+      const request = await eventually(() =>
+        chatMessages.find((m) => m.text === 'Images: compare these pictures'),
+      );
+      // onRequest replaces C4 delivery in this isolated harness. Run the same
+      // production materializer used by that delivery, without contacting a live Agent.
+      const content = request.attachmentScope.materialize(request.request).message.content;
+      assert.equal(content.length, 9);
+      for (const [i, original] of [...images, gif, ...documents].entries()) {
+        const image = content[i + 1];
+        const isImage = original.type.startsWith('image/');
+        assert.equal(image.type, isImage ? 'image' : 'file');
+        assert.equal(image.name, original.name);
+        assert.equal(image[isImage ? 'imageReadRequired' : 'fileReadRequired'], true);
+        assert.equal(path.extname(image.path), path.extname(original.name));
+        assert.equal(image.data, undefined);
+        assert.equal(image.preview, undefined);
+        assert.equal(
+          (await fs.readFile(image.path)).toString('base64'),
+          original.data,
+          'original image bytes arrive unchanged on the Agent host',
+        );
+      }
+      const saved = (await panelState()).chat.find((m) => m.id === request.chatId);
+      assert.equal(saved.attachments.length, 8);
+      assert.ok(
+        saved.attachments.every(
+          (a) =>
+            !a.data &&
+            !a.path &&
+            (a.type === 'image' ? a.preview.startsWith('data:image/jpeg;base64,') : !a.preview),
+        ),
+      );
+      await eventually(() =>
+        previewPanel(
+          "!document.querySelector('.draft-attachments') && document.querySelectorAll('.message-attachments img').length === 4",
+        ),
+      );
+      await decision(request, { kind: 'done', text: 'Images received.' });
+      await eventually(async () => !(await panelState()).chatBusy);
+      for (const attachment of content.filter((item) => item.type !== 'text')) {
+        await assert.rejects(fs.access(attachment.path), { code: 'ENOENT' });
+      }
+      await screenshot('attachment-list-sent');
+      await cdp('Page.reload', {}, sessionId);
+      await eventually(() =>
+        previewPanel("document.querySelectorAll('.message-attachments img').length === 4"),
+      );
+      assert.equal(
+        await previewPanel(
+          "document.querySelectorAll('.message-attachments .file-attachment').length",
+        ),
+        4,
+      );
+      await attach([images[0]]);
+      await eventually(() =>
+        previewPanel("document.querySelectorAll('.draft-attachments img').length === 1"),
+      );
+      await previewPanel("document.querySelector('#send').click()");
+      const imageOnly = await eventually(() =>
+        chatMessages.find(
+          (m) =>
+            m.request?.message?.content?.length === 2 &&
+            m.request.message.content[1].type === 'image',
+        ),
+      );
+      assert.ok(
+        imageOnly.text.trim(),
+        'image-only sends remain compatible with the existing Remote',
+      );
+      await decision(imageOnly, { kind: 'done', text: 'Image received.' });
+      await eventually(async () => !(await panelState()).chatBusy);
+      await attach([{ name: 'unknown.custom', type: '', data: 'AAF/gP8=' }]);
+      await eventually(() =>
+        previewPanel(
+          "document.querySelectorAll('.draft-attachments .file-attachment').length === 1",
+        ),
+      );
+      await previewPanel("document.querySelector('#send').click()");
+      const fileOnly = await eventually(() =>
+        chatMessages.find(
+          (m) =>
+            m.request?.message?.content?.length === 2 &&
+            m.request.message.content[1].type === 'file',
+        ),
+      );
+      assert.ok(fileOnly.text.trim());
+      const file = fileOnly.attachmentScope.materialize(fileOnly.request).message.content[1];
+      assert.equal(file.mimeType, 'application/octet-stream');
+      assert.equal(path.extname(file.path), '.custom');
+      assert.equal((await fs.readFile(file.path)).toString('base64'), 'AAF/gP8=');
+      await decision(fileOnly, { kind: 'done', text: 'File received.' });
+      await eventually(async () => !(await panelState()).chatBusy);
+      await assert.rejects(fs.access(file.path), { code: 'ENOENT' });
+      await previewPanel("document.querySelector('.clear-chat-button').click()");
+      await eventually(async () => (await panelState()).chat.length === 0);
+      assert.equal(
+        await previewPanel("document.querySelectorAll('.message-attachments img').length"),
+        0,
+      );
+      await cdp('Emulation.clearDeviceMetricsOverride', {}, sessionId);
+    },
+  );
+  await check(
     'selected prose is previewed, sent once with its source page, and removable without CDP',
     async () => {
       const tab = await previewPanel(

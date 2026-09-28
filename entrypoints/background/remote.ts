@@ -50,6 +50,7 @@ import {
   ATTACHMENT_CAPABILITY,
   attachmentSelection,
   storedAttachments,
+  pruneImagePreviews,
 } from '../../utils/attachments';
 
 import { AGENT_ACTIVITY_CAPABILITY } from '../../utils/agent-activity';
@@ -135,7 +136,10 @@ export function startRemoteBackground() {
     // delayed tool update can never restore history that the user has cleared.
     const saving = saveQueue
       .catch(() => {})
-      .then(() => chrome.storage.local.set({ [REMOTE_CHAT_LOG_KEY]: structuredClone(state.chat) }));
+      .then(() => {
+        pruneImagePreviews(state.chat);
+        return chrome.storage.local.set({ [REMOTE_CHAT_LOG_KEY]: structuredClone(state.chat) });
+      });
     saveQueue = saving;
     return saving;
   }
@@ -731,7 +735,9 @@ export function startRemoteBackground() {
               ts,
               delivery: 'sent',
               page,
-              ...(attachments.length ? { attachments: storedAttachments(attachments) } : {}),
+              ...(attachments.length
+                ? { attachments: storedAttachments(attachments, m.imagePreviews) }
+                : {}),
               loopStatus: 'active',
             });
             if (gen !== generation || revision !== chatRevision || !loopReady) {

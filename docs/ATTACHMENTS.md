@@ -2,8 +2,21 @@
 
 The extension uses ordered `message.content` blocks for user text, quotes,
 images and files. Requests use the version 2 message/context/execution envelope.
-The composer currently creates text and quotes; a file picker, paste and
-drag-and-drop uploads are not part of this change.
+The composer supports text, quotes and arbitrary files. The plus button opens a
+multi-file picker; clipboard files and files dropped on the composer use the same validation.
+Draft attachments appear as equal-sized tiles to the right of the plus button,
+wrapping within the composer when space is limited,
+while the selection stays above the text input.
+PNG, JPEG, WebP and GIF display thumbnails; other formats (including SVG/HEIC)
+display a compact file icon with name and size on hover. Sent history retains
+file cards with visible names and sizes. Unknown MIME types fall back to
+`application/octet-stream`; no extension allowlist restricts file selection.
+All attachments (including quotes) share the eight-item limit and 5,250,000-byte
+binary budget. Image signatures/decoding, empty files and aggregate bytes are
+checked before sending. An invalid batch leaves existing draft attachments intact.
+Attachments can be removed, and failed submissions retain text and files.
+Attachment-only submissions supply localized text for compatibility with existing
+Remote versions requiring nonempty user text; image-only prompts retain their wording.
 
 ## Owner attachments
 
@@ -58,7 +71,9 @@ document changes. Old local `selection` history entries are migrated on read.
 
 Images and files use the same fields: `id`, `type`, `name`, `mimeType`, `bytes`
 and base64 `data`. `type` is `image` or `file`. Images support PNG, JPEG, WebP and
-GIF; other MIME types use `file`. File names are labels, never filesystem paths.
+GIF; other MIME types use `file`, including non-previewable image formats.
+File names are labels, never filesystem paths. Remote preserves safe filename
+suffixes for document readers while generating its own unique storage basename.
 Empty files, path separators, malformed encodings and size mismatches are rejected.
 All binary attachments in a message share a 5,250,000-byte decoded budget (at most
 7,000,000 base64 characters), leaving space under the 8 MiB WebSocket frame limit.
@@ -75,8 +90,14 @@ remote URL fetch is introduced. The Agent must actually read the resource;
 metadata alone is not image or document content. Unsupported document readers
 remain an Agent limitation, independent of successful binary transport.
 
-Chrome history stores file/image metadata only. It does not persist base64 or
-Agent-host paths. Monitor redacts attachment data, including short encodings.
+Chrome history stores file/image metadata and optional small JPEG thumbnails, never
+the original binary data or Agent-host paths. Thumbnails are generated locally with
+a maximum dimension of 256 px and a 24,000-character data URL limit. The panel passes
+them in the local-only `remote-chat-send.imagePreviews` map, separate from
+`message.content`. They never enter the Agent request. History retains at most
+1,000,000 thumbnail characters, discarding older previews (but keeping their image
+metadata) when necessary. Clearing history also clears its thumbnails. Monitor
+redacts transport attachment data, including short encodings.
 
 ## Browser observations and lifetime
 
@@ -86,10 +107,13 @@ Both the initial C4 delivery and later decision responses materialize binaries
 before exposing them to the Agent. Per request Remote permits at most 12 binary
 objects, with the same combined decoded-byte limit.
 
-Attachments are stored in `BROWSER_REMOTE_OBS_DIR` (the existing observations
-directory by default), with private directory/file permissions. Remote removes
-files older than 24 hours when writing new attachments and caps stored bytes at
-128 MiB; a full store rejects new writes instead of evicting active-task files.
-This replaces the previous global last-12-screenshots policy, which could remove
-a resource still needed by another browser's task. Materialization validates the
-whole payload first and rolls back newly written files if writing fails.
+Attachments are temporarily stored in `BROWSER_REMOTE_OBS_DIR` (the existing
+observations directory by default), with private directory/file permissions.
+Remote tracks files by browser endpoint and task, retaining them across rounds
+and deleting them when the task completes, stops, is interrupted, disconnects,
+or the service shuts down. Confirmed intake failure also releases files.
+New tasks that need an original image must attach it again; Chrome thumbnails
+remain available in local history.
+There is no startup, scheduled or age-based cleanup. A 128 MiB cap rejects new writes instead of
+evicting active-task files. Materialization validates the whole payload first
+and rolls back newly written files if writing fails.

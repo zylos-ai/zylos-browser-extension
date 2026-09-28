@@ -317,6 +317,39 @@ describe('decision transport background', () => {
     );
     await respond(ws, request, { kind: 'done', text: 'Read' });
   });
+  it('sends original image bytes and stores local thumbnails without exposing them to the Agent', async () => {
+    const ws = await bootConnected(true);
+    const image = {
+      ...file,
+      id: 'image-1',
+      type: 'image',
+      name: 'photo.png',
+      mimeType: 'image/png',
+    };
+    const preview = 'data:image/jpeg;base64,/9j/2Q==';
+    expect(
+      (
+        await ask({
+          type: 'remote-chat-send',
+          text: 'Look at this',
+          attachments: [image],
+          imagePreviews: { 'image-1': preview },
+        })
+      ).ok,
+    ).toBe(true);
+    const request = ws.last('agent-request')!;
+    expect(request.message).toHaveProperty('content', [
+      { type: 'text', text: 'Look at this' },
+      image,
+    ]);
+    expect(JSON.stringify(request)).not.toContain(preview);
+    expect(JSON.stringify(storage.remoteChatLog)).not.toContain(image.data);
+    expect(
+      ((await state()).chat as ChatEntry[]).find((entry) => entry.role === 'user')
+        ?.attachments?.[0],
+    ).toMatchObject({ id: 'image-1', preview, name: 'photo.png' });
+    await respond(ws, request, { kind: 'done', text: 'Read' });
+  });
   it.each(['done', 'blocked', 'stopped'] as const)(
     'rejects a new message without interrupting the current request, and accepts one after %s',
     async (status) => {

@@ -5,6 +5,9 @@ import {
   storedAttachments,
   agentAttachments,
   selectionAttachment,
+  imagePreviewSchema,
+  pruneImagePreviews,
+  IMAGE_HISTORY_PREVIEW_BUDGET,
 } from '../../utils/attachments';
 import { chatEntrySchema, remoteRequestSchema } from '../../utils/remote';
 
@@ -69,5 +72,36 @@ describe('message attachment boundaries', () => {
       Array.from({ length: 9 }, (_, i) => ({ ...file, id: `file-${i}` })),
     ])
       expect(attachmentsSchema.safeParse(invalid).success).toBe(false);
+  });
+  it('keeps bounded local thumbnails out of the Agent payload and evicts old previews without losing metadata', () => {
+    const image = {
+      ...file,
+      type: 'image' as const,
+      mimeType: 'image/png' as const,
+      name: 'image.png',
+    };
+    const preview = 'data:image/jpeg;base64,' + 'A'.repeat(23_976);
+    expect(imagePreviewSchema.safeParse(preview).success).toBe(true);
+    expect(imagePreviewSchema.safeParse('https://example.com/tracker.jpg').success).toBe(false);
+    expect(imagePreviewSchema.safeParse('data:image/svg+xml;base64,AAAA').success).toBe(false);
+    const entries = Array.from({ length: 60 }, () => ({
+      attachments: storedAttachments([image], { [image.id]: preview }),
+    }));
+    pruneImagePreviews(entries);
+    expect(entries[0]!.attachments[0]).not.toHaveProperty('preview');
+    expect(entries.at(-1)!.attachments[0]).toHaveProperty('preview', preview);
+    expect(entries[0]!.attachments[0]).toMatchObject({ name: 'image.png', bytes: 5 });
+    expect(JSON.stringify(entries)).not.toContain('"data":');
+    const total = entries.reduce(
+      (sum, entry) =>
+        sum +
+        entry.attachments.reduce(
+          (bytes, a) => bytes + (a.type === 'image' ? (a.preview?.length ?? 0) : 0),
+          0,
+        ),
+      0,
+    );
+    expect(total).toBeLessThanOrEqual(IMAGE_HISTORY_PREVIEW_BUDGET);
+    expect(agentAttachments([image], 'task-1')[0]).not.toHaveProperty('preview');
   });
 });

@@ -7,6 +7,29 @@ import { initialRemoteState, type RemoteState } from '../../utils/remote';
 import markdownExample from '../fixtures/markdown-message.json';
 import { selectionAttachment } from '../../utils/attachments';
 import { formatTaskNotice } from '../../utils/task-notice';
+import { readAttachmentFile } from '../../utils/file-attachments';
+
+vi.mock('../../utils/file-attachments', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../utils/file-attachments')>()),
+  readAttachmentFile: vi.fn(),
+}));
+const imagePreview = 'data:image/jpeg;base64,/9j/2Q==';
+const imageFile = (name = 'photo.png') => new File(['image'], name, { type: 'image/png' });
+async function addAttachments(files: File[], method: 'picker' | 'paste' | 'drop' = 'picker') {
+  await act(async () => {
+    if (method === 'picker') {
+      const picker = container.querySelector<HTMLInputElement>('#attachment-upload')!;
+      Object.defineProperty(picker, 'files', { configurable: true, value: files });
+      picker.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      const event = new Event(method, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, method === 'paste' ? 'clipboardData' : 'dataTransfer', {
+        value: { files, types: ['Files'] },
+      });
+      input().dispatchEvent(event);
+    }
+  });
+}
 
 let root: Root;
 let container: HTMLDivElement;
@@ -53,6 +76,32 @@ async function mount() {
 }
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  vi.mocked(readAttachmentFile)
+    .mockReset()
+    .mockImplementation(async (file) =>
+      file.type === 'image/png'
+        ? {
+            attachment: {
+              id: crypto.randomUUID(),
+              type: 'image',
+              name: file.name,
+              mimeType: 'image/png',
+              bytes: 5,
+              data: 'aW1hZ2U=',
+            },
+            preview: imagePreview,
+          }
+        : {
+            attachment: {
+              id: crypto.randomUUID(),
+              type: 'file',
+              name: file.name,
+              mimeType: file.type || 'application/octet-stream',
+              bytes: 5,
+              data: 'aW1hZ2U=',
+            },
+          },
+    );
   state = {
     ...initialRemoteState,
     configured: true,
@@ -1331,4 +1380,239 @@ test('a quiet Agent after a real activity never returns to Connecting, including
   });
   await act(async () => listener({ type: 'remote-updated', state }));
   expect(title()).toBe('接通中');
+});
+
+test('image picker previews multiple images and sends them with text and local-only thumbnails', async () => {
+  await mount();
+  await addAttachments([imageFile('one.png'), imageFile('two.png')]);
+  expect(container.querySelectorAll('.draft-attachments img')).toHaveLength(2);
+  expect(container.querySelector<HTMLInputElement>('#attachment-upload')!.value).toBe('');
+  await fill('#message', 'Compare these images');
+  send.mockClear();
+  await enter();
+  expect(send).toHaveBeenCalledTimes(1);
+  const request = send.mock.calls[0]![0];
+  expect(request.message.content.map((part: { type: string }) => part.type)).toEqual([
+    'text',
+    'image',
+    'image',
+  ]);
+  expect(request.message.content[1]).toMatchObject({ name: 'one.png', data: 'aW1hZ2U=' });
+  expect(Object.values(request.imagePreviews)).toEqual([imagePreview, imagePreview]);
+  expect(request.message.content[1]).not.toHaveProperty('preview');
+  expect(container.querySelector('.draft-attachments')).toBeNull();
+  expect(input().value).toBe('');
+});
+
+test('paste and drop add images, removal excludes the image, and image-only send supplies a compatible prompt', async () => {
+  await mount();
+  await addAttachments([imageFile('pasted.png')], 'paste');
+  await addAttachments([imageFile('dropped.png')], 'drop');
+  await click('.attachment-item-remove');
+  expect(container.querySelectorAll('.draft-attachments img')).toHaveLength(1);
+  expect(container.querySelector('.draft-attachments img')?.getAttribute('alt')).toBe(
+    'dropped.png',
+  );
+  send.mockClear();
+  await enter();
+  expect(send.mock.calls[0]![0].message.content).toEqual([
+    { type: 'text', text: '请查看附带的图片。' },
+    expect.objectContaining({ type: 'image', name: 'dropped.png' }),
+  ]);
+});
+
+test('image send failures keep the draft and images, and successful retries clear only submitted images', async () => {
+  await mount();
+  await addAttachments([imageFile('first.png')]);
+  await fill('#message', 'First description');
+  send.mockResolvedValueOnce({ ok: false, error: 'ui.error.sendFailed' });
+  await enter();
+  expect(input().value).toBe('First description');
+  expect(container.querySelectorAll('.draft-attachments img')).toHaveLength(1);
+  let resolveSend!: (value: unknown) => void;
+  send.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        resolveSend = resolve;
+      }),
+  );
+  await enter();
+  await addAttachments([imageFile('next.png')]);
+  await fill('#message', 'Next description');
+  await act(async () => resolveSend({ ok: true, value: state }));
+  expect(input().value).toBe('Next description');
+  expect(container.querySelectorAll('.draft-attachments img')).toHaveLength(1);
+  expect(container.querySelector('.draft-attachments img')?.getAttribute('alt')).toBe('next.png');
+});
+
+test('pending image reads block sending and overlapping additions cannot exceed the attachment limit', async () => {
+  await mount();
+  let finish!: (image: Awaited<ReturnType<typeof readAttachmentFile>>) => void;
+  vi.mocked(readAttachmentFile).mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  await addAttachments([imageFile('slow.png')]);
+  await fill('#message', 'Wait for the image');
+  send.mockClear();
+  await enter();
+  expect(send).not.toHaveBeenCalled();
+  expect(container.querySelector('[role=status]')?.textContent).toBeTruthy();
+  await addAttachments(
+    Array.from({ length: 8 }, (_, i) => imageFile(`extra-${i}.png`)),
+    'paste',
+  );
+  await act(async () =>
+    finish({
+      attachment: {
+        id: 'slow',
+        type: 'image',
+        name: 'slow.png',
+        mimeType: 'image/png',
+        bytes: 5,
+        data: 'aW1hZ2U=',
+      },
+      preview: imagePreview,
+    }),
+  );
+  expect(container.querySelectorAll('.draft-attachments img')).toHaveLength(1);
+  expect(container.querySelector('.attachment-error')?.textContent).toContain('最多 8 个附件');
+  expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(false);
+});
+
+test('empty, oversized and unreadable files leave existing attachments intact', async () => {
+  await mount();
+  await addAttachments([imageFile('keep.png')]);
+  await addAttachments([new File([], 'empty.pdf', { type: 'application/pdf' })]);
+  expect(container.querySelector('.attachment-error')?.textContent).toContain('空文件');
+  const large = imageFile('large.png');
+  Object.defineProperty(large, 'size', { value: 5_250_000 });
+  await addAttachments([large]);
+  expect(container.querySelector('.attachment-error')?.textContent).toContain('5.25 MB');
+  vi.mocked(readAttachmentFile).mockRejectedValueOnce(new Error('ui.error.imageReadFailed'));
+  await addAttachments([imageFile('broken.png')]);
+  expect(container.querySelector('.attachment-error')?.textContent).toContain('图片无法读取');
+  expect(container.querySelectorAll('.draft-attachments img')).toHaveLength(1);
+});
+
+test('offline uploads are disabled, plain text paste is untouched, and saved images render their thumbnails', async () => {
+  state.connected = false;
+  state.chat = [
+    {
+      role: 'user',
+      text: 'A saved photo',
+      ts: 1,
+      attachments: [
+        {
+          id: 'saved',
+          type: 'image',
+          name: 'saved.png',
+          mimeType: 'image/png',
+          bytes: 5,
+          preview: imagePreview,
+        },
+      ],
+    },
+  ];
+  await mount();
+  expect(container.querySelector<HTMLButtonElement>('.attach-button')!.disabled).toBe(true);
+  await addAttachments([imageFile()], 'paste');
+  expect(readAttachmentFile).not.toHaveBeenCalled();
+  const paste = new Event('paste', { bubbles: true, cancelable: true });
+  Object.defineProperty(paste, 'clipboardData', { value: { files: [] } });
+  input().dispatchEvent(paste);
+  expect(paste.defaultPrevented).toBe(false);
+  expect(container.querySelector('.message-attachments img')?.getAttribute('src')).toBe(
+    imagePreview,
+  );
+});
+
+test('mixed attachment icons expose filenames on hover, preserve order, and send only image previews', async () => {
+  await mount();
+  expect(container.querySelector('#attachment-upload')!.hasAttribute('accept')).toBe(false);
+  await addAttachments([
+    imageFile('photo.png'),
+    new File(['12345'], 'report.pdf', { type: 'application/pdf' }),
+  ]);
+  await addAttachments([new File(['12345'], 'budget.xlsx')], 'drop');
+  expect(container.querySelectorAll('.draft-attachments img')).toHaveLength(1);
+  expect(container.querySelectorAll('.draft-attachments .file-attachment')).toHaveLength(2);
+  expect(container.querySelector('.draft-attachments')?.textContent).not.toContain('report.pdf');
+  expect(
+    container.querySelector('.draft-attachments .file-attachment')?.getAttribute('title'),
+  ).toBe('report.pdf · 5 B');
+  expect(container.querySelector('.draft-attachments .file-attachment-info')).toBeNull();
+  send.mockClear();
+  await enter();
+  const request = send.mock.calls[0]![0];
+  expect(request.message.content.map((part: { type: string }) => part.type)).toEqual([
+    'text',
+    'image',
+    'file',
+    'file',
+  ]);
+  expect(request.message.content[0].text).toBe('请查看附带的文件。');
+  expect(request.message.content[2]).toMatchObject({
+    name: 'report.pdf',
+    mimeType: 'application/pdf',
+    data: 'aW1hZ2U=',
+  });
+  expect(Object.values(request.imagePreviews)).toEqual([imagePreview]);
+  expect(container.querySelector('.draft-attachments')).toBeNull();
+});
+
+test('file-only attachments can be removed, retained after failure and sent without a description', async () => {
+  await mount();
+  await addAttachments(
+    [
+      new File(['12345'], 'remove.txt', { type: 'text/plain' }),
+      new File(['12345'], 'keep.zip', { type: 'application/zip' }),
+    ],
+    'paste',
+  );
+  await click('.attachment-item-remove');
+  expect(container.querySelector('.draft-attachments [title="remove.txt"]')).toBeNull();
+  send.mockResolvedValueOnce({ ok: false, error: 'ui.error.sendFailed' });
+  await enter();
+  expect(
+    container.querySelector('.draft-attachments .file-attachment')?.getAttribute('title'),
+  ).toBe('keep.zip · 5 B');
+  send.mockClear();
+  await enter();
+  expect(send.mock.calls[0]![0].message.content).toEqual([
+    { type: 'text', text: '请查看附带的文件。' },
+    expect.objectContaining({ type: 'file', name: 'keep.zip' }),
+  ]);
+  expect(send.mock.calls[0]![0].imagePreviews).toEqual({});
+});
+
+test('history renders file metadata next to image previews without binary data', async () => {
+  state.chat = [
+    {
+      role: 'user',
+      text: 'Files',
+      ts: 1,
+      attachments: [
+        { id: 'f1', type: 'file', name: 'notes.txt', mimeType: 'text/plain', bytes: 1234 },
+        {
+          id: 'i1',
+          type: 'image',
+          name: 'photo.png',
+          mimeType: 'image/png',
+          bytes: 5,
+          preview: imagePreview,
+        },
+      ],
+    },
+  ];
+  await mount();
+  expect(container.querySelector('.message-attachments .file-attachment-name')?.textContent).toBe(
+    'notes.txt',
+  );
+  expect(container.querySelector('.message-attachments .file-attachment-size')?.textContent).toBe(
+    '1.2 KB',
+  );
+  expect(container.querySelectorAll('.message-attachments img')).toHaveLength(1);
 });
