@@ -20,6 +20,7 @@
   <a href="#quick-start">快速开始</a> ·
   <a href="#how-it-works">工作原理</a> ·
   <a href="docs/DEVELOPMENT.md">开发指南</a> ·
+  <a href="PRIVACY.md">隐私政策</a> ·
   <a href="https://github.com/zylos-ai/zylos-browser-extension/issues">反馈问题</a>
 </p>
 
