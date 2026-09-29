@@ -126,12 +126,8 @@ type Turn = {
   message: UserMessage;
   page: PageContext;
   round: number;
-  failures: number;
   memory: string;
-  started: number;
   pending?: string;
-  timer?: ReturnType<typeof setTimeout>;
-  watchdog?: ReturnType<typeof setTimeout>;
   ending?: boolean;
   mode: BrowserMode;
   sentMode?: BrowserMode;
@@ -155,10 +151,7 @@ export type LoopIO = {
 export class BrowserLoop {
   private turn?: Turn;
   private receipts = new Map<string, string>();
-  constructor(
-    private io: LoopIO,
-    private decisionTimeoutMs = 300_000,
-  ) {}
+  constructor(private io: LoopIO) {}
   get active() {
     return !!this.turn;
   }
@@ -176,21 +169,14 @@ export class BrowserLoop {
       message,
       page,
       round: 0,
-      failures: 0,
       memory: '',
-      started: Date.now(),
       mode: 'reading',
       research: new ResearchLedger(),
     });
-    turn.watchdog = setTimeout(() => {
-      void this.endNotice(turn, { kind: 'time-limit' }, 'blocked');
-    }, 15 * 60_000);
     this.request(turn);
   }
   cancel() {
     if (!this.turn) return;
-    clearTimeout(this.turn.timer);
-    clearTimeout(this.turn.watchdog);
     this.turn = undefined;
     this.io.cancel();
   }
@@ -232,7 +218,6 @@ export class BrowserLoop {
         ),
         { code: 'BAD_DECISION' },
       );
-    clearTimeout(turn.timer);
     turn.pending = undefined; // Claim synchronously, before any browser work.
     this.receipts.set(requestId, signature);
     while (this.receipts.size > 100) this.receipts.delete(this.receipts.keys().next().value!);
@@ -243,17 +228,11 @@ export class BrowserLoop {
   }
   private request(turn: Turn, last?: RoundResult) {
     if (this.turn !== turn || turn.ending) return;
-    if (turn.round >= 30 || Date.now() - turn.started >= 15 * 60_000 || turn.failures >= 3) {
-      void this.endNotice(turn, { kind: 'execution-limit' }, 'blocked');
-      return;
-    }
+    // Keep waiting/continuing until a terminal decision or an explicit lifecycle
+    // event. Time, round count and recoverable action failures do not end a task.
     const id = crypto.randomUUID();
     turn.pending = id;
     const first = turn.round++ === 0;
-    turn.timer = setTimeout(
-      () => this.fail(id, 'DECISION_TIMEOUT'),
-      Math.min(this.decisionTimeoutMs, 15 * 60_000 - (Date.now() - turn.started)),
-    );
     const execution: AgentRequest['execution'] = {
       protocol: 'browser-decision-v1',
       mode: turn.mode,
@@ -350,7 +329,6 @@ export class BrowserLoop {
     if (this.turn !== turn) return;
     turn.mode = result.mode;
     turn.last = result;
-    turn.failures = result.failed ? turn.failures + 1 : 0;
     this.request(turn, result);
   }
   private endNotice(turn: Turn, notice: TaskNotice, status: 'blocked' | 'interrupted') {
@@ -364,8 +342,6 @@ export class BrowserLoop {
   ) {
     if (this.turn !== turn || turn.ending) return;
     turn.ending = true;
-    clearTimeout(turn.timer);
-    clearTimeout(turn.watchdog);
     turn.pending = undefined;
     // Keep ownership until cleanup and the final bubble are durable.
     try {

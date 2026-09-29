@@ -10,7 +10,7 @@ import {
 import { selectionAttachment } from '../../utils/attachments';
 import { setWorkerLanguage } from '../../utils/i18n';
 
-function setup(timeout = 300000) {
+function setup() {
   const requests: AgentRequest[] = [];
   const io = {
     send: vi.fn((request: AgentRequest) => {
@@ -27,7 +27,7 @@ function setup(timeout = 300000) {
     cancel: vi.fn(),
     progress: vi.fn(),
   };
-  const loop = new BrowserLoop(io, timeout);
+  const loop = new BrowserLoop(io);
   loop.start(
     'task-1',
     { role: 'user', content: [{ type: 'text', text: 'Search the current page' }] },
@@ -159,19 +159,42 @@ describe('extension-owned loop', () => {
       }).success,
     ).toBe(false);
   });
-  it('enforces the total deadline even when an operation never resolves', async () => {
+  it('keeps long-running work active until stop and ignores its late completion', async () => {
     vi.useFakeTimers();
     const { loop, requests, io } = setup();
-    io.execute.mockImplementationOnce(() => new Promise(() => {}));
+    let release!: (result: RoundResult) => void;
+    io.execute.mockImplementationOnce(() => new Promise((resolve) => (release = resolve)));
     loop.accept(requests[0]!.id, action);
-    await vi.advanceTimersByTimeAsync(15 * 60_000);
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
+    expect(loop.active).toBe(true);
+    expect(io.finish).not.toHaveBeenCalled();
+    expect(io.execute).toHaveBeenCalledTimes(1);
+    loop.cancel();
+    release({ observation: {}, results: [], failed: false, mode: 'operating' });
+    await vi.advanceTimersByTimeAsync(0);
     expect(loop.active).toBe(false);
-    expect(io.finish).toHaveBeenCalledWith(
-      expect.stringContaining('time limit'),
-      'blocked',
-      'task-1',
-      { kind: 'time-limit' },
-    );
+    expect(io.cancel).toHaveBeenCalledOnce();
+    expect(requests).toHaveLength(1);
+    expect(io.finish).not.toHaveBeenCalled();
+  });
+  it('continues past former time/round limits and receipt eviction, then finishes normally', async () => {
+    vi.useFakeTimers();
+    const { loop, requests, io } = setup();
+    for (let i = 0; i < 105; i++) {
+      await vi.advanceTimersByTimeAsync(30 * 60_000);
+      expect(loop.active).toBe(true);
+      expect(requests[i]!.round).toBe(i + 1);
+      loop.accept(requests[i]!.id, action);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(requests).toHaveLength(i + 2);
+    }
+    expect(io.execute).toHaveBeenCalledTimes(105);
+    expect(io.finish).not.toHaveBeenCalled();
+    expect(() => loop.accept(requests[0]!.id, action)).toThrow('no longer active');
+    loop.accept(requests[105]!.id, { kind: 'done', text: 'Completed' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(loop.active).toBe(false);
+    expect(io.finish).toHaveBeenCalledExactlyOnceWith('Completed', 'done', 'task-1');
   });
   it('answers ordinary chat without any browser action', async () => {
     const { loop, requests, io } = setup();
@@ -288,19 +311,21 @@ describe('extension-owned loop', () => {
     expect(() => loop.accept(next, action)).toThrow('no longer active');
     expect(io.finish).not.toHaveBeenCalled();
   });
-  it('keeps malformed decisions pending, rejects unknown IDs, and bounds waiting', async () => {
+  it('keeps the same request pending for a delayed valid decision without replaying input', async () => {
     vi.useFakeTimers();
-    const { loop, requests, io } = setup(1000);
+    const { loop, requests, io } = setup();
     expect(() => loop.accept(requests[0]!.id, { kind: 'done', text: '' })).toThrow();
     expect(() => loop.accept('unknown', action)).toThrow('no longer active');
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
+    expect(loop.active).toBe(true);
+    expect(loop.pendingId).toBe(requests[0]!.id);
+    expect(requests).toHaveLength(1);
+    expect(io.execute).not.toHaveBeenCalled();
+    expect(io.finish).not.toHaveBeenCalled();
+    loop.accept(requests[0]!.id, { kind: 'done', text: 'Delayed answer' });
+    await vi.advanceTimersByTimeAsync(0);
     expect(loop.active).toBe(false);
-    expect(io.finish).toHaveBeenCalledWith(
-      expect.stringContaining('Timed out'),
-      'interrupted',
-      'task-1',
-      { kind: 'request-failed', code: 'DECISION_TIMEOUT' },
-    );
+    expect(io.finish).toHaveBeenCalledExactlyOnceWith('Delayed answer', 'done', 'task-1');
   });
   it('uses the worker language for interrupted task text and keeps localization metadata', async () => {
     const { loop, requests, io } = setup();
@@ -315,27 +340,32 @@ describe('extension-owned loop', () => {
       { kind: 'interrupted' },
     );
   });
-  it('stops after three failed rounds without replaying any action automatically', async () => {
+  it('returns consecutive action failures for new decisions until the Agent reports a blocker', async () => {
     const { loop, requests, io } = setup();
+    const failure = { method: 'open', status: 'error', error: { code: 'COMMAND_EXPIRED' } };
     io.execute.mockResolvedValue({
       observation: { text: '' },
-      results: [],
+      results: [failure],
       failed: true,
       mode: 'reading',
     });
-    for (let i = 0; i < 3; i++) {
-      loop.accept(requests[i]!.id, action);
+    for (let i = 0; i < 5; i++) {
+      expect(io.execute).toHaveBeenCalledTimes(i);
+      const decision = {
+        ...action,
+        actions: [{ method: 'open', params: { url: `https://example.com/${i}` } }],
+      };
+      loop.accept(requests[i]!.id, decision);
+      expect(loop.accept(requests[i]!.id, decision).replayed).toBe(true);
       await vi.waitFor(() => expect(io.execute).toHaveBeenCalledTimes(i + 1));
       await Promise.resolve();
+      expect(requests[i + 1]!.execution).toMatchObject({ failed: true, results: [failure] });
+      expect(io.finish).not.toHaveBeenCalled();
     }
+    loop.accept(requests[5]!.id, { kind: 'blocked', text: 'Site is unavailable' });
     await vi.waitFor(() => expect(loop.active).toBe(false));
-    expect(requests).toHaveLength(3);
-    expect(io.finish).toHaveBeenCalledWith(
-      expect.stringContaining('execution limit'),
-      'blocked',
-      'task-1',
-      { kind: 'execution-limit' },
-    );
+    expect(requests).toHaveLength(6);
+    expect(io.finish).toHaveBeenCalledExactlyOnceWith('Site is unavailable', 'blocked', 'task-1');
   });
   it('permits known form edits plus one final action, but not speculative multi-page batches', () => {
     const fill = { method: 'fill', params: { ref: '@real', text: 'query' } };
