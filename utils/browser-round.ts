@@ -35,6 +35,7 @@ export async function runBrowserRound(
   call: Call,
   assertActive: () => void,
   requestId: string,
+  hasUpdates: () => boolean = () => false,
 ): Promise<RoundResult> {
   // A standalone DOM read is already its own observation. In particular, it
   // must not fall through to CDP snapshot/settle/tabs or establish task control.
@@ -68,6 +69,14 @@ export async function runBrowserRound(
   let suppliedObservation: unknown;
   for (let i = 0; i < actions.length; i++) {
     assertActive();
+    if (hasUpdates()) {
+      results.push({
+        status: 'skipped',
+        count: actions.length - i,
+        reason: 'New owner input arrived. Remaining actions need a fresh decision.',
+      });
+      break;
+    }
     const action = actions[i]!;
     const before = currentControl();
     const version = browserPageVersion();

@@ -91,7 +91,14 @@ export function RemotePanel() {
               : 'attachmentMessage',
           )
         : '');
-    if (!state.connected || !text || sendingRef.current || chatBusy || fileAttachments.isReading())
+    if (
+      !state.connected ||
+      !text ||
+      sendingRef.current ||
+      stopping ||
+      (chatBusy && !state.steeringSupported) ||
+      fileAttachments.isReading()
+    )
       return;
     if (fileAttachments.files.length + (selection ? 1 : 0) > MAX_ATTACHMENTS) {
       setError('ui.error.tooManyAttachments');
@@ -182,6 +189,17 @@ export function RemotePanel() {
             {status}
           </span>
           <div className="header-tools">
+            {(chatBusy || sending) && (
+              <button
+                id="stop-current-task"
+                type="button"
+                className="btn btn-ghost header-button"
+                disabled={stopping}
+                onClick={() => void action({ type: 'remote-stop' })}
+              >
+                {t(stopping ? 'stopping' : 'stopTask')}
+              </button>
+            )}
             {state.configured && (
               <button
                 type="button"
@@ -324,7 +342,7 @@ export function RemotePanel() {
             connected={connected}
             sending={sending}
             busy={chatBusy}
-            onStop={() => void action({ type: 'remote-stop' })}
+            steeringSupported={state.steeringSupported ?? false}
             stopping={stopping}
             onSend={() => void sendChat()}
             inputRef={inputRef}

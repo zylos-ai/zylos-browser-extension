@@ -31,7 +31,8 @@ export function Conversation({
     .reverse()
     .find(
       (message) =>
-        message.role === 'user' || (message.role === 'assistant' && message.final !== false),
+        (message.role === 'user' && !message.taskId) ||
+        (message.role === 'assistant' && message.final !== false),
     );
   const turnActivity =
     turn &&
@@ -201,6 +202,11 @@ export function Conversation({
                     {message.role === 'user' && message.deliveryError && (
                       <p className="message-delivery" role="alert">
                         {errorText(message.deliveryError)}
+                      </p>
+                    )}
+                    {message.steerStatus === 'interrupted' && (
+                      <p className="message-delivery" role="status">
+                        {t('steerInterrupted')}
                       </p>
                     )}
                   </article>

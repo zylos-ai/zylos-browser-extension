@@ -16,7 +16,7 @@ export function ChatComposer({
   inputRef,
   preview,
   attachments,
-  onStop,
+  steeringSupported = false,
   stopping = false,
   files = [],
   onAddFiles,
@@ -33,7 +33,7 @@ export function ChatComposer({
   inputRef: React.RefObject<HTMLTextAreaElement | null>;
   preview?: React.ReactNode;
   attachments?: React.ReactNode;
-  onStop?: () => void;
+  steeringSupported?: boolean;
   stopping?: boolean;
   files?: DraftAttachment[];
   onAddFiles?: (files: File[]) => void;
@@ -46,8 +46,13 @@ export function ChatComposer({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
   const [dragging, setDragging] = useState(false);
-  const active = sending || busy || stopping;
-  const disabled = !connected || (!draft.trim() && !files.length) || active || readingAttachments;
+  const disabled =
+    !connected ||
+    (!draft.trim() && !files.length) ||
+    sending ||
+    stopping ||
+    (busy && !steeringSupported) ||
+    readingAttachments;
   useLayoutEffect(() => {
     const input = inputRef.current;
     if (!input) return;
@@ -115,7 +120,13 @@ export function ChatComposer({
           maxLength={MAX_CHAT_TEXT}
           placeholder={
             connected
-              ? t(files.length ? 'attachmentMessagePlaceholder' : 'messagePlaceholder')
+              ? t(
+                  files.length
+                    ? 'attachmentMessagePlaceholder'
+                    : busy && steeringSupported
+                      ? 'steerPlaceholder'
+                      : 'messagePlaceholder',
+                )
               : t('disconnectedPlaceholder')
           }
           disabled={!connected}
@@ -205,28 +216,12 @@ export function ChatComposer({
           <button
             id="send"
             className="btn send-button"
-            type={active ? 'button' : 'submit'}
-            disabled={active ? stopping || !onStop : disabled}
-            onClick={active ? onStop : undefined}
-            aria-label={stopping ? t('stopping') : active ? t('stopTask') : t('sendMessage')}
-            title={stopping ? t('stopping') : active ? t('stopTask') : t('sendMessage')}
-            aria-busy={stopping || undefined}
+            type="submit"
+            disabled={disabled}
+            aria-label={t('sendMessage')}
+            title={t('sendMessage')}
           >
-            {stopping ? (
-              <span className="loading loading-spinner loading-xs" aria-hidden="true" />
-            ) : active ? (
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 18 18"
-                fill="currentColor"
-                aria-hidden="true"
-              >
-                <rect x="4" y="4" width="10" height="10" rx="2" />
-              </svg>
-            ) : (
-              <img src={disabled ? sendDisabledIcon : sendIcon} width="18" height="18" alt="" />
-            )}
+            <img src={disabled ? sendDisabledIcon : sendIcon} width="18" height="18" alt="" />
           </button>
         </div>
         {dragging && (

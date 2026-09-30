@@ -46,6 +46,123 @@ afterEach(() => {
   setWorkerLanguage('auto');
 });
 describe('extension-owned loop', () => {
+  it.each(['actions', 'done', 'blocked'])(
+    'merges ordered updates before executing an outdated %s decision',
+    async (kind) => {
+      const { loop, requests, io } = setup();
+      const page = {
+        type: 'current-page' as const,
+        status: 'excerpt' as const,
+        contextId: 'other-tab',
+        tabId: 8,
+      };
+      loop.steer(
+        'update-1',
+        { role: 'user', content: [{ type: 'text', text: 'Chinese videos only' }] },
+        page,
+      );
+      loop.steer(
+        'update-2',
+        { role: 'user', content: [{ type: 'text', text: 'Under ten minutes' }] },
+        page,
+      );
+      const decision = kind === 'actions' ? action : { kind, text: 'Old answer' };
+      const id = requests[0]!.id;
+      loop.accept(id, decision);
+      await vi.waitFor(() => expect(requests).toHaveLength(2));
+      expect(io.execute).not.toHaveBeenCalled();
+      expect(io.finish).not.toHaveBeenCalled();
+      expect(requests[1]).toMatchObject({
+        taskId: 'task-1',
+        round: 2,
+        message: { id: 'task-1' },
+        updates: [{ message: { id: 'update-1' } }, { message: { id: 'update-2' } }],
+        execution: { mode: 'reading', results: [{ method: 'steering' }] },
+      });
+      expect(loop.accept(id, decision).replayed).toBe(true);
+      expect(requests).toHaveLength(2);
+      loop.accept(requests[1]!.id, action);
+      await vi.waitFor(() => expect(requests).toHaveLength(3));
+      expect(io.execute).toHaveBeenCalledTimes(1);
+      expect(requests[2]).not.toHaveProperty('updates');
+      loop.cancel();
+    },
+  );
+  it('keeps an in-flight action and sends new input with its fresh observation', async () => {
+    const { loop, requests, io } = setup();
+    let resolve!: (result: RoundResult) => void;
+    io.execute.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    );
+    loop.accept(requests[0]!.id, action);
+    loop.steer(
+      'update-1',
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Use this file' },
+          {
+            type: 'file',
+            id: 'f',
+            name: 'notes.txt',
+            mimeType: 'text/plain',
+            bytes: 2,
+            data: 'aGk=',
+          },
+        ],
+      },
+      { type: 'current-page', status: 'excerpt', contextId: 'second', tabId: 9 },
+    );
+    expect(requests).toHaveLength(1);
+    resolve({
+      mode: 'operating',
+      failed: false,
+      observation: { page: { text: 'fresh page' }, target: { id: 3 } },
+      results: [{ method: 'open', status: 'success' }],
+    });
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[1]).toMatchObject({
+      taskId: 'task-1',
+      updates: [
+        {
+          message: {
+            id: 'update-1',
+            content: expect.arrayContaining([
+              expect.objectContaining({ type: 'file', data: 'aGk=' }),
+            ]),
+          },
+          context: { pages: [{ tabId: 9 }] },
+        },
+      ],
+      execution: {
+        observation: { target: { id: 3 } },
+        results: [{ method: 'open', status: 'success' }],
+      },
+    });
+    expect(io.cancel).not.toHaveBeenCalled();
+    loop.cancel();
+  });
+  it('clears pending updates on stop instead of replaying them into a new task', () => {
+    const { loop, requests, io } = setup();
+    loop.steer(
+      'update-1',
+      { role: 'user', content: [{ type: 'text', text: 'More' }] },
+      { type: 'current-page', status: 'unavailable' },
+    );
+    loop.cancel();
+    expect(() => loop.accept(requests[0]!.id, action)).toThrow('no longer active');
+    expect(io.execute).not.toHaveBeenCalled();
+    loop.start(
+      'task-2',
+      { role: 'user', content: [{ type: 'text', text: 'New task' }] },
+      { type: 'current-page', status: 'unavailable' },
+    );
+    expect(requests[1]).not.toHaveProperty('updates');
+    loop.cancel();
+  });
   it('sends owner attachments once, outside page observations, and retains the original task after actions', async () => {
     const { loop, requests } = setup();
     loop.cancel();

@@ -1,5 +1,14 @@
 # Extension-owned browser loop · v1
 
+The owner can steer an active task. Optional `updates` are additional user
+messages in send order, with their own captured page context and attachments.
+Merge them into the goal before deciding; later conflicting requirements replace
+earlier ones. Preserve completed actions and existing task tabs. Merely switching
+the active Chrome tab while sending an update does not change the task's target.
+Record the revised goal in memory. If `execution.results` reports steering, the
+superseded decision was not executed. Even done/blocked can return a new request:
+follow its replyCommands until finished:true, rather than retrying an old answer.
+
 You provide decisions; the extension executes them and sends fresh evidence in
 the next request. The transport supplies replyCommands and the request ID.
 Requests use envelope version 2: `message.content` contains the owner's text and

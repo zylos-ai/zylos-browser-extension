@@ -37,6 +37,8 @@ Remote 验证 Key 和浏览器身份，返回：
 
 新插件要求前三项能力及匹配的 `endpointId`，否则显示协议不匹配，不发送任务。
 图片、文件还需要 `attachments-v1`。先更新并重启 Remote，再重新加载插件。
+执行中追加消息需要 Remote 声明 `agent-steer-v1`。旧 Remote 仍能执行普通任务，
+但不能追加指令；更新后的输入框始终显示发送箭头，停止操作在顶部和预览窗口。
 `hello.version` 是现有实现标识，`agent-request.version` 才是本文的消息结构版本。
 
 `browserId` 在每个 Chrome 安装/profile 内持久保存。同一个 Key 的不同
@@ -66,13 +68,46 @@ agent-request
 | 标识                        | 用途                                              |
 | --------------------------- | ------------------------------------------------- |
 | `id`                        | 当前决策请求 ID，每轮生成新的 UUID                |
-| `taskId`                    | 一次用户输入对应的任务 ID，任务内不变             |
+| `taskId`                    | 一次任务的 ID，追加用户输入也不改变它             |
 | `message.id`                | 原始用户消息 ID，当前实现等于 taskId              |
 | `context.pages[].contextId` | 已捕获页面的引用，当前实现也是该任务 ID           |
 | `req.id`                    | Remote 下发请求的数字序号，与上面的字符串 ID 不同 |
 | `endpointId`                | 认证后的浏览器连接身份，由 Remote 维护            |
 
 下面的 R1、R2、T1 为便于阅读的缩写；实际页面 contextId 是 UUID。
+
+### 执行中追加消息（Steer）
+
+补充消息先保存在插件当前任务内，下一个 `agent-request` 会携带可选 `updates`：
+
+```json
+{
+  "taskId": "T1",
+  "message": { "id": "T1" },
+  "updates": [{
+    "message": { "id": "U1", "role": "user", "content": [
+      { "type": "text", "text": "只找中文解说，十分钟以内" }
+    ] },
+    "context": { "pages": [{ "type": "current-page", "contextId": "U1", "status": "excerpt", "tabId": 123 }] }
+  }]
+}
+```
+
+这是连续轮次中的增量字段，原 `message`、`context` 和 `execution` 结构保持不变。
+每条补充都有独立消息 ID 和发送时的页面上下文，可携带文字、引用、图片或文件。
+正在进行的动作完成后会保留结果；尚未执行的批量动作可跳过。若补充在等待模型时
+到达，旧动作或旧完成回复会被接受但不执行，直接返回包含补充的新决策请求。
+旧请求重试仍受幂等保护，不能把已完成的操作重放。
+
+Agent 按顺序合并补充要求，保留原任务和已操作的 Tab，不因用户切换激活页自动改目标。
+此实现通过相同的决策返回通道兼容 Codex 与 Claude Code，不依赖按 Escape 打断推理。
+追加输入在下一次决策时生效，已经发生的点击等操作不会撤销。
+同一批待合并输入最多 8 条，共用既有附件数量与大小限制；容量满时保留输入框草稿。
+结束或断线会将未确认应用的补充标为未生效，不会在重连后自动重放。
+
+`done`/`blocked` 如果被补充消息取代，也会返回 `ok:true,next`，而不是 `finished:true`。
+此时 C4 最终发送命令非零退出表示最终消息尚未发送；Agent 应使用新的 replyCommands
+继续当前任务，不能重复提交旧答案。
 
 ## 3. 第一轮发送完整输入
 

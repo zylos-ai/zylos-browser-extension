@@ -8,6 +8,11 @@ import {
 
 export const AGENT_MESSAGE_VERSION = 2;
 export const AGENT_MESSAGE_CAPABILITY = 'agent-message-v2';
+export const STEER_CAPABILITY = 'agent-steer-v1';
+export type SteerUpdate = {
+  message: ReturnType<typeof agentMessage>;
+  context: { pages: PageContext[] };
+};
 export const MAX_MESSAGE_TEXT = 8000;
 const textContentSchema = z
   .object({ type: z.literal('text'), text: z.string().max(MAX_MESSAGE_TEXT) })
@@ -73,6 +78,7 @@ export type AgentRequest = {
   // Content is sent once; subsequent rounds refer to the same owner message.
   message: ReturnType<typeof agentMessage> | { id: string };
   context: { pages: PageContext[] };
+  updates?: SteerUpdate[];
   execution: {
     protocol: 'browser-decision-v1';
     mode: 'reading' | 'operating';

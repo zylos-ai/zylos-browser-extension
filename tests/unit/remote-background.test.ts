@@ -157,7 +157,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function bootConnected(attachments = false, interrupt = false) {
+async function bootConnected(attachments = false, interrupt = false, steering = true) {
   startRemoteBackground();
   await flush();
   const ws = sockets[0]!;
@@ -170,6 +170,7 @@ async function bootConnected(attachments = false, interrupt = false) {
       'agent-message-v2',
       ...(attachments ? ['attachments-v1'] : []),
       ...(interrupt ? ['agent-interrupt-v1'] : []),
+      ...(steering ? ['agent-steer-v1'] : []),
     ],
     endpointId: `abababababab.${storage.remoteBrowserId}`,
   });
@@ -196,6 +197,47 @@ const respond = async (ws: Socket, request: Record<string, unknown>, decision: u
 };
 
 describe('decision transport background', () => {
+  it('does not report an accepted steering update as unsent when history persistence fails', async () => {
+    const ws = await bootConnected();
+    const original = await begin(ws, 'First task');
+    vi.mocked(chrome.storage.local.set).mockRejectedValueOnce(new Error('quota'));
+    const result = await ask({ type: 'remote-chat-send', text: 'Additional requirement' });
+    expect(result.ok).toBe(true);
+    expect(result.value?.error).toBe('ui.error.chatSaveFailed');
+    await respond(ws, original, { kind: 'done', text: 'Old answer' });
+    expect(ws.last('agent-request')!.updates).toMatchObject([
+      { message: { content: [{ text: 'Additional requirement' }] } },
+    ]);
+  });
+  it('rejects steering to an older relay without replacing the current task', async () => {
+    const ws = await bootConnected(false, false, false);
+    const original = await begin(ws, 'First task');
+    expect(await ask({ type: 'remote-chat-send', text: 'Update' })).toEqual({
+      ok: false,
+      error: 'ui.error.steerUnsupported',
+    });
+    expect(ws.last('agent-request')!.taskId).toBe(original.taskId);
+  });
+  it('preserves a follow-up that arrives during final cleanup as the next task', async () => {
+    const ws = await bootConnected();
+    const original = await begin(ws, 'First task');
+    let finish!: () => void;
+    executor.completeTask.mockImplementationOnce(
+      () =>
+        new Promise<void>((r) => {
+          finish = r;
+        }),
+    );
+    await respond(ws, original, { kind: 'done', text: 'First answer' });
+    const followup = ask({ type: 'remote-chat-send', text: 'Next task' });
+    await flush();
+    expect(ws.last('agent-request')!.id).toBe(original.id);
+    finish();
+    await flush();
+    expect((await followup).ok).toBe(true);
+    expect(ws.last('agent-request')!.taskId).not.toBe(original.taskId);
+    expect(ws.last('agent-request')!.round).toBe(1);
+  });
   it('stops locally immediately and holds new sends until the correlated Agent interrupt receipt', async () => {
     const ws = await bootConnected(false, true);
     const request = await begin(ws);
@@ -351,23 +393,27 @@ describe('decision transport background', () => {
     await respond(ws, request, { kind: 'done', text: 'Read' });
   });
   it.each(['done', 'blocked', 'stopped'] as const)(
-    'rejects a new message without interrupting the current request, and accepts one after %s',
+    'merges a new message in the same task and accepts a fresh task after %s',
     async (status) => {
       const ws = await bootConnected();
       const original = await begin(ws, 'First task');
       expect((await state()).chatBusy).toBe(true);
-      expect(await ask({ type: 'remote-chat-send', text: 'Second task' })).toEqual({
-        ok: false,
-        error: 'ui.error.chatBusy',
-      });
+      expect((await ask({ type: 'remote-chat-send', text: 'Only Chinese videos' })).ok).toBe(true);
       expect(ws.last('agent-request')!.id).toBe(original.id);
       expect(ws.last('agent-turn-end')).toBeUndefined();
       expect(executor.completeTask).not.toHaveBeenCalled();
       expect((storage.remoteChatLog as ChatEntry[]).filter((m) => m.role === 'user')).toHaveLength(
-        1,
+        2,
       );
+      await respond(ws, original, { kind: 'done', text: 'Old answer must not finish' });
+      const updated = ws.last('agent-request')!;
+      expect(updated.taskId).toBe(original.taskId);
+      expect(updated.updates).toMatchObject([
+        { message: { content: [{ type: 'text', text: 'Only Chinese videos' }] } },
+      ]);
+      expect(executor.completeTask).not.toHaveBeenCalled();
       if (status === 'stopped') await ask({ type: 'remote-stop' });
-      else await respond(ws, original, { kind: status, text: 'First task ended' });
+      else await respond(ws, updated, { kind: status, text: 'Updated task ended' });
       expect((await state()).chatBusy).toBe(false);
       const next = await begin(ws, 'Second task');
       expect(next.taskId).not.toBe(original.taskId);
@@ -481,6 +527,7 @@ describe('decision transport background', () => {
       'browser-instance-v1',
       'agent-message-v2',
       'agent-activity-v1',
+      'agent-steer-v1',
     ]);
     const request = await begin(ws, 'Hello');
     expect(ws.last('chat')).toBeUndefined();
@@ -568,10 +615,9 @@ describe('decision transport background', () => {
       kind: 'actions',
       actions: [{ method: 'click', params: { x: 1, y: 2 } }],
     });
-    expect(await ask({ type: 'remote-chat-send', text: 'Do not replace running action' })).toEqual({
-      ok: false,
-      error: 'ui.error.chatBusy',
-    });
+    expect(
+      (await ask({ type: 'remote-chat-send', text: 'Do not replace running action' })).ok,
+    ).toBe(true);
     expect(ws.last('agent-turn-end')).toBeUndefined();
     ws.receive({ type: 'ping', ts: 123 });
     await flush();

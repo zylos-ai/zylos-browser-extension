@@ -106,6 +106,7 @@ beforeEach(() => {
     ...initialRemoteState,
     configured: true,
     connected: true,
+    steeringSupported: true,
     relayUrl: 'ws://localhost:3802/ext',
     chat: [],
   };
@@ -481,52 +482,44 @@ test('same-URL reload and switching tabs clear the old quote, and hidden panels 
 });
 
 test.each([{ loopActive: true }, { chatBusy: true }])(
-  'busy task or initial capture replaces Send with Stop while Enter and submit preserve the draft: %j',
+  'a running task keeps Send available for successive updates: %j',
   async (busy) => {
     Object.assign(state, busy);
     await mount();
-    await fill('#message', 'Next message draft');
+    await fill('#message', 'Only Chinese videos');
     send.mockClear();
     expect(input().disabled).toBe(false);
     expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(false);
-    expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('停止任务');
+    expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('发送消息');
+    expect(container.querySelector('#send rect')).toBeNull();
     await enter();
-    await act(async () => {
-      container
-        .querySelector('form')!
-        .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    });
-    expect(send).not.toHaveBeenCalled();
-    expect(input().value).toBe('Next message draft');
-    let stopped!: (value: unknown) => void;
-    send.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          stopped = resolve;
-        }),
-    );
-    await click('#send');
-    expect(send).toHaveBeenCalledExactlyOnceWith({ type: 'remote-stop' });
-    expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(true);
-    expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('正在停止…');
-    await click('#send');
-    await enter();
-    expect(send).toHaveBeenCalledTimes(1);
-    state.loopActive = false;
-    state.chatBusy = false;
-    await act(async () => stopped({ ok: true, value: state }));
-    expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(false);
-    send.mockClear();
-    expect(send).not.toHaveBeenCalled();
-    await click('#send');
     expect(send).toHaveBeenCalledExactlyOnceWith({
       type: 'remote-chat-send',
-      message: { role: 'user', content: [{ type: 'text', text: 'Next message draft' }] },
+      message: { role: 'user', content: [{ type: 'text', text: 'Only Chinese videos' }] },
       windowId: 1,
       tabId: 3,
     });
+    expect(input().value).toBe('');
+    await fill('#message', 'Under ten minutes');
+    await click('#send');
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls.some(([m]) => m.type === 'remote-stop')).toBe(false);
+    await click('#stop-current-task');
+    expect(send).toHaveBeenLastCalledWith({ type: 'remote-stop' });
   },
 );
+
+test('an older relay keeps the draft without showing a square stop button', async () => {
+  Object.assign(state, { loopActive: true, steeringSupported: false });
+  await mount();
+  await fill('#message', 'More instructions');
+  send.mockClear();
+  await enter();
+  expect(send).not.toHaveBeenCalled();
+  expect(input().value).toBe('More instructions');
+  expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('发送消息');
+  expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(true);
+});
 
 test('compact progress shows only a broad overview and collapses neutrally on completion', async () => {
   state.chat = [
@@ -724,8 +717,8 @@ test('Stop during tab capture prevents a late send and retains the unsent draft'
   await fill('#message', 'Still gathering the current tab');
   send.mockClear();
   await enter();
-  expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('停止任务');
-  await click('#send');
+  expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('发送消息');
+  await click('#stop-current-task');
   await act(async () => finishWindow({ id: 1 } as chrome.windows.Window));
   expect(send).toHaveBeenCalledExactlyOnceWith({ type: 'remote-stop' });
   expect(input().value).toBe('Still gathering the current tab');
@@ -743,7 +736,7 @@ test('a cancelled in-flight send cannot restore busy state or display a late sen
   );
   await fill('#message', 'Pending send');
   await enter();
-  await click('#send');
+  await click('#stop-current-task');
   await act(async () => finishSend({ ok: false, error: 'ui.error.sendFailed' }));
   expect(container.querySelector('[role="alert"]')).toBeNull();
   expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('发送消息');
@@ -880,7 +873,7 @@ test('a new turn waits until a tool starts, then keeps working between tool resp
   expect(title()).toBe('正在分析页面内容');
 });
 
-test('reply delays keep the current task locked while still accepting its eventual answer', async () => {
+test('reply delays still allow steering and accept the eventual answer', async () => {
   vi.useFakeTimers();
   const start = Date.now();
   state.loopActive = true;
@@ -932,9 +925,9 @@ test('reply delays keep the current task locked while still accepting its eventu
   await fill('#message', 'Continue');
   send.mockClear();
   await enter();
-  expect(send).not.toHaveBeenCalled();
-  expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(false);
-  expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('停止任务');
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(true);
+  expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('发送消息');
   state.loopActive = false;
   state.chat.push({
     role: 'assistant',
@@ -945,8 +938,8 @@ test('reply delays keep the current task locked while still accepting its eventu
   await act(async () => listener({ type: 'remote-updated', state }));
   expect(container.querySelector('.reply-status')).toBeNull();
   expect(container.textContent).toContain('The late reply arrived');
-  expect(input().value).toBe('Continue');
-  expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(false);
+  expect(input().value).toBe('');
+  expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(true);
 });
 
 test('header clear stays out of settings and cannot interrupt an active task', async () => {
@@ -1247,7 +1240,8 @@ test('preview follows this window active tab without losing manual dismissal or 
   expect(container.querySelector('.live-preview')).toBeNull();
   expect(container.querySelector('.preview-restore')).toBeNull();
   expect(previewPost).toHaveBeenLastCalledWith({ type: 'visibility', visible: false });
-  expect(container.querySelector('#send')?.getAttribute('aria-label')).toBe('停止任务');
+  expect(container.querySelector('#send')?.getAttribute('aria-label')).toBe('发送消息');
+  expect(container.querySelector('#stop-current-task')).not.toBeNull();
   await activate(4);
   expect(container.querySelector('.live-preview')?.getAttribute('data-tab-id')).toBe('3');
   expect(previewPost).toHaveBeenLastCalledWith({ type: 'visibility', visible: true });

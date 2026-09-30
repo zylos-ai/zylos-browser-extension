@@ -75,6 +75,8 @@ export const chatEntrySchema = z
     delivery: z.enum(['sent', 'queued', 'failed', 'unknown']).optional(),
     deliveryError: z.string().optional(),
     final: z.boolean().optional(),
+    taskId: z.string().max(128).optional(),
+    steerStatus: z.enum(['pending', 'sent', 'applied', 'interrupted']).optional(),
     loopStatus: z.enum(['active', 'done', 'blocked', 'interrupted', 'stopped']).optional(),
     page: z.object({ title: z.string(), url: z.string(), status: z.string() }).optional(),
     selection: pageSelectionSchema.optional(),
@@ -113,6 +115,7 @@ export const remoteStateSchema = z.object({
   agentActivity: agentActivitySchema.optional(),
   loopActive: z.boolean().optional(),
   chatBusy: z.boolean().optional(),
+  steeringSupported: z.boolean().optional(),
   stopping: z.boolean().optional(),
   task: z
     .object({

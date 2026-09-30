@@ -250,6 +250,8 @@ export default {
   imageReadFailed:
     'This image could not be read. It may be damaged or have the wrong format. Choose another image.',
   messagePlaceholder: 'Tell me what you want to do…',
+  steerPlaceholder: 'Add instructions or adjust the task…',
+  steerInterrupted: 'Update unconfirmed · task ended',
   disconnectedPlaceholder: 'Connect your Agent to start chatting…',
   sending: 'Sending',
   selectedText: 'Selected text',
@@ -260,7 +262,11 @@ export default {
     'The selected page has changed. Select the text again or remove the quote before sending.',
   chatInProgress: 'Task in progress',
   taskInProgressHint: 'Task in progress. You can draft your next message.',
-  chatBusy: 'Wait for the current task to finish, or stop it before sending another message.',
+  chatBusy: 'A message is being sent or the task is finishing. Please try again shortly.',
+  steerUnsupported:
+    'Update Browser Remote to add instructions during a task. The current task can continue.',
+  steerQueueFull:
+    'There are too many pending updates or attachments. Send more after the next step.',
   sendMessage: 'Send message',
   keyboardHint: 'Enter to send · Shift + Enter for a new line',
   settingsDescription: 'Manage your connection and preferences.',

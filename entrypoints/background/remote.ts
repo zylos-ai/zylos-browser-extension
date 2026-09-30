@@ -43,6 +43,7 @@ import { BrowserLoop } from '../../utils/browser-loop';
 import { runBrowserRound } from '../../utils/browser-round';
 import {
   AGENT_MESSAGE_CAPABILITY,
+  STEER_CAPABILITY,
   messageText,
   messageAttachments,
 } from '../../utils/agent-message';
@@ -214,6 +215,15 @@ export function startRemoteBackground() {
   };
 
   loop = new BrowserLoop({
+    updates: (ids, status) => {
+      if (!ids.length) return;
+      for (const entry of state.chat)
+        if (entry.id && ids.includes(entry.id)) entry.steerStatus = status;
+      void persistChat().catch(() => {
+        state.error = 'ui.error.chatSaveFailed';
+      });
+      publish();
+    },
     progress: (summary) => activity.describe(summary),
     send: (request) => send({ type: 'agent-request', ...request }),
     record: (method, result) => {
@@ -241,7 +251,7 @@ export function startRemoteBackground() {
       if (loop.taskId) send({ type: 'agent-turn-end', taskId: loop.taskId, status: 'interrupted' });
       setTimeout(publish, 0);
     },
-    execute: (actions, assertActive, requestId) =>
+    execute: (actions, assertActive, requestId, hasUpdates) =>
       runBrowserRound(
         actions,
         async (method, params, id) => {
@@ -294,6 +304,7 @@ export function startRemoteBackground() {
         },
         assertActive,
         requestId,
+        hasUpdates,
       ),
     finish: async (text, status, taskId, notice) => {
       state.agentActivity = undefined;
@@ -446,6 +457,7 @@ export function startRemoteBackground() {
           INSTANCE_CAPABILITY,
           AGENT_MESSAGE_CAPABILITY,
           AGENT_ACTIVITY_CAPABILITY,
+          STEER_CAPABILITY,
         ],
         browserId: state.browserId,
       });
@@ -463,6 +475,7 @@ export function startRemoteBackground() {
         void completeTask().catch(() => {});
       }
       loopReady = false;
+      state.steeringSupported = false;
       interruptReady = false;
       clearTimeout(handshakeTimer);
       preview.finish('interrupted');
@@ -515,6 +528,7 @@ export function startRemoteBackground() {
         }
         state.endpointId = m.endpointId;
         attachmentsReady = m.capabilities.includes(ATTACHMENT_CAPABILITY);
+        state.steeringSupported = m.capabilities.includes(STEER_CAPABILITY);
         interruptReady = m.capabilities.includes(INTERRUPT_CAPABILITY);
         loopReady = true;
         state.connected = true;
@@ -642,8 +656,11 @@ export function startRemoteBackground() {
     const cfg = remoteConfigSchema.safeParse(saved[REMOTE_CONFIG_KEY] ?? {});
     const log = z.array(chatEntrySchema).safeParse(saved[REMOTE_CHAT_LOG_KEY] ?? []);
     state.chat = log.success ? log.data.slice(-CHAT_LOG_CAP) : [];
-    for (const message of state.chat)
+    for (const message of state.chat) {
       if (message.loopStatus === 'active') message.loopStatus = 'interrupted';
+      if (message.steerStatus === 'pending' || message.steerStatus === 'sent')
+        message.steerStatus = 'interrupted';
+    }
     await persistChat();
     if (activity.recover()) await persistChat();
     await applyConfig(cfg.success ? cfg.data : remoteConfigSchema.parse({}));
@@ -705,7 +722,8 @@ export function startRemoteBackground() {
           if (!state.connected || !loopReady) throw new Error('ui.error.messageNotSent');
           const text = messageText(m.message).trim();
           if (!text) throw new Error('ui.error.emptyMessage');
-          if (sendingChat || loop.active || stopTaskPromise) throw new Error('ui.error.chatBusy');
+          if (sendingChat || stopTaskPromise) throw new Error('ui.error.chatBusy');
+          if (loop.active && !state.steeringSupported) throw new Error('ui.error.steerUnsupported');
           const attachments = messageAttachments(m.message);
           if (!attachmentsReady && attachments.some((a) => a.type !== 'quote'))
             throw new Error('ui.error.attachmentsUnsupported');
@@ -713,6 +731,7 @@ export function startRemoteBackground() {
           try {
             const gen = generation;
             const revision = chatRevision;
+            const originalTask = loop.taskId;
             publish();
             if (gen !== generation || revision !== chatRevision || !loopReady)
               throw new Error('ui.error.sendFailed');
@@ -727,6 +746,44 @@ export function startRemoteBackground() {
             if (gen !== generation || revision !== chatRevision || !loopReady) {
               forgetPageContext(id);
               throw new Error('ui.error.sendFailed');
+            }
+            if (loop.settling) await loop.settling;
+            if (
+              gen !== generation ||
+              revision !== chatRevision ||
+              !loopReady ||
+              (loop.active && loop.taskId !== originalTask)
+            ) {
+              forgetPageContext(id);
+              throw new Error('ui.error.sendFailed');
+            }
+            if (loop.active) {
+              let taskId: string;
+              try {
+                taskId = loop.steer(id, m.message, context);
+              } catch (error) {
+                forgetPageContext(id);
+                throw error;
+              }
+              await appendChat({
+                id,
+                role: 'user',
+                text,
+                ts,
+                delivery: 'sent',
+                page,
+                taskId,
+                steerStatus: 'pending',
+                ...(attachments.length
+                  ? { attachments: storedAttachments(attachments, m.imagePreviews) }
+                  : {}),
+              }).catch(() => {
+                // The loop already owns the update. A history-write failure
+                // must not invite a retry that applies the same intent twice.
+                state.error = 'ui.error.chatSaveFailed';
+                publish();
+              });
+              return snapshot();
             }
             await appendChat({
               id,

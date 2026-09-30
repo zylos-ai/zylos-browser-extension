@@ -26,6 +26,29 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
+it('finishes an in-flight edit then skips the rest of the batch when input is updated', async () => {
+  let updated = false;
+  const call = vi.fn(async (method: string) => {
+    if (method === 'fill') updated = true;
+    return { text: 'fresh state' };
+  });
+  const result = await runBrowserRound(
+    [
+      { method: 'fill', params: { ref: '@input', value: 'old value' } },
+      { method: 'click', params: { ref: '@submit' } },
+    ],
+    call,
+    () => {},
+    'r',
+    () => updated,
+  );
+  expect(call.mock.calls.map(([m]) => m)).toEqual(['fill', 'snapshot', 'tabs']);
+  expect(result.failed).toBe(false);
+  expect(result.results).toMatchObject([
+    { method: 'fill', status: 'success' },
+    { status: 'skipped', count: 1 },
+  ]);
+});
 it('preserves attachment metadata when page text exhausts the observation budget', async () => {
   const screenshot = {
     id: 'image-1',
