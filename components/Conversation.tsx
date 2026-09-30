@@ -232,11 +232,6 @@ export function Conversation({
                           {errorText(message.deliveryError)}
                         </p>
                       )}
-                      {message.steerStatus === 'interrupted' && (
-                        <p className="message-delivery" role="status">
-                          {t('steerInterrupted')}
-                        </p>
-                      )}
                     </article>
                   )}
                 </Fragment>,

@@ -255,7 +255,6 @@ export default {
     'This image could not be read. It may be damaged or have the wrong format. Choose another image.',
   messagePlaceholder: 'Tell me what you want to do…',
   steerPlaceholder: 'Add instructions or adjust the task…',
-  steerInterrupted: 'Update unconfirmed · task ended',
   disconnectedPlaceholder: 'Connect your Agent to start chatting…',
   sending: 'Sending',
   selectedText: 'Selected text',

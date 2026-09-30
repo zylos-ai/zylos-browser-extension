@@ -220,7 +220,6 @@ export default {
   message: '消息',
   messagePlaceholder: '告诉我你想做什么…',
   steerPlaceholder: '可以继续补充要求或调整方向…',
-  steerInterrupted: '补充未确认生效，任务已结束',
   disconnectedPlaceholder: '连接 Agent 后开始聊天…',
   sending: '正在发送',
   selectedText: '引用选中内容',

@@ -298,7 +298,7 @@ export function startRemoteBackground() {
           send({ type: 'agent-event', phase: 'start', taskId, id, method, params });
           try {
             const result = await dispatch(
-              { method, params, requestId: id, deadline: Date.now() + 15000, keyId: state.keyId },
+              { method, params, requestId: id, keyId: state.keyId },
               idem,
               undefined,
               () => {

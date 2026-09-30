@@ -35,7 +35,7 @@ export function ToolSteps({
   const bodyRef = useRef<HTMLDivElement>(null);
   const following = useRef(true);
   const [toggle, setToggle] = useState<{ phase: ToolRun['status']; open: boolean }>();
-  const open = toggle?.phase === run.status ? toggle.open : false;
+  const open = toggle?.phase === run.status ? toggle.open : run.status === 'running';
   const [now, setNow] = useState(Date.now);
   const active = run.status === 'running';
   useEffect(() => {

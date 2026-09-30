@@ -187,7 +187,7 @@ test('pagination refuses to combine text from changed content versions', async (
   expect((await readPageContext(id, { offset: 0 }, () => {})).text).toBe('Article body');
 });
 
-test('slow reads time out and a stopped read cannot return late content', async () => {
+test('the optional pre-send excerpt has a UI budget and cannot return late content', async () => {
   vi.useFakeTimers();
   const target = await getPageDocument(tab);
   let complete!: (value: any) => void;
@@ -197,7 +197,7 @@ test('slow reads time out and a stopped read cannot return late content', async 
         complete = resolve;
       }),
   );
-  const pending = expect(readPageDocument(target)).rejects.toMatchObject({
+  const pending = expect(readPageDocument(target, {}, () => {}, 2500)).rejects.toMatchObject({
     code: 'CONTEXT_TIMEOUT',
   });
   await vi.advanceTimersByTimeAsync(2501);
@@ -216,3 +216,43 @@ test('slow reads time out and a stopped read cannot return late content', async 
   ).rejects.toMatchObject({ code: 'STOPPED' });
   expect(chrome.debugger.attach).not.toHaveBeenCalled();
 });
+
+test.each(['complete', 'stop'])(
+  'an Agent page read waits without a deadline until %s',
+  async (outcome) => {
+    await captureCurrentPage(id, 2, 7);
+    vi.useFakeTimers();
+    let complete!: (value: any) => void;
+    vi.mocked(chrome.scripting.executeScript).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    let stopped = false;
+    let settled = false;
+    const read = readPageContext(id, {}, () => {
+      if (stopped) throw Object.assign(new Error('Stopped'), { code: 'STOPPED' });
+    });
+    void read.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(settled).toBe(false);
+    if (outcome === 'stop') {
+      const rejected = expect(read).rejects.toMatchObject({ code: 'STOPPED' });
+      stopped = true;
+      await vi.advanceTimersByTimeAsync(50);
+      await rejected;
+    }
+    complete([{ documentId, frameId: 0, result: page() }]);
+    await vi.advanceTimersByTimeAsync(0);
+    if (outcome === 'complete') await expect(read).resolves.toMatchObject({ text: 'Article body' });
+    expect(vi.getTimerCount()).toBe(0);
+  },
+);

@@ -285,40 +285,50 @@ test('loading pages do not produce a falsely ready observation', async () => {
   assert.equal(s.methods.includes('Page.captureScreenshot'), false);
   await s.executor.release();
 });
-test('a hanging screenshot times out with its stage and ignores late pixels', async () => {
-  const s = await observationSetup();
-  vi.useFakeTimers();
-  try {
-    const entered = deferred(),
-      pixels = deferred();
-    const original = chrome.debugger.sendCommand;
-    chrome.debugger.sendCommand = async (target, method, params) => {
-      if (method === 'Page.captureScreenshot') {
-        entered.resolve();
-        return pixels.promise;
+test.each(['complete', 'stop'])(
+  'a slow screenshot waits without a deadline until %s',
+  async (outcome) => {
+    const s = await observationSetup();
+    vi.useFakeTimers();
+    try {
+      const entered = deferred(),
+        pixels = deferred();
+      const original = chrome.debugger.sendCommand;
+      chrome.debugger.sendCommand = async (target, method, params) => {
+        if (method === 'Page.captureScreenshot') {
+          entered.resolve();
+          return pixels.promise;
+        }
+        return original(target, method, params);
+      };
+      let settled = false;
+      const shot = s.executor.execute({ op: 'screenshot' }, Infinity);
+      void shot.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      await entered.promise;
+      await vi.advanceTimersByTimeAsync(60_000);
+      assert.equal(settled, false);
+      if (outcome === 'stop') {
+        const rejected = assert.rejects(shot, (e) => e.code === 'STOPPED');
+        await s.executor.release();
+        await vi.advanceTimersByTimeAsync(50);
+        await rejected;
       }
-      return original(target, method, params);
-    };
-    const shot = s.executor.execute({ op: 'screenshot' }, Date.now() + 30000);
-    const rejected = assert.rejects(
-      shot,
-      (e) => e.code === 'SCREENSHOT_TIMEOUT' && e.message.includes('Page.captureScreenshot'),
-    );
-    await entered.promise;
-    await vi.advanceTimersByTimeAsync(s.executor.SCREENSHOT_TIMEOUT_MS + 50);
-    await rejected;
-    pixels.resolve({ data: 'LATE-PIXELS' });
-    await vi.advanceTimersByTimeAsync(0);
-    const snapshot = await s.executor.execute(
-      { op: 'snapshot', interactive: true },
-      Date.now() + 10000,
-    );
-    assert.match(snapshot.text, /Save failed/);
-    await s.executor.release();
-  } finally {
-    vi.useRealTimers();
-  }
-});
+      pixels.resolve({ data: 'PNG-FIXTURE' });
+      await vi.advanceTimersByTimeAsync(0);
+      if (outcome === 'complete') assert.equal((await shot).data, 'PNG-FIXTURE');
+      await s.executor.release();
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
 test('stop or switching away during screenshot prevents pixels from being returned', async () => {
   for (const cancel of [true, false]) {
     const s = await observationSetup();

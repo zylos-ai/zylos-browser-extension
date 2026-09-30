@@ -14,7 +14,7 @@ const executor = vi.hoisted(() => ({
     } => null,
   ),
   currentGrant: vi.fn((): null | { url: string; title: string } => null),
-  execute: vi.fn(async (c: { op: string }) => ({ ran: c.op })),
+  execute: vi.fn(async (c: { op: string }, _deadline: number) => ({ ran: c.op })),
   onState: vi.fn(),
   initializeExecutor: vi.fn(),
   revealTask: vi.fn(async () => {}),
@@ -208,6 +208,31 @@ const respond = async (
 };
 
 describe('decision transport background', () => {
+  it('lets a slow browser action finish without a default deadline or replay', async () => {
+    const ws = await bootConnected();
+    const request = await selectPage(ws);
+    let complete!: () => void;
+    executor.execute.mockImplementationOnce(async (command, deadline) => {
+      await new Promise<void>((resolve) => {
+        complete = resolve;
+      });
+      if (Date.now() > deadline)
+        throw Object.assign(new Error('Expired'), { code: 'COMMAND_EXPIRED' });
+      return { ran: command.op };
+    });
+    await respond(ws, request, {
+      kind: 'actions',
+      actions: [{ method: 'find', params: { selector: 'table' } }],
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(ws.last('agent-request')!.id).toBe(request.id);
+    expect((await state()).loopActive).toBe(true);
+    complete();
+    await flush();
+    expect(ws.last('agent-request')!.id).not.toBe(request.id);
+    expect(ws.last('agent-request')!.execution).toMatchObject({ results: [{ ran: 'find' }] });
+    expect(executor.execute).toHaveBeenCalledOnce();
+  });
   it('correlates direct input receipts and stops instead of silently dropping failed owner input', async () => {
     const ws = await bootConnected();
     const original = await begin(ws, 'First task');

@@ -345,6 +345,7 @@ export function RemotePanel() {
             steeringSupported={state.steeringSupported ?? false}
             stopping={stopping}
             onSend={() => void sendChat()}
+            onStop={() => void action({ type: 'remote-stop' })}
             inputRef={inputRef}
           />
         </main>

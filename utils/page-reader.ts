@@ -184,12 +184,14 @@ export async function readPageDocument(
   expected: PageDocument,
   options: ReadPageOptions = {},
   assertActive: () => void = () => {},
+  timeoutMs?: number,
 ) {
-  let expired = false;
+  let settled = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let cancellationTimer: ReturnType<typeof setInterval> | undefined;
   const check = () => {
     assertActive();
-    if (expired) fail('CONTEXT_TIMEOUT');
+    if (settled) fail('CONTEXT_CANCELLED');
   };
   const read = async () => {
     check();
@@ -222,14 +224,25 @@ export async function readPageDocument(
     return await Promise.race([
       read(),
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          expired = true;
-          reject(Object.assign(new Error('CONTEXT_TIMEOUT'), { code: 'CONTEXT_TIMEOUT' }));
-        }, 2500);
+        // A slow executeScript must remain cancellable even if Chrome never replies.
+        cancellationTimer = setInterval(() => {
+          try {
+            check();
+          } catch (error) {
+            reject(error);
+          }
+        }, 50);
+        // Only the optional, pre-send page excerpt uses a short UI budget.
+        // Agent-requested reads have no execution deadline.
+        if (timeoutMs !== undefined)
+          timer = setTimeout(() => {
+            reject(Object.assign(new Error('CONTEXT_TIMEOUT'), { code: 'CONTEXT_TIMEOUT' }));
+          }, timeoutMs);
       }),
     ]);
   } finally {
     clearTimeout(timer);
-    expired = true;
+    clearInterval(cancellationTimer);
+    settled = true;
   }
 }

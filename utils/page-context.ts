@@ -57,9 +57,14 @@ export async function captureCurrentPage(
     let reason: string | undefined;
     try {
       document = await getPageDocument({ ...tab, id });
-      excerpt = await readPageDocument(document, { limit: 6000 }, () => {
-        if (currentRevision !== revision) throw new Error('CONTEXT_CANCELLED');
-      });
+      excerpt = await readPageDocument(
+        document,
+        { limit: 6000 },
+        () => {
+          if (currentRevision !== revision) throw new Error('CONTEXT_CANCELLED');
+        },
+        2500,
+      );
     } catch (error) {
       reason =
         error instanceof Error && ['CONTEXT_TIMEOUT', 'PAGE_CHANGED'].includes(error.message)

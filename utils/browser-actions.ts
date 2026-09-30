@@ -203,7 +203,9 @@ async function dispatchNow(
     if (!command.success) fail('BAD_PARAMS', command.error.issues.map((i) => i.message).join('; '));
   }
 
-  const deadline = typeof req.deadline === 'number' ? req.deadline : Date.now() + 30_000;
+  // Task actions wait for a result or cancellation; only an explicitly supplied
+  // deadline (e.g. a bounded condition probe) can expire an operation.
+  const deadline = typeof req.deadline === 'number' ? req.deadline : Infinity;
   if (Date.now() > deadline) fail('COMMAND_EXPIRED');
 
   // A DOM read does not acquire control or resume a CDP preview.

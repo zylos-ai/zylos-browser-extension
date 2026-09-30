@@ -11,8 +11,6 @@ import { canReadPage, assertPageDocument } from '../page-reader';
 import { screenshotAttachment } from '../attachments';
 import { translate, workerLocale } from '../i18n';
 
-export const SCREENSHOT_TIMEOUT_MS = 12_000;
-
 let grant: GrantedTab | null = null;
 const pointerMotion = new PointerMotion();
 let cursor: Cursor | null = null;
@@ -896,15 +894,8 @@ export async function execute(command: Command, deadline: number) {
   const lease = grant;
   const startGeneration = generation;
   let inputAcknowledged = false;
-  let screenshotDeadline: number | undefined;
-  let screenshotStage = '';
   const check = () => {
     checkSession();
-    if (screenshotDeadline !== undefined && Date.now() >= screenshotDeadline)
-      fail(
-        'SCREENSHOT_TIMEOUT',
-        `Screenshot timed out during ${screenshotStage}; the page may still be usable. Do not repeat the preceding browser action.`,
-      );
     if (Date.now() > deadline) fail('COMMAND_EXPIRED');
     if (grant !== lease) fail('STOPPED');
     if (generation !== startGeneration) fail('PAGE_CHANGED', '页面已变化，请重新 snapshot');
@@ -1073,11 +1064,8 @@ export async function execute(command: Command, deadline: number) {
     );
   }
   async function screenshot() {
-    screenshotDeadline = Date.now() + SCREENSHOT_TIMEOUT_MS;
     try {
-      screenshotStage = 'hide cursor';
       if (cursor) await showCursor('hide');
-      screenshotStage = 'Page.captureScreenshot';
       const result = await cdp('Page.captureScreenshot', {
         format: 'png',
         captureBeyondViewport: false,
@@ -1086,7 +1074,6 @@ export async function execute(command: Command, deadline: number) {
       if (result.data.length > 7_000_000)
         fail('SCREENSHOT_TOO_LARGE', '截图过大，请缩小浏览器窗口后重新观察');
       // Also validate the active target after capture; never return a different tab's pixels.
-      screenshotStage = 'Page.getLayoutMetrics';
       const layout = await cdp('Page.getLayoutMetrics');
       return { ...result, layout };
     } finally {

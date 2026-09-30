@@ -13,6 +13,7 @@ export function ChatComposer({
   sending,
   busy,
   onSend,
+  onStop,
   inputRef,
   preview,
   attachments,
@@ -30,6 +31,7 @@ export function ChatComposer({
   sending: boolean;
   busy: boolean;
   onSend: () => void;
+  onStop: () => void;
   inputRef: React.RefObject<HTMLTextAreaElement | null>;
   preview?: React.ReactNode;
   attachments?: React.ReactNode;
@@ -46,6 +48,7 @@ export function ChatComposer({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
   const [dragging, setDragging] = useState(false);
+  const showStop = stopping || (busy && !draft.trim() && !files.length && !readingAttachments);
   const disabled =
     !connected ||
     (!draft.trim() && !files.length) ||
@@ -216,12 +219,25 @@ export function ChatComposer({
           <button
             id="send"
             className="btn send-button"
-            type="submit"
-            disabled={disabled}
-            aria-label={t('sendMessage')}
-            title={t('sendMessage')}
+            type={showStop ? 'button' : 'submit'}
+            disabled={showStop ? stopping : disabled}
+            onClick={showStop ? onStop : undefined}
+            aria-label={t(showStop ? (stopping ? 'stopping' : 'stopTask') : 'sendMessage')}
+            title={t(showStop ? (stopping ? 'stopping' : 'stopTask') : 'sendMessage')}
           >
-            <img src={disabled ? sendDisabledIcon : sendIcon} width="18" height="18" alt="" />
+            {showStop ? (
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 18 18"
+                fill="currentColor"
+                aria-hidden="true"
+              >
+                <rect x="4" y="4" width="10" height="10" rx="2" />
+              </svg>
+            ) : (
+              <img src={disabled ? sendDisabledIcon : sendIcon} width="18" height="18" alt="" />
+            )}
           </button>
         </div>
         {dragging && (

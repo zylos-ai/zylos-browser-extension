@@ -482,10 +482,15 @@ test('same-URL reload and switching tabs clear the old quote, and hidden panels 
 });
 
 test.each([{ loopActive: true }, { chatBusy: true }])(
-  'a running task keeps Send available for successive updates: %j',
+  'a running task switches between Stop and Send for successive updates: %j',
   async (busy) => {
     Object.assign(state, busy);
     await mount();
+    expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('停止任务');
+    expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(false);
+    send.mockClear();
+    await enter();
+    expect(send).not.toHaveBeenCalled(); // Enter in an empty draft must never stop the task.
     await fill('#message', 'Only Chinese videos');
     send.mockClear();
     expect(input().disabled).toBe(false);
@@ -500,14 +505,51 @@ test.each([{ loopActive: true }, { chatBusy: true }])(
       tabId: 3,
     });
     expect(input().value).toBe('');
+    expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('停止任务');
     await fill('#message', 'Under ten minutes');
     await click('#send');
     expect(send).toHaveBeenCalledTimes(2);
     expect(send.mock.calls.some(([m]) => m.type === 'remote-stop')).toBe(false);
-    await click('#stop-current-task');
+    await click('#send');
     expect(send).toHaveBeenLastCalledWith({ type: 'remote-stop' });
   },
 );
+
+test('Stop preserves a newly typed draft while awaiting confirmation, then switches back to Send', async () => {
+  state.loopActive = true;
+  await mount();
+  let finishStop!: (value: unknown) => void;
+  send.mockClear().mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finishStop = resolve;
+      }),
+  );
+  await click('#send');
+  expect(send).toHaveBeenCalledExactlyOnceWith({ type: 'remote-stop' });
+  await fill('#message', 'New instructions');
+  expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('正在停止…');
+  expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(true);
+  await enter();
+  await click('#send');
+  expect(send).toHaveBeenCalledTimes(1);
+  state.loopActive = false;
+  await act(async () => finishStop({ ok: true, value: state }));
+  expect(input().value).toBe('New instructions');
+  expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('发送消息');
+  expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(false);
+});
+
+test('an attachment-only draft switches Stop to Send and removing it restores Stop', async () => {
+  state.loopActive = true;
+  await mount();
+  expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('停止任务');
+  await addAttachments([imageFile()]);
+  expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('发送消息');
+  expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(false);
+  await click('.attachment-item-remove');
+  expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('停止任务');
+});
 
 test('an older relay keeps the draft without showing a square stop button', async () => {
   Object.assign(state, { loopActive: true, steeringSupported: false });
@@ -559,11 +601,9 @@ test('legacy progress keeps its timing but no longer expands local browser steps
   await mount();
   const toggle = () => container.querySelector<HTMLButtonElement>('.tool-activity-toggle')!;
   const body = () => container.querySelector<HTMLElement>('.tool-activity-body')!;
-  expect(toggle().getAttribute('aria-expanded')).toBe('false');
-  expect(body().hidden).toBe(true);
-  expect(toggle().textContent).toContain('正在操作页面');
-  await click('.tool-activity-toggle');
+  expect(toggle().getAttribute('aria-expanded')).toBe('true');
   expect(body().hidden).toBe(false);
+  expect(toggle().textContent).toContain('正在操作页面');
   expect(container.querySelector('.message-list .tool-activity')).not.toBeNull();
   expect(body().textContent).toContain('等待 Agent 输出进展');
   expect(body().textContent).not.toContain('读取页面内容');
@@ -620,7 +660,6 @@ test('legacy progress includes initial waiting time and freezes at completion wi
     await vi.advanceTimersByTimeAsync(69_000);
   });
   expect(container.querySelector('.tool-activity-time')?.textContent).toBe('1:09');
-  await click('.tool-activity-toggle');
   expect(container.querySelectorAll('.tool-overview li')).toHaveLength(0);
   expect(container.querySelector('.tool-activity-body')?.textContent).not.toMatch(
     /打开页面|返回上一页/,
@@ -666,7 +705,6 @@ test('Agent phase descriptions appear as plain text and tool states remain speci
   await mount();
   expect(container.querySelector('.tool-activity-title')?.textContent).toBe('正在滚动查看更多内容');
   expect(container.querySelector('.tool-activity-context')).toBeNull();
-  await click('.tool-activity-toggle');
   expect(container.querySelector('.tool-overview')).toBeNull();
   const run = state.chat[1]!.toolRun!;
   run.steps[0]!.status = 'success';
@@ -681,7 +719,7 @@ test('Agent phase descriptions appear as plain text and tool states remain speci
   expect(container.querySelector('.tool-overview')).toBeNull();
 });
 
-test('Thinking expands public Agent history, stays open across browser actions and steering, and survives completion', async () => {
+test('Thinking defaults open, respects manual collapse across updates, and retains history after completion', async () => {
   vi.useFakeTimers();
   const now = Date.now();
   const history: NonNullable<RemoteState['chat'][number]['agentHistory']> = {
@@ -715,8 +753,6 @@ test('Thinking expands public Agent history, stays open across browser actions a
   await mount();
   const body = () => container.querySelector<HTMLElement>('.tool-activity-body')!;
   const update = () => act(async () => listener({ type: 'remote-updated', state }));
-  expect(body().hidden).toBe(true);
-  await click('.tool-activity-toggle');
   expect(body().hidden).toBe(false);
   expect(body().textContent).toContain('先核对数据来源。');
   expect(body().textContent).toContain('exec_command');
@@ -757,6 +793,11 @@ test('Thinking expands public Agent history, stays open across browser actions a
   );
   expect(body().textContent).not.toMatch(/snapshot|读取页面内容|已收到补充|已加入当前任务/);
   expect(body().querySelectorAll('li')).toHaveLength(3);
+  await click('.tool-activity-toggle');
+  await update();
+  expect(body().hidden).toBe(true);
+  await click('.tool-activity-toggle');
+  expect(body().hidden).toBe(false);
   await act(async () => {
     await vi.advanceTimersByTimeAsync(69_000);
   });
@@ -1032,8 +1073,8 @@ test('reply delays still allow steering and accept the eventual answer', async (
   send.mockClear();
   await enter();
   expect(send).toHaveBeenCalledTimes(1);
-  expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(true);
-  expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('发送消息');
+  expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(false);
+  expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('停止任务');
   state.loopActive = false;
   state.chat.push({
     role: 'assistant',
@@ -1400,7 +1441,7 @@ test('preview follows this window active tab without losing manual dismissal or 
   expect(container.querySelector('.live-preview')).toBeNull();
   expect(container.querySelector('.preview-restore')).toBeNull();
   expect(previewPost).toHaveBeenLastCalledWith({ type: 'visibility', visible: false });
-  expect(container.querySelector('#send')?.getAttribute('aria-label')).toBe('发送消息');
+  expect(container.querySelector('#send')?.getAttribute('aria-label')).toBe('停止任务');
   expect(container.querySelector('#stop-current-task')).not.toBeNull();
   await activate(4);
   expect(container.querySelector('.live-preview')?.getAttribute('data-tab-id')).toBe('3');
