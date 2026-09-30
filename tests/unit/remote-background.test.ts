@@ -170,7 +170,7 @@ async function bootConnected(attachments = false, interrupt = false, steering = 
       'agent-message-v2',
       ...(attachments ? ['attachments-v1'] : []),
       ...(interrupt ? ['agent-interrupt-v1'] : []),
-      ...(steering ? ['agent-steer-v1'] : []),
+      ...(steering ? ['agent-input-v1'] : []),
     ],
     endpointId: `abababababab.${storage.remoteBrowserId}`,
   });
@@ -191,12 +191,53 @@ const begin = async (ws: Socket, text = 'Read this page') => {
   expect((await ask({ type: 'remote-chat-send', text })).ok).toBe(true);
   return ws.last('agent-request')!;
 };
-const respond = async (ws: Socket, request: Record<string, unknown>, decision: unknown, id = 1) => {
-  ws.receive({ type: 'req', id, method: 'agent-decision', params: { id: request.id, decision } });
+const respond = async (
+  ws: Socket,
+  request: Record<string, unknown>,
+  decision: unknown,
+  id = 1,
+  inputId?: string,
+) => {
+  ws.receive({
+    type: 'req',
+    id,
+    method: 'agent-decision',
+    params: { id: request.id, decision, ...(inputId ? { inputId } : {}) },
+  });
   await flush();
 };
 
 describe('decision transport background', () => {
+  it('correlates direct input receipts and stops instead of silently dropping failed owner input', async () => {
+    const ws = await bootConnected();
+    const original = await begin(ws, 'First task');
+    await ask({ type: 'remote-chat-send', text: 'New requirement' });
+    const input = ws.last('agent-input')!;
+    expect(input).toMatchObject({ taskId: original.taskId, sequence: 1 });
+    expect(ws.last('agent-request')!.id).toBe(original.id);
+    ws.receive({
+      type: 'agent-input-status',
+      taskId: 'wrong-task',
+      inputId: input.id,
+      state: 'failed',
+    });
+    await flush();
+    expect((await state()).chatBusy).toBe(true);
+    ws.receive({
+      type: 'agent-input-status',
+      taskId: original.taskId,
+      inputId: input.id,
+      state: 'failed',
+      code: 'C4_DELIVERY_FAILED',
+    });
+    await flush();
+    expect((await state()).chatBusy).toBe(false);
+    expect(ws.last('agent-turn-end')).toMatchObject({ status: 'interrupted' });
+    expect(((await state()).chat as ChatEntry[]).find((e) => e.id === input.id)).toMatchObject({
+      delivery: 'failed',
+      steerStatus: 'interrupted',
+    });
+  });
   it('does not report an accepted steering update as unsent when history persistence fails', async () => {
     const ws = await bootConnected();
     const original = await begin(ws, 'First task');
@@ -205,9 +246,10 @@ describe('decision transport background', () => {
     expect(result.ok).toBe(true);
     expect(result.value?.error).toBe('ui.error.chatSaveFailed');
     await respond(ws, original, { kind: 'done', text: 'Old answer' });
-    expect(ws.last('agent-request')!.updates).toMatchObject([
-      { message: { content: [{ text: 'Additional requirement' }] } },
-    ]);
+    expect(ws.last('agent-input')).toMatchObject({
+      message: { content: [{ text: 'Additional requirement' }] },
+    });
+    expect(ws.last('agent-request')).not.toHaveProperty('updates');
   });
   it('rejects steering to an older relay without replacing the current task', async () => {
     const ws = await bootConnected(false, false, false);
@@ -408,12 +450,21 @@ describe('decision transport background', () => {
       await respond(ws, original, { kind: 'done', text: 'Old answer must not finish' });
       const updated = ws.last('agent-request')!;
       expect(updated.taskId).toBe(original.taskId);
-      expect(updated.updates).toMatchObject([
-        { message: { content: [{ type: 'text', text: 'Only Chinese videos' }] } },
-      ]);
+      expect(updated).not.toHaveProperty('updates');
+      expect(ws.last('agent-input')).toMatchObject({
+        taskId: original.taskId,
+        message: { content: [{ type: 'text', text: 'Only Chinese videos' }] },
+      });
       expect(executor.completeTask).not.toHaveBeenCalled();
       if (status === 'stopped') await ask({ type: 'remote-stop' });
-      else await respond(ws, updated, { kind: status, text: 'Updated task ended' });
+      else
+        await respond(
+          ws,
+          updated,
+          { kind: status, text: 'Updated task ended' },
+          2,
+          ws.last('agent-input')!.id as string,
+        );
       expect((await state()).chatBusy).toBe(false);
       const next = await begin(ws, 'Second task');
       expect(next.taskId).not.toBe(original.taskId);
@@ -527,7 +578,8 @@ describe('decision transport background', () => {
       'browser-instance-v1',
       'agent-message-v2',
       'agent-activity-v1',
-      'agent-steer-v1',
+      'agent-history-v1',
+      'agent-input-v1',
     ]);
     const request = await begin(ws, 'Hello');
     expect(ws.last('chat')).toBeUndefined();
@@ -810,4 +862,140 @@ it('routes ephemeral Agent activity to the active task without persisting tool e
   ws.serverClose(1006);
   await flush();
   expect((await state()).agentActivity).toBeUndefined();
+});
+
+it('persists scoped Agent history once, updates tool entries and retains it through completion and reload', async () => {
+  const ws = await bootConnected();
+  const request = await begin(ws);
+  const at = Date.now();
+  const frame = {
+    type: 'agent-activity',
+    endpointId: `abababababab.${storage.remoteBrowserId}`,
+    taskId: request.taskId,
+    sequence: 1,
+    category: 'command',
+    events: [
+      { id: 'text', kind: 'commentary', at, text: 'I will check the sources.' },
+      {
+        id: 'cmd',
+        kind: 'tool',
+        at: at + 1,
+        category: 'command',
+        tool: 'exec_command',
+        detail: 'node',
+      },
+    ],
+  };
+  const history = async () => ((await state()).chat as ChatEntry[])[0]!.agentHistory!;
+  ws.receive({ ...frame, endpointId: 'wrong' });
+  ws.receive({ ...frame, taskId: 'wrong' });
+  await flush();
+  expect((await history()).events).toHaveLength(0);
+  ws.receive(frame);
+  ws.receive(frame);
+  ws.receive({ ...frame, sequence: 2, events: [{ ...frame.events[1], endedAt: at + 250 }] });
+  await vi.advanceTimersByTimeAsync(300);
+  expect((await history()).events).toHaveLength(2);
+  expect((await history()).events[1]).toMatchObject({ endedAt: at + 250 });
+  expect(JSON.stringify(storage.remoteChatLog)).toContain('I will check the sources.');
+  await respond(ws, request, { kind: 'done', text: 'Finished' });
+  ws.receive({
+    ...frame,
+    sequence: 3,
+    events: [{ id: 'late', kind: 'commentary', at, text: 'Late' }],
+  });
+  await flush();
+  expect((await history()).status).toBe('completed');
+  expect((await history()).events).toHaveLength(2);
+  startRemoteBackground();
+  await flush();
+  expect((await history()).status).toBe('completed');
+  expect((await history()).events).toHaveLength(2);
+});
+
+it('recovers saved Agent progress as interrupted after a background restart', async () => {
+  const ws = await bootConnected();
+  const request = await begin(ws);
+  ws.receive({
+    type: 'agent-activity',
+    endpointId: `abababababab.${storage.remoteBrowserId}`,
+    taskId: request.taskId,
+    sequence: 1,
+    category: 'processing',
+    events: [{ id: 'text', kind: 'commentary', at: Date.now(), text: 'Current progress' }],
+  });
+  await vi.advanceTimersByTimeAsync(300);
+  startRemoteBackground();
+  await flush();
+  const recovered = ((await state()).chat as ChatEntry[])[0]!.agentHistory!;
+  expect(recovered.status).toBe('interrupted');
+  expect(recovered.events).toHaveLength(1);
+  expect(recovered.endedAt).toBeDefined();
+});
+
+it('retains accepted decision progress without log events, but excludes superseded replies and task memory', async () => {
+  const ws = await bootConnected();
+  const first = await begin(ws);
+  const history = async () => ((await state()).chat as ChatEntry[])[0]!.agentHistory!;
+  await ask({ type: 'remote-chat-send', text: 'Check the updated source instead' });
+  const inputId = ws.last('agent-input')!.id as string;
+  await respond(ws, first, {
+    kind: 'actions',
+    actions: [{ method: 'open', params: { url: 'https://example.com/old' } }],
+    summary: 'Superseded progress',
+  });
+  expect((await history()).events).toEqual([]);
+  const current = ws.last('agent-request')!;
+  const summary = '已收到新的来源，接下来打开资料页核对数据。';
+  const decision = {
+    kind: 'actions',
+    actions: [{ method: 'open', params: { url: 'https://example.com/updated' } }],
+    summary,
+    memory: 'Internal continuation notes must not be displayed',
+  };
+  await respond(ws, current, decision, 2, inputId);
+  await respond(ws, current, decision, 3, inputId); // A transport retry must not repeat progress.
+  expect((await history()).events).toEqual([
+    expect.objectContaining({ kind: 'commentary', text: summary }),
+  ]);
+  expect(JSON.stringify((await history()).events)).not.toContain(decision.memory);
+  await vi.advanceTimersByTimeAsync(300);
+  expect((storage.remoteChatLog as ChatEntry[])[0]!.agentHistory).toEqual(await history());
+
+  const next = ws.last('agent-request')!;
+  // The Agent may reuse a summary even with a new decision. Keep one copy.
+  await respond(
+    ws,
+    next,
+    {
+      kind: 'actions',
+      actions: [{ method: 'find', params: { selector: 'h1' } }],
+      summary,
+    },
+    4,
+    inputId,
+  );
+  expect((await history()).events).toHaveLength(1);
+  const finding = '资料页显示的是本季度数据，我会再核对统计口径。';
+  await respond(
+    ws,
+    ws.last('agent-request')!,
+    {
+      kind: 'actions',
+      actions: [{ method: 'find', params: { selector: 'table' } }],
+      summary: finding,
+    },
+    5,
+    inputId,
+  );
+  expect(
+    (await history()).events.map((event) => event.kind === 'commentary' && event.text),
+  ).toEqual([summary, finding]);
+
+  await respond(ws, ws.last('agent-request')!, { kind: 'done', text: 'Finished' }, 6, inputId);
+  startRemoteBackground();
+  await flush();
+  expect((await history()).status).toBe('completed');
+  expect((await history()).events).toHaveLength(2);
+  expect(JSON.stringify(await history())).not.toContain('Superseded progress');
 });

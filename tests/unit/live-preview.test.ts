@@ -299,10 +299,79 @@ test('reveal uses the retained original tab; closed tabs cannot be recreated or 
   expect(chrome.tabs.update).toHaveBeenCalledWith(3, { active: true });
   expect(chrome.windows.update).toHaveBeenCalledWith(1, { focused: true });
   removed(3);
-  expect(a.state().canReveal).toBe(false);
+  expect(a.state()).toBeNull();
   await expect(service.reveal()).rejects.toThrow('previewTabClosed');
   service.clear();
   expect(a.state()).toBeNull();
+});
+
+test.each(['connecting', 'live', 'completed'] as const)(
+  'closing a %s preview tab clears every panel and prevents late frames from restoring it',
+  async (phase) => {
+    const a = client();
+    const hidden = client();
+    a.visible(true);
+    service.sync(scope(), grant(), true);
+    await tick();
+    if (phase !== 'connecting') {
+      frame();
+      frame(2, 3, 'ZGVm'); // A throttled frame may still be pending when the tab closes.
+    }
+    if (phase === 'completed') {
+      service.finish('completed');
+      service.sync(null, null, true);
+      await tick();
+    }
+    removed(99);
+    expect(a.state().tabId).toBe(3);
+    removed(3);
+    expect(a.state()).toBeNull();
+    expect(hidden.state()).toBeNull();
+    const count = a.frames().length;
+    frame(3);
+    a.ack(a.frames().at(-1)?.sequence ?? 0);
+    service.sync(null, null, true);
+    service.finish('completed');
+    await vi.advanceTimersByTimeAsync(5100);
+    expect(a.state()).toBeNull();
+    expect(a.frames()).toHaveLength(count);
+    expect(command.mock.calls.some((c) => c[0].tabId === 3 && c[1] === 'Page.stopScreencast')).toBe(
+      true,
+    );
+    const reopened = client();
+    reopened.visible(true);
+    expect(reopened.state()).toBeNull();
+    expect(reopened.frames()).toHaveLength(0);
+
+    service.sync(scope(4, 'new-task'), grant(4), true);
+    await tick();
+    frame(4, 4);
+    expect(a.state().tabId).toBe(4);
+    expect(a.frames().at(-1).targetKey).toBe(a.state().targetKey);
+  },
+);
+
+test('closing a tab while capture is starting discards its late completion', async () => {
+  let complete!: () => void;
+  command.mockImplementationOnce(
+    () =>
+      new Promise<void>((resolve) => {
+        complete = resolve;
+      }),
+  );
+  const a = client();
+  a.visible(true);
+  service.sync(scope(), grant(), true);
+  await tick();
+  removed(3);
+  complete();
+  await vi.advanceTimersByTimeAsync(5100);
+  expect(a.state()).toBeNull();
+  expect(a.frames()).toHaveLength(0);
+  expect(command.mock.calls.map((c) => c[1])).toEqual([
+    'Page.startScreencast',
+    'Page.stopScreencast',
+  ]);
 });
 
 test('disconnect retains local Stop while control exists, then an explicit stop clears it', async () => {

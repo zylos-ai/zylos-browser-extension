@@ -3,7 +3,11 @@
 // The extension dials out to a zylos-browser-remote relay with `relayUrl + key`
 // and nothing else. The relay is a pipe; every safety decision is made here.
 import { z } from 'zod';
-import { agentActivityFrameSchema, agentActivitySchema } from './agent-activity';
+import {
+  agentActivityFrameSchema,
+  agentActivitySchema,
+  agentHistorySchema,
+} from './agent-activity';
 import { pageSelectionSchema } from './page-selection';
 import { storedAttachmentsSchema, selectionAttachment, imagePreviewsSchema } from './attachments';
 import { userMessageSchema } from './agent-message';
@@ -82,6 +86,7 @@ export const chatEntrySchema = z
     selection: pageSelectionSchema.optional(),
     attachments: storedAttachmentsSchema.optional(),
     toolRun: toolRunSchema.optional(),
+    agentHistory: agentHistorySchema.optional(),
   })
   .transform(({ selection, ...entry }) => ({
     ...entry,
@@ -184,6 +189,13 @@ export const relayFrameSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('agent-status'),
     requestId: z.string().max(128),
+    state: z.string(),
+    code: z.string().optional(),
+  }),
+  z.object({
+    type: z.literal('agent-input-status'),
+    taskId: z.string().max(128),
+    inputId: z.string().max(128),
     state: z.string(),
     code: z.string().optional(),
   }),

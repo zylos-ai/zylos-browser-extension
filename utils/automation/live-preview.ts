@@ -41,9 +41,8 @@ export class LivePreview {
     );
     chrome.tabs.onRemoved.addListener((id) => {
       if (this.state?.tabId !== id) return;
-      this.state.canReveal = false;
-      if (this.state.canStop) this.finish('interrupted');
-      this.publish();
+      // A removed tab has no preview to retain, even when the task already ended.
+      this.reset();
     });
   }
 
@@ -143,9 +142,18 @@ export class LivePreview {
 
   clear() {
     if (this.state?.canStop) return;
+    this.reset();
+  }
+
+  private reset() {
+    clearTimeout(this.firstFrameTimer);
+    clearTimeout(this.flushTimer);
+    this.firstFrameTimer = undefined;
+    this.flushTimer = undefined;
     this.state = null;
     this.frame = null;
     this.target = null;
+    for (const client of this.clients) client.pending = null;
     this.publish();
     this.reconcile();
   }

@@ -65,21 +65,24 @@ export function LivePreview({
   }, []);
 
   // Keep View/Stop usable even when the preview service is starting or unavailable.
+  // An explicit null is authoritative: the preview was cleared (e.g. the tab closed).
+  // Only fall back to task metadata before the service has supplied its state.
   const state =
-    preview ??
-    (task
-      ? ({
-          targetKey: '',
-          sessionId: task.sessionId,
-          title: task.title,
-          url: task.url,
-          tabId: task.tabId,
-          status: task.phase === 'paused' || task.phase === 'finished' ? 'paused' : 'running',
-          availability: 'connecting',
-          canReveal: true,
-          canStop: true,
-        } as const)
-      : null);
+    preview !== undefined
+      ? preview
+      : task
+        ? ({
+            targetKey: '',
+            sessionId: task.sessionId,
+            title: task.title,
+            url: task.url,
+            tabId: task.tabId,
+            status: task.phase === 'paused' || task.phase === 'finished' ? 'paused' : 'running',
+            availability: 'connecting',
+            canReveal: true,
+            canStop: true,
+          } as const)
+        : null;
   // Resolve this panel's active tab before showing a thumbnail; keep the metadata
   // subscription alive so task/tab changes can make it visible again.
   const viewingTarget = activeTabId === null || state?.tabId === activeTabId;

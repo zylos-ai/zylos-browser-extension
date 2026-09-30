@@ -37,7 +37,7 @@ Remote 验证 Key 和浏览器身份，返回：
 
 新插件要求前三项能力及匹配的 `endpointId`，否则显示协议不匹配，不发送任务。
 图片、文件还需要 `attachments-v1`。先更新并重启 Remote，再重新加载插件。
-执行中追加消息需要 Remote 声明 `agent-steer-v1`。旧 Remote 仍能执行普通任务，
+执行中追加消息需要 Remote 声明 `agent-input-v1`。旧 Remote 仍能执行普通任务，
 但不能追加指令；更新后的输入框始终显示发送箭头，停止操作在顶部和预览窗口。
 `hello.version` 是现有实现标识，`agent-request.version` 才是本文的消息结构版本。
 
@@ -78,36 +78,48 @@ agent-request
 
 ### 执行中追加消息（Steer）
 
-补充消息先保存在插件当前任务内，下一个 `agent-request` 会携带可选 `updates`：
+补充消息在捕获页面上下文后立即通过独立的 `agent-input` 帧发给 Remote，
+Remote 每条都直接调用 C4 接收接口。插件和 Remote 不再保存待下一轮发送的消息队列。
+C4 / Agent 运行时决定消息何时合并进推理，浏览器动作仍保持串行。
 
 ```json
 {
+  "type": "agent-input",
+  "version": 2,
+  "id": "U1",
   "taskId": "T1",
-  "message": { "id": "T1" },
-  "updates": [{
-    "message": { "id": "U1", "role": "user", "content": [
-      { "type": "text", "text": "只找中文解说，十分钟以内" }
-    ] },
-    "context": { "pages": [{ "type": "current-page", "contextId": "U1", "status": "excerpt", "tabId": 123 }] }
-  }]
+  "sequence": 1,
+  "message": {
+    "id": "U1",
+    "role": "user",
+    "content": [{ "type": "text", "text": "只找中文解说，十分钟以内" }]
+  },
+  "context": {
+    "pages": [{ "type": "current-page", "contextId": "U1", "status": "excerpt", "tabId": 123 }]
+  }
 }
 ```
 
-这是连续轮次中的增量字段，原 `message`、`context` 和 `execution` 结构保持不变。
-每条补充都有独立消息 ID 和发送时的页面上下文，可携带文字、引用、图片或文件。
-正在进行的动作完成后会保留结果；尚未执行的批量动作可跳过。若补充在等待模型时
-到达，旧动作或旧完成回复会被接受但不执行，直接返回包含补充的新决策请求。
-旧请求重试仍受幂等保护，不能把已完成的操作重放。
+每条补充都有独立消息 ID、单调递增的 sequence 和自己的页面上下文，可携带文字、
+引用、图片或文件；单条消息的大小限制仍然生效。任务 ID 和绑定的浏览器不改变。
+Remote 回 `{type:"agent-input-status",taskId,inputId,state,code?}`，state 为 queued、
+failed 或 unknown。queued 只表示 C4 接收，不代表模型已经读到。
 
-Agent 按顺序合并补充要求，保留原任务和已操作的 Tab，不因用户切换激活页自动改目标。
-此实现通过相同的决策返回通道兼容 Codex 与 Claude Code，不依赖按 Escape 打断推理。
-追加输入在下一次决策时生效，已经发生的点击等操作不会撤销。
-同一批待合并输入最多 8 条，共用既有附件数量与大小限制；容量满时保留输入框草稿。
-结束或断线会将未确认应用的补充标为未生效，不会在重连后自动重放。
+C4 消息附带 `replyInputId`（即这条输入的 ID）。Agent 合并新要求后，每次操作和最终
+回复都要带上最新 inputId：actions 命令追加 `--input-id U1`；C4 最终回复的 endpoint
+参数在引号内追加 `|input:U1`。HTTP `/decision` 和下发的 `agent-decision.params`
+携带可选 `inputId`，原始 decision 内容不变。
 
-`done`/`blocked` 如果被补充消息取代，也会返回 `ok:true,next`，而不是 `finished:true`。
-此时 C4 最终发送命令非零退出表示最终消息尚未发送；Agent 应使用新的 replyCommands
-继续当前任务，不能重复提交旧答案。
+若旧决策晚到且未确认新输入，插件不执行它，返回新的决策请求；新请求不重复补充正文。
+若新请求仍未携带最新 inputId，返回 `OWNER_INPUT_REQUIRED`，要求先读取 C4 消息。
+如果 Agent 已经读到并确认新输入，则可以直接使用当前请求执行，无需额外绕一轮。
+已开始的动作会完成，尚未执行的批量动作可跳过，已完成操作不会重放。
+新输入投递失败或无法确认时会中断任务，避免忽略用户新要求继续操作；不会自动重发。
+
+Agent 按 sequence 顺序合并意图，保留原任务和 Tab。发消息时切换激活页只是额外上下文，
+不自动切换任务目标。此通道共用于 Codex 和 Claude Code，不改 Core，也不依赖 Escape。
+`done`/`blocked` 被新输入取代时返回 `ok:true,next`，此时 C4 最终发送命令非零退出，
+Agent 应继续新请求直到 `finished:true`。旧 Remote 无 `agent-input-v1` 时禁止追加输入。
 
 ## 3. 第一轮发送完整输入
 
@@ -270,7 +282,11 @@ Remote 通过同一 WebSocket 下发：
 ```
 
 `summary` 是可选的用户可见阶段说明，最多 160 个字符，使用用户的语言。
-它随已有决策一起返回，不增加调用；不提供时界面按真实动作显示状态。
+它随已有决策一起返回，不增加调用。插件接受决策后，将说明用于实时状态并保存到
+当前任务的展开记录；重复回包和被补充消息取代的旧决策不会新增记录。
+该记录直接关联任务，不依赖 Remote 是否采集到 Agent 日志。
+不提供时不会凭空生成说明。`agent/progress-guide.md` 随首次请求及进入浏览器操作模式时
+一起发送，要求 Agent 简要说明已确认的发现和下一步，不逐条复述内部命令。
 `memory` 仍只用于任务续接，不显示为思考过程。Remote 原样转发，无需更新。
 
 插件验证当前请求 ID、动作参数和权限。已接受的相同决策可幂等重试，冲突内容
@@ -346,7 +362,7 @@ Escape，再返回 `{type:"agent-stop-result",taskId,ok,code?}`。
 18,000 字符；整个 WebSocket 帧上限仍为 8 MiB。Remote 不维护浏览器工具表，
 浏览器操作规则只在插件中定义。
 
-## Agent 当前活动（可选）
+## Agent 当前活动与展开记录（可选）
 
 插件在 `hello.capabilities` 声明 `agent-activity-v1` 后，Remote 可通过同一个
 WebSocket 推送当前任务的工具活动，不需要修改 zylos-core 或增加模型调用：
@@ -367,10 +383,51 @@ delegate / waiting / tool / idle`，`detail` 仅允许已知可执行程序名�
 文件路径、原始输出或模型思考内容。工具返回后可附带 `phase: "returned"`。
 `sequence` 在任务内递增；`idle` 清除当前活动。未知字段不用于展示。
 
-插件仅接受当前连接、当前任务的新序号，结束、停止、断开时清除。
-这一状态只在内存保存，替换进度行，不追加聊天记录或工具日志。
-浏览器正在执行的动作优先显示；超过 30 秒未收到更新时使用原有进度提示。
+插件仅接受当前连接、当前任务的新序号，结束、停止、断开时清除实时状态。
+当前状态在内存中替换进度行；超过 30 秒未收到更新时显示等待回复。
 旧 Remote 不推送该消息时仍可正常聊天和操作浏览器。
+
+同时声明 `agent-history-v1` 时，同一帧可附带 `events`（最多 100 条）和
+`dropped`（此次推送前省略的记录数）：
+
+```json
+{
+  "type": "agent-activity",
+  "endpointId": "abc123def456.12345678-1234-4567-89ab-123456789abc",
+  "taskId": "T1",
+  "sequence": 2,
+  "category": "command",
+  "detail": "python3",
+  "events": [
+    {
+      "id": "session:message:text",
+      "kind": "commentary",
+      "at": 1790726400000,
+      "text": "我会先核对数据来源，再整理结果。"
+    },
+    {
+      "id": "session:call",
+      "kind": "tool",
+      "at": 1790726400100,
+      "category": "command",
+      "tool": "exec_command",
+      "detail": "python3"
+    }
+  ]
+}
+```
+
+`commentary` 来自 Codex 的公开 commentary 消息或 Claude Code 的 assistant text
+块，最多 2,000 字符，并过滤常见凭证。隐藏的 analysis、reasoning、thinking、
+redacted_thinking、原始工具参数和输出不进入记录。工具名称仅发送已知名称；
+工具返回时以相同 `id` 更新 `endedAt`，不会重复添加一条工具记录。
+
+插件将日志记录与已接受决策的公开 `summary` 合并，挂在原用户消息的 `agentHistory` 中，
+使用聊天记录现有的本地存储；
+Steer 补充仍属于同一任务。界面默认收起，展开只显示 Agent 记录，不展示插件本地
+浏览器动作。结束后停止计时并自动收起，可再次展开；插件重启保留历史并标记未结束任务。
+单任务保留最多 500 条，全局最多 1,000 条和 500,000 个文字字符；省略旧记录时界面说明数量，
+这些存储上限不会中断或限制任务执行。
 
 Remote 从 Agent 本机的 Codex CLI / Claude Code 根会话日志读取工具事件。
 它在 C4 消息开头加入任务专属活动标记，用于关联日志，不改变插件的决策协议。

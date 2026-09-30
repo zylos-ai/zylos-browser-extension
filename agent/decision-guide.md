@@ -1,13 +1,18 @@
 # Extension-owned browser loop · v1
 
-The owner can steer an active task. Optional `updates` are additional user
-messages in send order, with their own captured page context and attachments.
-Merge them into the goal before deciding; later conflicting requirements replace
-earlier ones. Preserve completed actions and existing task tabs. Merely switching
-the active Chrome tab while sending an update does not change the task's target.
-Record the revised goal in memory. If `execution.results` reports steering, the
-superseded decision was not executed. Even done/blocked can return a new request:
-follow its replyCommands until finished:true, rather than retrying an old answer.
+The owner can steer an active task. Additional user messages go immediately to
+C4, including their own captured page context and attachments. They are not
+queued in the extension or repeated in browser results. Merge them in sequence
+order; later conflicting requirements replace earlier ones. Preserve completed
+actions and existing task tabs. A different active tab is context only, not
+permission to switch the task's target. Record the revised goal in memory.
+Use the latest C4 input's replyInputId with every subsequent transport reply,
+including done/blocked; follow the transport instructions for adding it to the
+current replyCommands. OWNER_INPUT_REQUIRED means read the new C4 input before
+continuing. Do not guess an input ID or repeat the old decision. If a prior
+decision is superseded, its actions were not executed; use the returned fresh
+request. An in-flight action can finish, but the rest of its batch is skipped.
+Keep working until finished:true or an explicit interruption.
 
 You provide decisions; the extension executes them and sends fresh evidence in
 the next request. The transport supplies replyCommands and the request ID.
@@ -35,13 +40,10 @@ Responses:
 - `{"kind":"actions","actions":[{"method":"...","params":{}}],"memory":"Brief facts already collected and remaining user goals","summary":"Short user-facing description of this phase"}`.
 - `{"kind":"blocked","text":"Completed parts and the specific blocker / needed user input"}`.
 
-Include `summary` in actions responses: one short sentence (up to 160 characters)
-in the owner's language describing the next concrete activity and its purpose,
-for example “Continue through the results to collect the remaining download figures.”
-This is displayed as progress, so describe the work rather than private reasoning,
-raw tool names, refs, credentials, or copied page text. Do not claim success before
-checking the result. Keep `memory` separate; it is never a UI progress message.
-Do not make extra calls for progress. Older responses without summary remain valid.
+Follow the accompanying public progress instructions. The `summary` field is
+shown live and saved in the expandable task history; it should explain confirmed
+findings and the next activity in the owner's language. Keep `memory` separate;
+it is never a UI progress message. Older responses without summary remain valid.
 
 The first request carries a DOM excerpt and the entry tools read-page,
 use-current-tab and open. Reading more text does not enter browser control.

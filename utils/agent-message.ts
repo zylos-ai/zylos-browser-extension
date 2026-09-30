@@ -8,8 +8,12 @@ import {
 
 export const AGENT_MESSAGE_VERSION = 2;
 export const AGENT_MESSAGE_CAPABILITY = 'agent-message-v2';
-export const STEER_CAPABILITY = 'agent-steer-v1';
-export type SteerUpdate = {
+export const STEER_CAPABILITY = 'agent-input-v1';
+export type AgentInput = {
+  version: typeof AGENT_MESSAGE_VERSION;
+  id: string;
+  taskId: string;
+  sequence: number;
   message: ReturnType<typeof agentMessage>;
   context: { pages: PageContext[] };
 };
@@ -78,7 +82,6 @@ export type AgentRequest = {
   // Content is sent once; subsequent rounds refer to the same owner message.
   message: ReturnType<typeof agentMessage> | { id: string };
   context: { pages: PageContext[] };
-  updates?: SteerUpdate[];
   execution: {
     protocol: 'browser-decision-v1';
     mode: 'reading' | 'operating';

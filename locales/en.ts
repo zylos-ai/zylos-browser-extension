@@ -49,6 +49,10 @@ export default {
   activityNeedsAttention: 'Browser actions ended with issues',
   agentAwaitingResponse: 'Waiting for Agent response',
   agentProcessing: 'Preparing the next step',
+  agentThinking: 'Thinking & activity',
+  agentHistoryWaiting: 'Waiting for Agent progress…',
+  agentHistoryEmpty: 'No Agent progress was recorded for this task.',
+  agentHistoryTrimmed: '{count} earlier entries were omitted.',
   agentCommand: 'Running command',
   agentRead: 'Reading file',
   agentWrite: 'Editing file',
@@ -265,8 +269,6 @@ export default {
   chatBusy: 'A message is being sent or the task is finishing. Please try again shortly.',
   steerUnsupported:
     'Update Browser Remote to add instructions during a task. The current task can continue.',
-  steerQueueFull:
-    'There are too many pending updates or attachments. Send more after the next step.',
   sendMessage: 'Send message',
   keyboardHint: 'Enter to send · Shift + Enter for a new line',
   settingsDescription: 'Manage your connection and preferences.',

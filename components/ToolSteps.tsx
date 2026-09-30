@@ -1,10 +1,11 @@
-import { useEffect, useId, useState } from 'react';
-import { summarizeTools, stageLabels } from '../utils/tool-progress';
+import { useEffect, useId, useRef, useState } from 'react';
+import { summarizeTools } from '../utils/tool-progress';
 import type { TranslationKey } from '../utils/i18n';
 import {
   AGENT_ACTIVITY_TTL_MS,
   agentActivityLabels,
   type AgentActivity,
+  type AgentHistory,
 } from '../utils/agent-activity';
 import type { ToolRun } from '../utils/remote';
 import { useI18n } from './LanguageProvider';
@@ -14,29 +15,25 @@ function elapsed(ms: number) {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-function hostname(target: string) {
-  try {
-    return new URL(target).hostname;
-  } catch {
-    return '';
-  }
-}
-
 export function ToolSteps({
   run,
   startedAt = run.startedAt,
   className = '',
   label,
   agentActivity,
+  history,
 }: {
   run: ToolRun;
   startedAt?: number;
   className?: string;
   label?: TranslationKey;
   agentActivity?: AgentActivity;
+  history?: AgentHistory;
 }) {
   const { t } = useI18n();
   const listId = useId();
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const following = useRef(true);
   const [toggle, setToggle] = useState<{ phase: ToolRun['status']; open: boolean }>();
   const open = toggle?.phase === run.status ? toggle.open : false;
   const [now, setNow] = useState(Date.now);
@@ -49,7 +46,12 @@ export function ToolSteps({
   }, [active, startedAt]);
 
   const progress = summarizeTools(run, now);
-  const overview = progress.stages.filter((stage) => stage.kind !== 'preparing');
+  const events = history?.events ?? [];
+  const lastEvent = events.at(-1);
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (open && following.current && body) body.scrollTop = body.scrollHeight;
+  }, [open, events.length, lastEvent]);
   const latestSummary = [...run.steps]
     .reverse()
     .find((step) => !step.replayed && typeof step.summary === 'string')?.summary;
@@ -81,16 +83,24 @@ export function ToolSteps({
   // Between actions show the latest real Agent event, replacing the same line.
   const title =
     active && !label
-      ? progress.busy && progress.hasExecution
-        ? t(progress.phaseLabel)
-        : remoteLabel
-          ? `${remoteLabel}${remoteActivity?.detail && (remoteActivity.phase !== 'returned' || now - remoteActivity.receivedAt < 2500) ? ` · ${remoteActivity.detail}` : ''}`
-          : latestSummary ||
-            (progress.hasExecution
-              ? t(progress.phaseLabel)
-              : agentActivity
-                ? t('agentAwaitingResponse')
-                : t('progressAwaiting'))
+      ? history
+        ? remoteLabel
+          ? `${remoteLabel}${remoteActivity?.detail ? ` · ${remoteActivity.detail}` : ''}`
+          : lastEvent?.kind === 'commentary'
+            ? lastEvent.text
+            : events.length || agentActivity
+              ? t('agentAwaitingResponse')
+              : t('progressAwaiting')
+        : progress.busy && progress.hasExecution
+          ? t(progress.phaseLabel)
+          : remoteLabel
+            ? `${remoteLabel}${remoteActivity?.detail && (remoteActivity.phase !== 'returned' || now - remoteActivity.receivedAt < 2500) ? ` · ${remoteActivity.detail}` : ''}`
+            : latestSummary ||
+              (progress.hasExecution
+                ? t(progress.phaseLabel)
+                : agentActivity
+                  ? t('agentAwaitingResponse')
+                  : t('progressAwaiting'))
       : statusLabel
         ? t(statusLabel)
         : '';
@@ -111,7 +121,7 @@ export function ToolSteps({
       <span className="tool-activity-time" aria-hidden={active || undefined}>
         {active ? timing : t('progressElapsed', { time: timing })}
       </span>
-      {overview.length > 0 && (
+      {
         <svg
           className="tool-activity-chevron"
           data-open={open}
@@ -129,7 +139,7 @@ export function ToolSteps({
             strokeLinejoin="round"
           />
         </svg>
-      )}
+      }
     </>
   );
 
@@ -137,38 +147,61 @@ export function ToolSteps({
     <section
       className={`tool-activity ${className}`}
       data-status={run.status}
-      aria-label={t('progressTitle')}
+      aria-label={t('agentThinking')}
     >
-      {overview.length > 0 ? (
+      {
         <button
           type="button"
           className="tool-activity-toggle"
           aria-expanded={open}
           aria-controls={listId}
-          onClick={() => setToggle({ phase: run.status, open: !open })}
+          onClick={() => {
+            following.current = true;
+            setToggle({ phase: run.status, open: !open });
+          }}
         >
           {heading}
         </button>
-      ) : (
-        <div className="tool-activity-toggle" role={active ? 'status' : undefined}>
-          {heading}
-        </div>
-      )}
-      {overview.length > 0 && (
-        <div id={listId} hidden={!open} className="tool-activity-body">
-          <ol className="tool-overview" aria-label={t('progressOverview')}>
-            {overview.map((stage) => (
-              <li key={stage.id}>
-                <span className="tool-overview-label">{t(stageLabels[stage.kind])}</span>
-                {stage.target && (
-                  <span className="tool-overview-site">{hostname(stage.target)}</span>
-                )}
-                {stage.summary && <p className="tool-overview-summary">{stage.summary}</p>}
-              </li>
-            ))}
-          </ol>
-        </div>
-      )}
+      }
+      <div
+        ref={bodyRef}
+        id={listId}
+        hidden={!open}
+        className="tool-activity-body"
+        onScroll={() => {
+          const body = bodyRef.current;
+          if (body) following.current = body.scrollHeight - body.scrollTop - body.clientHeight < 32;
+        }}
+      >
+        {!!history?.dropped && (
+          <p className="agent-history-note">
+            {t('agentHistoryTrimmed', { count: history.dropped })}
+          </p>
+        )}
+        {!events.length && (
+          <p className="agent-history-note">
+            {t(active ? 'agentHistoryWaiting' : 'agentHistoryEmpty')}
+          </p>
+        )}
+        <ol className="agent-history" aria-label={t('agentThinking')}>
+          {events.map((event) => (
+            <li key={event.id} data-kind={event.kind}>
+              {event.kind === 'commentary' ? (
+                <p className="agent-commentary">{event.text}</p>
+              ) : (
+                <div className="agent-history-tool">
+                  <span>{t(agentActivityLabels[event.category])}</span>
+                  {event.tool && <code>{event.tool}</code>}
+                  {event.detail && <span>{event.detail}</span>}
+                  {event.endedAt !== undefined && (
+                    <span className="agent-tool-duration">{elapsed(event.endedAt - event.at)}</span>
+                  )}
+                </div>
+              )}
+            </li>
+          ))}
+        </ol>
+      </div>
     </section>
   );
 }

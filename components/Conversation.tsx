@@ -1,5 +1,5 @@
 import { Fragment, useLayoutEffect, useRef, useState } from 'react';
-import { type RemoteState } from '../utils/remote';
+import { type ChatEntry, type RemoteState } from '../utils/remote';
 import { Brand } from './Brand';
 import { WelcomeMascot } from './WelcomeMascot';
 import { useI18n } from './LanguageProvider';
@@ -24,9 +24,25 @@ export function Conversation({
   const following = useRef(true);
   const [unread, setUnread] = useState(false);
   const { chat, task } = state;
+  // History belongs to the root task in storage, but follows that task's latest
+  // user message in the conversation, including messages sent while it runs.
+  const histories = new Map<string, { owner: ChatEntry; index: number }>();
+  chat.forEach((message, index) => {
+    if (message.role !== 'user') return;
+    if (message.agentHistory)
+      histories.set(message.id ?? `message-${index}`, { owner: message, index });
+    else if (message.taskId) {
+      const history = histories.get(message.taskId);
+      if (history) history.index = index;
+    }
+  });
+  const historyAfter = new Map([...histories.values()].map(({ owner, index }) => [index, owner]));
   const latest = chat.at(-1);
   const activity = [...chat].reverse().find((message) => message.toolRun)?.toolRun;
   const activityRevision = activity && JSON.stringify(activity);
+  const agentHistoryRevision = JSON.stringify(
+    chat.findLast((message) => message.agentHistory)?.agentHistory,
+  );
   const turn = [...chat]
     .reverse()
     .find(
@@ -66,6 +82,7 @@ export function Conversation({
     task?.sessionId,
     task?.phase,
     activityRevision,
+    agentHistoryRevision,
   ]);
 
   return (
@@ -111,111 +128,137 @@ export function Conversation({
             aria-live="polite"
             aria-relevant="additions text"
           >
-            {chat.map((message, index) => (
-              <Fragment
-                key={message.id ? `${message.role}-${message.id}` : `${message.ts}-${index}`}
-              >
-                {(index === 0 || dayKey(chat[index - 1]!.ts) !== dayKey(message.ts)) && (
-                  <p className="message-date text-caption text-muted">
-                    {formatMessageDate(message.ts, locale)}
-                  </p>
-                )}
-                {message.toolRun ? (
+            {chat.flatMap((message, index) => {
+              const historyOwner = historyAfter.get(index);
+              return [
+                <Fragment
+                  key={message.id ? `${message.role}-${message.id}` : `${message.ts}-${index}`}
+                >
+                  {(index === 0 || dayKey(chat[index - 1]!.ts) !== dayKey(message.ts)) && (
+                    <p className="message-date text-caption text-muted">
+                      {formatMessageDate(message.ts, locale)}
+                    </p>
+                  )}
+                  {message.toolRun ? (
+                    chat.slice(0, index).findLast((entry) => entry.role === 'user' && !entry.taskId)
+                      ?.agentHistory ? null : (
+                      <ToolSteps
+                        run={message.toolRun}
+                        agentActivity={
+                          turn && index > chat.indexOf(turn) ? agentActivity : undefined
+                        }
+                        startedAt={
+                          chat
+                            .slice(0, index)
+                            .findLast((entry) => entry.role === 'user' && !entry.taskId)?.ts
+                        }
+                      />
+                    )
+                  ) : (
+                    <article
+                      className={`message ${message.role}`}
+                      aria-label={
+                        message.role === 'user'
+                          ? t('you')
+                          : message.role === 'assistant'
+                            ? 'Zylos'
+                            : t('systemMessage')
+                      }
+                    >
+                      {message.role === 'assistant' && (
+                        <div className="message-author">
+                          <Brand />
+                          <span>Zylos</span>
+                        </div>
+                      )}
+                      {message.role === 'system' && (
+                        <span className="system-label">{t('system')}</span>
+                      )}
+                      {message.attachments?.some((attachment) => attachment.type !== 'quote') && (
+                        <ul
+                          className="attachment-list message-attachments"
+                          aria-label={t('attachedFiles')}
+                        >
+                          {message.attachments
+                            .filter((attachment) => attachment.type !== 'quote')
+                            .map((attachment) => (
+                              <li
+                                className={`attachment-item${attachment.type === 'file' ? ' is-file' : ''}`}
+                                key={attachment.id}
+                                title={attachment.name}
+                              >
+                                {attachment.type === 'file' ? (
+                                  <FileAttachment name={attachment.name} bytes={attachment.bytes} />
+                                ) : attachment.preview ? (
+                                  <img
+                                    src={attachment.preview}
+                                    alt={attachment.name}
+                                    width="128"
+                                    height="96"
+                                    loading="lazy"
+                                  />
+                                ) : (
+                                  <span className="attachment-item-placeholder" aria-hidden="true">
+                                    <svg
+                                      width="24"
+                                      height="24"
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth="1.5"
+                                    >
+                                      <rect x="3" y="3" width="18" height="18" rx="3" />
+                                      <circle cx="8" cy="8" r="1" />
+                                      <path d="m3 17 5-5 4 4 4-6 5 7" />
+                                    </svg>
+                                  </span>
+                                )}
+                                {attachment.type === 'image' && (
+                                  <span className="attachment-item-name">{attachment.name}</span>
+                                )}
+                              </li>
+                            ))}
+                        </ul>
+                      )}
+                      {message.role !== 'user' && message.notice ? (
+                        <p className="message-text">{formatTaskNotice(locale, message.notice)}</p>
+                      ) : message.role === 'assistant' ? (
+                        <MarkdownMessage text={message.text} />
+                      ) : (
+                        <p className="message-text">{message.text}</p>
+                      )}
+                      {message.role === 'user' && message.deliveryError && (
+                        <p className="message-delivery" role="alert">
+                          {errorText(message.deliveryError)}
+                        </p>
+                      )}
+                      {message.steerStatus === 'interrupted' && (
+                        <p className="message-delivery" role="status">
+                          {t('steerInterrupted')}
+                        </p>
+                      )}
+                    </article>
+                  )}
+                </Fragment>,
+                historyOwner?.agentHistory && (
                   <ToolSteps
-                    run={message.toolRun}
-                    agentActivity={turn && index > chat.indexOf(turn) ? agentActivity : undefined}
-                    startedAt={chat.slice(0, index).findLast((entry) => entry.role === 'user')?.ts}
-                  />
-                ) : (
-                  <article
-                    className={`message ${message.role}`}
-                    aria-label={
-                      message.role === 'user'
-                        ? t('you')
-                        : message.role === 'assistant'
-                          ? 'Zylos'
-                          : t('systemMessage')
+                    key={`history-${historyOwner.id ?? historyOwner.ts}`}
+                    className="reply-status"
+                    history={historyOwner.agentHistory}
+                    agentActivity={historyOwner.id === turn?.id ? agentActivity : undefined}
+                    label={
+                      historyOwner.agentHistory.status === 'running' && !state.connected
+                        ? 'progressDisconnected'
+                        : undefined
                     }
-                  >
-                    {message.role === 'assistant' && (
-                      <div className="message-author">
-                        <Brand />
-                        <span>Zylos</span>
-                      </div>
-                    )}
-                    {message.role === 'system' && (
-                      <span className="system-label">{t('system')}</span>
-                    )}
-                    {message.attachments?.some((attachment) => attachment.type !== 'quote') && (
-                      <ul
-                        className="attachment-list message-attachments"
-                        aria-label={t('attachedFiles')}
-                      >
-                        {message.attachments
-                          .filter((attachment) => attachment.type !== 'quote')
-                          .map((attachment) => (
-                            <li
-                              className={`attachment-item${attachment.type === 'file' ? ' is-file' : ''}`}
-                              key={attachment.id}
-                              title={attachment.name}
-                            >
-                              {attachment.type === 'file' ? (
-                                <FileAttachment name={attachment.name} bytes={attachment.bytes} />
-                              ) : attachment.preview ? (
-                                <img
-                                  src={attachment.preview}
-                                  alt={attachment.name}
-                                  width="128"
-                                  height="96"
-                                  loading="lazy"
-                                />
-                              ) : (
-                                <span className="attachment-item-placeholder" aria-hidden="true">
-                                  <svg
-                                    width="24"
-                                    height="24"
-                                    viewBox="0 0 24 24"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    strokeWidth="1.5"
-                                  >
-                                    <rect x="3" y="3" width="18" height="18" rx="3" />
-                                    <circle cx="8" cy="8" r="1" />
-                                    <path d="m3 17 5-5 4 4 4-6 5 7" />
-                                  </svg>
-                                </span>
-                              )}
-                              {attachment.type === 'image' && (
-                                <span className="attachment-item-name">{attachment.name}</span>
-                              )}
-                            </li>
-                          ))}
-                      </ul>
-                    )}
-                    {message.role !== 'user' && message.notice ? (
-                      <p className="message-text">{formatTaskNotice(locale, message.notice)}</p>
-                    ) : message.role === 'assistant' ? (
-                      <MarkdownMessage text={message.text} />
-                    ) : (
-                      <p className="message-text">{message.text}</p>
-                    )}
-                    {message.role === 'user' && message.deliveryError && (
-                      <p className="message-delivery" role="alert">
-                        {errorText(message.deliveryError)}
-                      </p>
-                    )}
-                    {message.steerStatus === 'interrupted' && (
-                      <p className="message-delivery" role="status">
-                        {t('steerInterrupted')}
-                      </p>
-                    )}
-                  </article>
-                )}
-              </Fragment>
-            ))}
+                    run={{ ...historyOwner.agentHistory, total: 0, failed: 0, steps: [] }}
+                  />
+                ),
+              ];
+            })}
           </div>
         )}
-        {awaiting && !turnActivity?.length && (
+        {awaiting && !turn.agentHistory && !turnActivity?.length && (
           <ToolSteps
             className="reply-status"
             agentActivity={agentActivity}

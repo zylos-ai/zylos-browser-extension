@@ -17,6 +17,7 @@ function setup() {
       requests.push(request);
       return true;
     }),
+    input: vi.fn(() => true),
     execute: vi.fn(async (_actions: LoopAction[]): Promise<RoundResult> => ({
       observation: { text: 'new page' },
       results: [],
@@ -46,8 +47,73 @@ afterEach(() => {
   setWorkerLanguage('auto');
 });
 describe('extension-owned loop', () => {
+  it('sends more than eight owner messages immediately without a pending-input buffer', () => {
+    const { loop, io, requests } = setup();
+    for (let i = 1; i <= 12; i++)
+      loop.steer(
+        `u${i}`,
+        { role: 'user', content: [{ type: 'text', text: `requirement ${i}` }] },
+        { type: 'current-page', status: 'unavailable' },
+      );
+    expect(io.input).toHaveBeenCalledTimes(12);
+    expect(io.input).toHaveBeenLastCalledWith(expect.objectContaining({ sequence: 12 }));
+    expect(requests).toHaveLength(1);
+    loop.cancel();
+  });
+  it('retains the previous goal when the new input cannot be sent', async () => {
+    const { loop, io, requests } = setup();
+    io.input.mockReturnValueOnce(false);
+    expect(() =>
+      loop.steer(
+        'u1',
+        { role: 'user', content: [{ type: 'text', text: 'More' }] },
+        { type: 'current-page', status: 'unavailable' },
+      ),
+    ).toThrow('ui.error.sendFailed');
+    expect(loop.inputId).toBe('task-1');
+    loop.accept(requests[0]!.id, { kind: 'done', text: 'Original answer' });
+    await vi.waitFor(() => expect(io.finish).toHaveBeenCalled());
+  });
+  it('accepts a decision that already acknowledges the latest C4 input without an extra round', async () => {
+    const { loop, io, requests } = setup();
+    loop.steer(
+      'u1',
+      { role: 'user', content: [{ type: 'text', text: 'Just chat' }] },
+      { type: 'current-page', status: 'unavailable' },
+    );
+    loop.accept(requests[0]!.id, { kind: 'done', text: 'New answer' }, 'u1');
+    await vi.waitFor(() => expect(io.finish).toHaveBeenCalledWith('New answer', 'done', 'task-1'));
+    expect(requests).toHaveLength(1);
+    expect(io.execute).not.toHaveBeenCalled();
+  });
+  it('requires the latest C4 input acknowledgement for both actions and final replies', async () => {
+    const { loop, requests, io } = setup();
+    loop.steer(
+      'u1',
+      { role: 'user', content: [{ type: 'text', text: 'More' }] },
+      { type: 'current-page', status: 'unavailable' },
+    );
+    loop.accept(requests[0]!.id, action);
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    for (const kind of ['done', 'blocked'])
+      expect(() => loop.accept(requests[1]!.id, { kind, text: 'Old answer' }, 'wrong')).toThrow(
+        'New owner input',
+      );
+    expect(io.finish).not.toHaveBeenCalled();
+    loop.steer(
+      'u2',
+      { role: 'user', content: [{ type: 'text', text: 'Latest' }] },
+      { type: 'current-page', status: 'unavailable' },
+    );
+    loop.accept(requests[1]!.id, action, 'u1');
+    await vi.waitFor(() => expect(requests).toHaveLength(3));
+    expect(io.execute).not.toHaveBeenCalled();
+    loop.accept(requests[2]!.id, action, 'u2');
+    await vi.waitFor(() => expect(requests).toHaveLength(4));
+    loop.cancel();
+  });
   it.each(['actions', 'done', 'blocked'])(
-    'merges ordered updates before executing an outdated %s decision',
+    'sends inputs immediately and supersedes an outdated %s decision',
     async (kind) => {
       const { loop, requests, io } = setup();
       const page = {
@@ -66,6 +132,11 @@ describe('extension-owned loop', () => {
         { role: 'user', content: [{ type: 'text', text: 'Under ten minutes' }] },
         page,
       );
+      expect(io.input).toHaveBeenCalledTimes(2);
+      expect(requests).toHaveLength(1);
+      expect(io.input).toHaveBeenLastCalledWith(
+        expect.objectContaining({ id: 'update-2', taskId: 'task-1', sequence: 2 }),
+      );
       const decision = kind === 'actions' ? action : { kind, text: 'Old answer' };
       const id = requests[0]!.id;
       loop.accept(id, decision);
@@ -76,19 +147,20 @@ describe('extension-owned loop', () => {
         taskId: 'task-1',
         round: 2,
         message: { id: 'task-1' },
-        updates: [{ message: { id: 'update-1' } }, { message: { id: 'update-2' } }],
         execution: { mode: 'reading', results: [{ method: 'steering' }] },
       });
       expect(loop.accept(id, decision).replayed).toBe(true);
       expect(requests).toHaveLength(2);
-      loop.accept(requests[1]!.id, action);
+      expect(requests[1]).not.toHaveProperty('updates');
+      expect(() => loop.accept(requests[1]!.id, action)).toThrow('New owner input');
+      loop.accept(requests[1]!.id, action, 'update-2');
       await vi.waitFor(() => expect(requests).toHaveLength(3));
       expect(io.execute).toHaveBeenCalledTimes(1);
       expect(requests[2]).not.toHaveProperty('updates');
       loop.cancel();
     },
   );
-  it('keeps an in-flight action and sends new input with its fresh observation', async () => {
+  it('delivers input while an action is in flight without repeating it in browser results', async () => {
     const { loop, requests, io } = setup();
     let resolve!: (result: RoundResult) => void;
     io.execute.mockImplementationOnce(
@@ -117,6 +189,22 @@ describe('extension-owned loop', () => {
       { type: 'current-page', status: 'excerpt', contextId: 'second', tabId: 9 },
     );
     expect(requests).toHaveLength(1);
+    expect(io.input).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'update-1',
+        taskId: 'task-1',
+        sequence: 1,
+        message: expect.objectContaining({
+          content: expect.arrayContaining([
+            expect.objectContaining({ type: 'file', data: 'aGk=' }),
+          ]),
+        }),
+        context: { pages: [expect.objectContaining({ tabId: 9 })] },
+      }),
+    );
+    expect(
+      (io.execute.mock.calls[0] as unknown as [unknown, unknown, unknown, () => boolean])[3](),
+    ).toBe(true);
     resolve({
       mode: 'operating',
       failed: false,
@@ -126,22 +214,13 @@ describe('extension-owned loop', () => {
     await vi.waitFor(() => expect(requests).toHaveLength(2));
     expect(requests[1]).toMatchObject({
       taskId: 'task-1',
-      updates: [
-        {
-          message: {
-            id: 'update-1',
-            content: expect.arrayContaining([
-              expect.objectContaining({ type: 'file', data: 'aGk=' }),
-            ]),
-          },
-          context: { pages: [{ tabId: 9 }] },
-        },
-      ],
       execution: {
         observation: { target: { id: 3 } },
         results: [{ method: 'open', status: 'success' }],
       },
     });
+    expect(requests[1]).not.toHaveProperty('updates');
+    expect(() => loop.accept(requests[1]!.id, action)).toThrow('New owner input');
     expect(io.cancel).not.toHaveBeenCalled();
     loop.cancel();
   });

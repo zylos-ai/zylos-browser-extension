@@ -54,7 +54,12 @@ import {
   pruneImagePreviews,
 } from '../../utils/attachments';
 
-import { AGENT_ACTIVITY_CAPABILITY } from '../../utils/agent-activity';
+import {
+  AGENT_ACTIVITY_CAPABILITY,
+  AGENT_HISTORY_CAPABILITY,
+  appendAgentEvents,
+  pruneAgentHistory,
+} from '../../utils/agent-activity';
 
 const BACKOFF_MIN_MS = 1000;
 const BACKOFF_MAX_MS = 60_000;
@@ -139,23 +144,25 @@ export function startRemoteBackground() {
       .catch(() => {})
       .then(() => {
         pruneImagePreviews(state.chat);
+        pruneAgentHistory(state.chat);
         return chrome.storage.local.set({ [REMOTE_CHAT_LOG_KEY]: structuredClone(state.chat) });
       });
     saveQueue = saving;
     return saving;
   }
+  const activityChanged = () => {
+    publish();
+    clearTimeout(activitySaveTimer);
+    activitySaveTimer = setTimeout(() => {
+      void persistChat().catch(() => {
+        state.error = 'ui.error.chatSaveFailed';
+        publish();
+      });
+    }, 250);
+  };
   const activity = new ToolActivity(
     () => state.chat,
-    () => {
-      publish();
-      clearTimeout(activitySaveTimer);
-      activitySaveTimer = setTimeout(() => {
-        void persistChat().catch(() => {
-          state.error = 'ui.error.chatSaveFailed';
-          publish();
-        });
-      }, 250);
-    },
+    activityChanged,
     () => {
       const control = currentControl();
       const grant = currentGrant();
@@ -217,15 +224,44 @@ export function startRemoteBackground() {
   loop = new BrowserLoop({
     updates: (ids, status) => {
       if (!ids.length) return;
+      const latest = state.chat.find((entry) => entry.id === ids[0]);
       for (const entry of state.chat)
-        if (entry.id && ids.includes(entry.id)) entry.steerStatus = status;
+        if (
+          entry.steerStatus &&
+          entry.taskId === loop.taskId &&
+          (status === 'interrupted'
+            ? entry.steerStatus !== 'applied'
+            : latest && entry.ts <= latest.ts)
+        )
+          entry.steerStatus = status;
       void persistChat().catch(() => {
         state.error = 'ui.error.chatSaveFailed';
       });
       publish();
     },
-    progress: (summary) => activity.describe(summary),
+    progress: (summary) => {
+      activity.describe(summary);
+      if (!summary) return;
+      const history = state.chat.find((entry) => entry.id === loop.taskId)?.agentHistory;
+      if (!history || history.status !== 'running') return;
+      const lastCommentary = history.events.findLast((event) => event.kind === 'commentary');
+      if (lastCommentary?.kind === 'commentary' && lastCommentary.text.trim() === summary.trim())
+        return;
+      // The Agent's public decision summary is already correlated to this task.
+      // Persist it directly; it must survive missing logs and Agent session rotation.
+      appendAgentEvents(history, [
+        {
+          id: `decision-progress:${crypto.randomUUID()}`,
+          kind: 'commentary',
+          at: Date.now(),
+          text: summary,
+        },
+      ]);
+      pruneAgentHistory(state.chat);
+      activityChanged();
+    },
     send: (request) => send({ type: 'agent-request', ...request }),
+    input: (input) => send({ type: 'agent-input', ...input }),
     record: (method, result) => {
       const taskId = loop.taskId;
       const id = crypto.randomUUID();
@@ -316,7 +352,14 @@ export function startRemoteBackground() {
       });
       if (loop.taskId !== taskId) return;
       const message = state.chat.find((entry) => entry.role === 'user' && entry.id === taskId);
-      if (message) message.loopStatus = status;
+      if (message) {
+        message.loopStatus = status;
+        if (message.agentHistory) {
+          message.agentHistory.status =
+            status === 'done' || status === 'blocked' ? 'completed' : 'interrupted';
+          message.agentHistory.endedAt = Date.now();
+        }
+      }
       await appendChat({
         id: crypto.randomUUID(),
         role: 'assistant',
@@ -338,7 +381,13 @@ export function startRemoteBackground() {
     loop.cancel();
     if (taskId) {
       const message = state.chat.find((entry) => entry.role === 'user' && entry.id === taskId);
-      if (message) message.loopStatus = status;
+      if (message) {
+        message.loopStatus = status;
+        if (message.agentHistory) {
+          message.agentHistory.status = status;
+          message.agentHistory.endedAt = Date.now();
+        }
+      }
       send({ type: 'agent-turn-end', taskId, status, ...(interrupt ? { interrupt: true } : {}) });
       void persistChat().catch(() => {});
     }
@@ -457,6 +506,7 @@ export function startRemoteBackground() {
           INSTANCE_CAPABILITY,
           AGENT_MESSAGE_CAPABILITY,
           AGENT_ACTIVITY_CAPABILITY,
+          AGENT_HISTORY_CAPABILITY,
           STEER_CAPABILITY,
         ],
         browserId: state.browserId,
@@ -545,8 +595,16 @@ export function startRemoteBackground() {
           return;
         if (state.agentActivity?.taskId === m.taskId && m.sequence <= state.agentActivity.sequence)
           return;
-        state.agentActivity = { ...m, receivedAt: Date.now() };
-        publish(); // Ephemeral status: never append or persist a chat entry.
+        {
+          const { events, dropped, ...current } = m;
+          state.agentActivity = { ...current, receivedAt: Date.now() };
+          const entry = state.chat.find((item) => item.role === 'user' && item.id === m.taskId);
+          if (entry?.agentHistory && (events?.length || dropped)) {
+            appendAgentEvents(entry.agentHistory, events ?? [], dropped);
+            pruneAgentHistory(state.chat);
+            activityChanged();
+          } else publish();
+        }
         return;
       case 'agent-stop-result':
         if (pendingStop?.taskId === m.taskId) pendingStop.resolve(m.ok);
@@ -559,6 +617,18 @@ export function startRemoteBackground() {
           loop.fail(m.requestId, m.code || 'AGENT_UNAVAILABLE');
         }
         return;
+      case 'agent-input-status': {
+        if (loop.taskId !== m.taskId) return;
+        const entry = state.chat.find((item) => item.id === m.inputId && item.taskId === m.taskId);
+        if (!entry) return;
+        if (entry.steerStatus === 'applied' && m.state !== 'queued') return;
+        if (m.state === 'queued' && entry.steerStatus === 'pending') entry.steerStatus = 'sent';
+        // Fail closed when any owner input cannot be delivered. Do not continue
+        // browser actions under a goal that silently omitted a user instruction.
+        if (m.state !== 'queued') loop.fail(loop.inputId!, m.code || 'AGENT_UNAVAILABLE');
+        await updateDelivery({ state: m.state, chatId: m.inputId, code: m.code });
+        return;
+      }
       case 'ping':
         send({ type: 'pong', ts: m.ts ?? Date.now() });
         return;
@@ -583,11 +653,15 @@ export function startRemoteBackground() {
     };
     if (m.method === 'agent-decision') {
       try {
-        const { id, decision } = z
-          .object({ id: z.string().max(128), decision: z.unknown() })
+        const { id, decision, inputId } = z
+          .object({
+            id: z.string().max(128),
+            decision: z.unknown(),
+            inputId: z.string().max(128).optional(),
+          })
           .strict()
           .parse(m.params);
-        reply({ type: 'resp', result: loop.accept(id, decision) });
+        reply({ type: 'resp', result: loop.accept(id, decision, inputId) });
       } catch (error) {
         const e = error as { code?: string; message?: string };
         reply({
@@ -658,6 +732,10 @@ export function startRemoteBackground() {
     state.chat = log.success ? log.data.slice(-CHAT_LOG_CAP) : [];
     for (const message of state.chat) {
       if (message.loopStatus === 'active') message.loopStatus = 'interrupted';
+      if (message.agentHistory?.status === 'running') {
+        message.agentHistory.status = 'interrupted';
+        message.agentHistory.endedAt = message.agentHistory.events.at(-1)?.at ?? message.ts;
+      }
       if (message.steerStatus === 'pending' || message.steerStatus === 'sent')
         message.steerStatus = 'interrupted';
     }
@@ -778,7 +856,7 @@ export function startRemoteBackground() {
                   ? { attachments: storedAttachments(attachments, m.imagePreviews) }
                   : {}),
               }).catch(() => {
-                // The loop already owns the update. A history-write failure
+                // The update has already been sent. A history-write failure
                 // must not invite a retry that applies the same intent twice.
                 state.error = 'ui.error.chatSaveFailed';
                 publish();
@@ -796,12 +874,17 @@ export function startRemoteBackground() {
                 ? { attachments: storedAttachments(attachments, m.imagePreviews) }
                 : {}),
               loopStatus: 'active',
+              agentHistory: { status: 'running', startedAt: ts, events: [], dropped: 0 },
             });
             if (gen !== generation || revision !== chatRevision || !loopReady) {
               forgetPageContext(id);
               const message = state.chat.find((entry) => entry.id === id);
               if (message) {
                 message.loopStatus = 'interrupted';
+                if (message.agentHistory) {
+                  message.agentHistory.status = 'interrupted';
+                  message.agentHistory.endedAt = Date.now();
+                }
                 await persistChat();
               }
               throw new Error('ui.error.sendFailed');
