@@ -376,7 +376,7 @@ export function startRemoteBackground() {
 
   function cancelLoop(status: 'stopped' | 'interrupted', interrupt = false) {
     state.agentActivity = undefined;
-    chatRevision++; // Also invalidate a message still collecting its initial DOM excerpt.
+    chatRevision++; // Also invalidate a message still collecting its initial page overview.
     const taskId = loop.taskId;
     loop.cancel();
     if (taskId) {

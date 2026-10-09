@@ -32,7 +32,7 @@ function setup() {
   loop.start(
     'task-1',
     { role: 'user', content: [{ type: 'text', text: 'Search the current page' }] },
-    { type: 'current-page', status: 'excerpt', contextId: '11111111-1111-4111-8111-111111111111' },
+    { type: 'current-page', status: 'overview', contextId: '11111111-1111-4111-8111-111111111111' },
   );
   return { requests, io, loop };
 }
@@ -118,7 +118,7 @@ describe('extension-owned loop', () => {
       const { loop, requests, io } = setup();
       const page = {
         type: 'current-page' as const,
-        status: 'excerpt' as const,
+        status: 'overview' as const,
         contextId: 'other-tab',
         tabId: 8,
       };
@@ -186,7 +186,7 @@ describe('extension-owned loop', () => {
           },
         ],
       },
-      { type: 'current-page', status: 'excerpt', contextId: 'second', tabId: 9 },
+      { type: 'current-page', status: 'overview', contextId: 'second', tabId: 9 },
     );
     expect(requests).toHaveLength(1);
     expect(io.input).toHaveBeenCalledWith(
@@ -257,7 +257,7 @@ describe('extension-owned loop', () => {
     loop.start(
       'task-with-quote',
       { role: 'user', content: [{ type: 'text', text: 'Explain' }, quote] },
-      { type: 'current-page', status: 'excerpt', contextId: 'task-with-quote' },
+      { type: 'current-page', status: 'overview', contextId: 'task-with-quote' },
     );
     expect(requests[0]!.message).toMatchObject({
       content: [

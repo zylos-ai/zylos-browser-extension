@@ -64,7 +64,7 @@ export const toolHelp = {
     description:
       'Read loaded text and links from the page attached to a user message, without debugger attachment, scrolling, navigation or screenshots.',
     constraints: [
-      'Use the exact message contextId. This action runs alone in its batch. For more text, pass the returned nextOffset as offset and the same contentVersion. Stop when enough evidence is collected.',
+      'Use the exact message contextId. This action runs alone in its batch. Start at offset 0, or jump to a section with an outline @offset and the message contentVersion. For more text, pass the returned nextOffset as offset and the same contentVersion. Stop when enough evidence is collected.',
       'On PAGE_CONTENT_CHANGED restart at offset 0; do not combine chunks from different versions. nextOffset=null ends the extracted text. limited=true means coverage is incomplete; unexpanded, unloaded, closed-shadow and embedded frame contents may be absent. Never claim to have read the whole page when limited.',
       'A closed, reloaded or navigated message page cannot be retargeted. No executable refs are returned. For actual interaction or advanced observations use use-current-tab to enter browser control.',
     ],

@@ -1,8 +1,8 @@
 # Zylos Browser Privacy Policy
 
-Last updated: September 30, 2026.
+Last updated: October 9, 2026.
 
-This policy describes Zylos Browser, the Chrome extension maintained in the [zylos-ai/zylos-browser-extension project](https://github.com/zylos-ai/zylos-browser-extension). It reflects extension version 0.16.0 and Zylos Browser Remote 0.10.0.
+This policy describes Zylos Browser, the Chrome extension maintained in the [zylos-ai/zylos-browser-extension project](https://github.com/zylos-ai/zylos-browser-extension). It reflects extension version 0.17.0 and Zylos Browser Remote 0.10.0.
 
 ## How Zylos Browser works
 
@@ -14,7 +14,7 @@ Your Relay operator, Agent operator, and any AI model or tool providers used by 
 
 - **Connection settings and identifiers.** Your Relay URL, authentication Key, connection preferences, a randomly generated browser-installation identifier, and connection/task identifiers are used to authenticate and route requests. The installation identifier is not obtained from your Chrome account and is not your name or email address.
 - **Messages and files.** The messages you send, Agent replies, selected-text quotations, files you attach, and attachment metadata are used to carry out the conversation or task. Images may have small local previews.
-- **Current-page context.** Sending a message normally includes the active page's title, URL, a text excerpt, and relevant links. The automatic text extractor omits input and editable-field values. Restricted pages may be unavailable.
+- **Current-page context.** Sending a message normally includes the active page's title, URL, scroll position, the text, link addresses, button names and form-field labels currently visible in the window, and a list of the page's headings. The automatic extractor omits input and editable-field values. The Agent can request more of the page's text. Restricted pages may be unavailable.
 - **Browser-task observations.** For a requested task, the extension can read page text and accessibility/DOM information and capture screenshots. It can process navigation, element, viewport, and operation results so the Agent can decide the next step. Page observations can contain personal information that is visible on the page.
 - **Task activity.** The extension keeps a bounded local activity history, such as operation names, timing, status, and short target hints. When supported by your Remote, it also receives public Agent progress messages and limited tool activity from the task's Agent session. Accepted decision summaries are included in this history. Hidden model reasoning is not collected for this display. During a task it also observes network request identifiers and timing to determine whether a page has finished loading; this readiness tracker does not retain request headers or response bodies. This supports browser-task execution, rather than general browsing analytics or a recording of everything you type.
 

@@ -56,8 +56,10 @@ test('captures DOM text without CDP and pins reads/operations despite foreground
   expect(message.context).toMatchObject({
     contextId: id,
     tabId: 7,
-    text: 'Article body',
+    status: 'overview',
+    contentVersion: '12-abc',
   });
+  expect(message.context).not.toHaveProperty('text');
   vi.mocked(
     chrome.tabs.query as (query: chrome.tabs.QueryInfo) => Promise<chrome.tabs.Tab[]>,
   ).mockResolvedValue([{ ...tab, id: 99 }]);
@@ -87,9 +89,7 @@ test('validates displayed quotes without copying them into the page context', as
     truncated: false,
   };
   const captured = await captureCurrentPage(id, 2, 7, [selection]);
-  expect(captured.context).toMatchObject({
-    text: 'Article body',
-  });
+  expect(captured.context).toMatchObject({ contextId: id, status: 'overview' });
   expect(captured.context).not.toHaveProperty('selection');
   expect(chrome.scripting.executeScript).toHaveBeenCalledTimes(1);
   expect(chrome.debugger.attach).not.toHaveBeenCalled();
@@ -98,28 +98,6 @@ test('validates displayed quotes without copying them into the page context', as
   );
   documentId = 'new-document';
   await expect(captureCurrentPage(id, 2, 7, [selection])).rejects.toThrow('selectionChanged');
-});
-
-test('a large quote does not consume the page excerpt budget', async () => {
-  const selection: PageSelection = {
-    tabId: 7,
-    documentId,
-    url: tab.url!,
-    title: 'Article',
-    text: '"'.repeat(4000),
-    truncated: true,
-  };
-  vi.mocked(chrome.scripting.executeScript).mockImplementation(async () => [
-    {
-      documentId,
-      frameId: 0,
-      result: { ...page(), text: '"'.repeat(6000), nextOffset: 6000, truncated: true },
-    },
-  ]);
-  const captured = await captureCurrentPage(id, 2, 7, [selection]);
-  expect(JSON.stringify(captured.context).length).toBeLessThanOrEqual(16000);
-  expect(captured.context).not.toHaveProperty('selection');
-  expect(captured.context.text).toHaveLength(6000);
 });
 
 test('same-URL reload and closed tabs cannot be read through an old context', async () => {
@@ -256,3 +234,88 @@ test.each(['complete', 'stop'])(
     expect(vi.getTimerCount()).toBe(0);
   },
 );
+
+test('sends a viewport and heading outline instead of leading page text', async () => {
+  const viewport = {
+    text: '- heading "Shipping"\n- StaticText "Shipped on Oct 3"',
+    truncated: false,
+    limited: false,
+    width: 1280,
+    height: 800,
+    scrollX: 0,
+    scrollY: 2400,
+    contentHeight: 9000,
+    remainingBelow: 5800,
+  };
+  const outline = [
+    { level: 1, name: 'Order', offset: 0, position: 'above' },
+    { level: 2, name: 'Items', offset: 812, position: 'above' },
+    { level: 2, name: 'Shipping', offset: 2450, position: 'in-view' },
+    { level: 3, name: 'Untraceable', position: 'below' },
+  ];
+  vi.mocked(chrome.scripting.executeScript).mockImplementation(async () => [
+    { documentId, frameId: 0, result: { ...page(), textLength: 9000, viewport, outline } },
+  ]);
+  const { context } = await captureCurrentPage(id, 2, 7);
+  expect(chrome.scripting.executeScript).toHaveBeenCalledWith(
+    expect.objectContaining({ args: [{ limit: 1, overview: true }] }),
+  );
+  expect(context).toMatchObject({ contentVersion: '12-abc', textLength: 9000, viewport });
+  expect(context.outline!.text.split('\n')).toEqual([
+    '- h1 "Order" @0',
+    '- h2 "Items" @812 [current section]',
+    '- h2 "Shipping" @2450 [in view]',
+    '- h3 "Untraceable"',
+  ]);
+  for (const key of ['text', 'links', 'nextOffset']) expect(context).not.toHaveProperty(key);
+});
+
+test('budget drops deep outline headings, then the outline tail, before the viewport', async () => {
+  const line = (i: number) => `- StaticText "visible line ${i} ${'v'.repeat(70)}"`;
+  const viewport = {
+    text: Array.from({ length: 60 }, (_, i) => line(i)).join('\n'),
+    truncated: false,
+    limited: false,
+    width: 1280,
+    height: 800,
+    scrollX: 0,
+    scrollY: 0,
+    contentHeight: 800,
+    remainingBelow: 0,
+  };
+  const outline = Array.from({ length: 200 }, (_, i) => ({
+    level: (i % 3) + 1,
+    name: `Section ${i} ${'s'.repeat(80)}`,
+    offset: i * 100,
+    position: 'below',
+  }));
+  const capture = async (view: typeof viewport) => {
+    vi.mocked(chrome.scripting.executeScript).mockImplementation(async () => [
+      { documentId, frameId: 0, result: { ...page(), viewport: view, outline } },
+    ]);
+    return (await captureCurrentPage(id, 2, 7)).context;
+  };
+  const context = await capture(viewport);
+  expect(JSON.stringify(context).length).toBeLessThanOrEqual(16000);
+  expect(context.viewport).toEqual(viewport);
+  expect(context.outline!.truncated).toBe(true);
+  expect(context.outline!.text).not.toContain('- h3');
+  expect(context.outline!.text.split('\n').every((l) => l.endsWith('"') || /@\d+$/.test(l))).toBe(
+    true,
+  );
+
+  // A viewport larger than the whole budget is cut at a line boundary.
+  const huge = await capture({ ...viewport, text: [1, 2, 3].map(() => viewport.text).join('\n') });
+  expect(JSON.stringify(huge).length).toBeLessThanOrEqual(16000);
+  expect(huge.outline!.text).toBe('');
+  expect(huge.viewport!.truncated).toBe(true);
+  expect(huge.viewport!.text.split('\n').every((l) => l.endsWith('"'))).toBe(true);
+});
+
+test('Agent read-page requests cannot ask for a viewport digest', async () => {
+  await captureCurrentPage(id, 2, 7);
+  await readPageContext(id, { offset: 0, viewport: true } as never, () => {});
+  expect(chrome.scripting.executeScript).toHaveBeenLastCalledWith(
+    expect.objectContaining({ args: [{ offset: 0, limit: undefined, contentVersion: undefined }] }),
+  );
+});

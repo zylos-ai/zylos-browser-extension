@@ -59,19 +59,28 @@ export function agentMessage(id: string, message: UserMessage) {
 
 export type PageContext = {
   type: 'current-page';
-  status: 'excerpt' | 'unavailable';
+  status: 'overview' | 'unavailable';
   contextId?: string;
   tabId?: number;
   url?: string;
   title?: string;
   capturedAt?: string;
   reason?: string;
-  text?: string;
-  links?: { text: string; url: string }[];
   contentVersion?: string;
-  nextOffset?: number | null;
+  textLength?: number;
   limited?: boolean;
-  truncated?: boolean;
+  viewport?: {
+    text: string;
+    truncated: boolean;
+    limited: boolean;
+    width: number;
+    height: number;
+    scrollX: number;
+    scrollY: number;
+    contentHeight: number;
+    remainingBelow: number;
+  };
+  outline?: { text: string; truncated: boolean };
   scope?: string;
 };
 export type AgentRequest = {

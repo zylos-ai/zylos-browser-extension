@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.17.0] - 2026-10-09
+
+Pairs with Zylos Browser Remote 0.10.0; Remote needs no update.
+
+### Changed
+
+- The page context sent with a message is now an overview instead of the first
+  6000 characters of page text. It contains what the owner currently sees and a
+  heading outline of the whole page, so content scrolled into view is no longer
+  lost behind navigation and page headers.
+- The viewport digest lists visible text, headings, links, buttons and form
+  field labels as `- role "name"` lines, matching the snapshot format, with
+  scroll position and the remaining height below. It respects fixed headers and
+  scroll-container clipping, and skips controls covered by dialogs. Form values
+  are still omitted, and lines carry no action refs.
+- The outline lists page headings with their offsets in the page text and marks
+  the owner's current section. The Agent reads page text with read-page from
+  offset 0, or jumps to a heading offset with the context's contentVersion.
+- When the page context exceeds its size budget, deeper outline headings are
+  removed first, then the outline tail, and the viewport last. Text is trimmed
+  to fit at line boundaries instead of being halved.
+
+### Upgrade notes
+
+Questions about the visible part of a page can be answered from the first
+request. Questions about the whole page now take one read-page round. Pages
+without heading elements have an empty outline.
+
 ## [0.16.0] - 2026-09-30
 
 Pairs with Zylos Browser Remote 0.10.0.
