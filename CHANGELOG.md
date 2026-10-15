@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+- Preserve completed research-operation receipts when a later browser action loses
+  control, and include research operations in the diagnostic event stream.
+- Mark mid-task diagnostic capture as partial while retaining local task correlation;
+  distinguish consent-revision and queued-command cancellation checks.
+- Synchronize the authoritative plugin protocol and development documentation.
+
+- End active browser work consistently when control is revoked. Preserve bounded
+  completed, uncertain and not-executed action receipts in the interrupted
+  terminal response instead of discarding prior successes or requesting another
+  decision that could implicitly reattach. New user input is required to begin
+  another task; actions are never replayed by this recovery path.
+
+- Add an owner-controlled diagnostic sharing switch, disabled by default. The
+  connected agent can retrieve task, operation, control, transport and runtime
+  metadata with local task/operation correlation through `diagnostics-v2`.
+- Keep at most 1,000 events, 256 KiB and 30 minutes in session storage. Return
+  the actual manifest version, filtered snapshot pages, capture epoch, restart,
+  overflow and storage-health information without claiming complete raw logs.
+- Observe background and sidepanel errors, rejections and console severity
+  without collecting console arguments, exception messages/stacks or page data.
+- Serialize consent and recipient changes, clear on disable, reject stale
+  queued events and revoke sharing before saving a different relay or key.
+
 ## [0.17.0] - 2026-10-09
 
 Pairs with Zylos Browser Remote 0.10.0; Remote needs no update.

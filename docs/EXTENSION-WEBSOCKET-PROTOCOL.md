@@ -325,6 +325,39 @@ Remote 通过同一 WebSocket 下发：
 
 agent-event 记录真实执行步骤，工具参数和结果有体积限制，不发送截图 Base64。
 agent-turn-end 的 status 为 done、blocked、interrupted 或 stopped。
+
+控制权丢失时，`status:"interrupted"` 可附加 `interruption`：
+`{reason:"CONTROL_LOST",results:[{method:"fill",outcome:"completed"}],observation:"unavailable",resume:"new-user-message-required"}`。
+`results` 最多十项，仅包含插件允许的方法名和 `completed`、`uncertain`、`not-executed`。
+包含当前批次已完成的研究台账操作。`completed` 只表示调用成功返回，不代表后续观察验证了网页；
+`uncertain` 表示已发起但不能确认结果；`not-executed` 表示未发起。
+此终止回执不包含参数、页面内容或异常原文，也不产生下一轮决策。Remote 只校验结构、大小和关联，
+不维护浏览器动作注册表，不解释或重放动作。旧版 Remote 可以忽略附加字段；任务仍然终止。
+
+### 可选诊断协议 `diagnostics-v2`
+
+插件在 hello 中声明此能力。诊断默认关闭，只能由可信侧栏开启；Remote 和 Agent 没有开启接口。
+认证连接可发送 `req`，`method:"diagnostics.get"`，无需页面控制权。
+`params` 是严格对象：`after?`、`through?` 为非负安全整数，`limit?` 为 1–200（默认 100），
+`epoch?` 为 UUID；可按 `level?`（debug/info/warn/error）、`source?`（background/sidepanel/executor）
+和 `task?`（插件本地生成的整数）过滤。未知字段或越界游标返回 `BAD_PARAMS`；旧 epoch 返回 `DIAGNOSTICS_RESET`。
+
+成功响应包含 `schemaVersion:2, enabled, version, epoch, events, nextCursor, highWater, dropped,
+hasMore, oldestCursor, truncated, storageHealthy, restartCount, partialCapture`。
+`version` 来自实际 manifest。分页固定首次响应的 `epoch/highWater`，后续使用 `through:highWater`；
+过滤也推进扫描游标。关闭时返回空事件。`partialCapture` 表示在已有任务或操作中途开启，不能声称包含完整任务；
+分页读尽只表示当前快照已导出，不代表整个任务、所有控制台或全部历史都被采集。
+
+事件有 `seq,at,event,source,level`，以及可选的本地 `task/op`、受限 `method/reason/code/errorKind`、
+`status/argCount/closeCode/count`。插件的 `utils/diagnostics-schema.ts` 是语义及隐私白名单的唯一来源；
+Remote 仅实施字段投影、类型和长度上限。研究台账也产生操作开始、结果或错误事件。
+控制校验以 `consent_changed`、`queue_cancelled`、`control_changed`、`operation_changed`、`grant_changed` 等区分。
+不采集任意 console 参数、异常原文/堆栈、网页文字、URL、输入值、凭证或报文正文。
+
+缓冲区最多 1,000 条、256 KiB，保留 30 分钟，使用 session storage；worker 重启保留 epoch 并累计 restartCount。
+关闭或变更接收方先清除事件并更新 epoch/侧栏同意令牌；整个设置事务串行执行。
+中途开启为当前任务分配新本地关联号并设置 partialCapture；旧 epoch 的迟到操作结果不能进入新记录。
+丢弃、过期、侧栏队列溢出由 dropped 等元数据体现；持久化损坏或失败使 storageHealthy 为 false。
 断线、停止和插件重载不会自动重放尚未确认的动作。
 
 Remote 在 `ready.capabilities` 中声明 `agent-interrupt-v1` 后，用户点击输入框或预览中的

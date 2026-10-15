@@ -12,6 +12,7 @@ const context = vi.hoisted(() => ({ readPageContext: vi.fn(), usePageContext: vi
 vi.mock('../../utils/page-context', () => context);
 
 import { IdempotencyCache, BrowserActionError, dispatch } from '../../utils/browser-actions';
+import * as diagnostics from '../../utils/diagnostics';
 
 const call = (
   method: string,
@@ -228,6 +229,7 @@ describe('browser actions v2', () => {
     expect(executor.execute).toHaveBeenCalledTimes(2);
   });
   it('dialog handling bypasses an action, and cancellation invalidates queued actions', async () => {
+    const diagnostic = vi.spyOn(diagnostics, 'recordDiagnostic');
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -247,5 +249,9 @@ describe('browser actions v2', () => {
     await active;
     await rejected;
     expect(executor.execute).toHaveBeenCalledTimes(2);
+    expect(diagnostic).toHaveBeenCalledWith('stopped', 'queue_cancelled', {
+      source: 'executor',
+      level: 'warn',
+    });
   });
 });

@@ -1,6 +1,9 @@
 import type zh from './zh-CN';
 
 export default {
+  diagnostics: 'Share diagnostic events',
+  diagnosticsHint:
+    'Allow the connected agent to read task, control, connection, error-type and console-severity events from the last 30 minutes (up to 1,000). No page content, URLs, input, keys, error text or console arguments. Off by default. Turning off clears stored events.',
   settings: 'Settings',
   back: 'Back',
   loading: 'Loading…',

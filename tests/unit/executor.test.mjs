@@ -85,6 +85,20 @@ async function setup() {
     executor.createTask({ sourceTabId: 1, windowId: 1, url: tab.url, taskId: crypto.randomUUID() });
   return { executor, attached, entered, proceed, tab, start };
 }
+test('control loss revision excludes ordinary cleanup but records external debugger cancellation', async () => {
+  const s = await observationSetup();
+  s.executor.initializeExecutor();
+  const initial = s.executor.controlLossRevision();
+  await s.executor.completeTask();
+  assert.equal(s.executor.controlLossRevision(), initial);
+  const fresh = await observationSetup();
+  fresh.executor.initializeExecutor();
+  const before = fresh.executor.controlLossRevision();
+  chrome.debugger.onDetach.emit({ tabId: fresh.tab.id }, 'canceled_by_user');
+  assert.equal(fresh.executor.controlLossRevision(), before + 1);
+  assert.equal(fresh.executor.currentControl(), null);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+});
 test('finish detaches, stays parked on tab events, resumes on a tool, and stop still revokes', async () => {
   const s = await observationSetup();
   s.executor.initializeExecutor();
@@ -190,6 +204,31 @@ test('stop during debugger attachment cannot resurrect window consent', async ()
   await assert.rejects(
     s.executor.execute({ op: 'open', url: 'https://example.com/' }, Date.now() + 1000),
     (error) => error.code === 'CONTROL_NOT_GRANTED',
+  );
+});
+
+test('consent revocation during task creation has a precise diagnostic reason', async () => {
+  const s = await setup();
+  const diagnostics = await import('../../utils/diagnostics');
+  const recorded = vi.spyOn(diagnostics, 'recordDiagnostic');
+  const entered = deferred(),
+    proceed = deferred();
+  const get = chrome.tabs.get;
+  chrome.tabs.get = async (id) => {
+    entered.resolve();
+    await proceed.promise;
+    return get(id);
+  };
+  const starting = s.start();
+  const rejected = assert.rejects(starting, (error) => error.code === 'STOPPED');
+  await entered.promise;
+  await s.executor.release();
+  proceed.resolve();
+  await rejected;
+  assert.ok(
+    recorded.mock.calls.some(
+      ([event, reason]) => event === 'stopped' && reason === 'consent_changed',
+    ),
   );
 });
 

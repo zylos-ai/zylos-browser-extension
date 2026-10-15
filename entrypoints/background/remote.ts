@@ -1,4 +1,25 @@
 import { LANGUAGE_STORAGE_KEY, setWorkerLanguage, panelErrorMessage } from '../../utils/i18n';
+import {
+  DIAGNOSTICS_CAPABILITY,
+  diagnosticsEnabled,
+  diagnosticsConsent,
+  diagnosticsEpoch,
+  acceptPanelDiagnostic,
+  recordLifecycle,
+  startDiagnosticTask,
+  endDiagnosticTask,
+  startDiagnosticOperation,
+  endDiagnosticOperation,
+  diagnosticRequest,
+  diagnosticStorage,
+  expireDiagnostics,
+  getDiagnostics,
+  initializeDiagnostics,
+  recordDiagnostic,
+  setDiagnosticsEnabled,
+} from '../../utils/diagnostics';
+import { installRuntimeDiagnostics } from '../../utils/diagnostics-runtime';
+import { safeError } from '../../utils/diagnostics-schema';
 // Extension-owned conversations: request Agent decisions, execute locally, and
 // return observations over the authenticated Remote connection.
 import { captureCurrentPage, clearPageContexts, forgetPageContext } from '../../utils/page-context';
@@ -67,6 +88,9 @@ const KEEPALIVE_ALARM = 'remote-keepalive';
 const HANDSHAKE_TIMEOUT_MS = 10000;
 
 export function startRemoteBackground() {
+  installRuntimeDiagnostics(({ event, ...metadata }) =>
+    recordLifecycle(event, { ...metadata, source: 'background' }),
+  );
   initializeExecutor();
   const preview = new LivePreview();
   const state: RemoteState = { ...initialRemoteState, chat: [] };
@@ -81,6 +105,7 @@ export function startRemoteBackground() {
   let attachmentsReady = false;
   let interruptReady = false;
   let sendingChat = false;
+  let panelMutations: Promise<unknown> = Promise.resolve();
   let stopTaskPromise: Promise<void> | undefined;
   let pendingStop: { taskId: string; resolve: (ok: boolean) => void } | undefined;
   let chatRevision = 0;
@@ -91,6 +116,8 @@ export function startRemoteBackground() {
     void chrome.runtime.sendMessage({ type: 'remote-updated', state: snapshot() }).catch(() => {});
   };
   function snapshot(): RemoteState {
+    state.diagnosticsEnabled = diagnosticsEnabled();
+    state.diagnosticsConsent = diagnosticsConsent();
     if (!loop?.active || state.agentActivity?.taskId !== loop.taskId)
       state.agentActivity = undefined;
     state.loopActive = loop?.active ?? false;
@@ -145,7 +172,9 @@ export function startRemoteBackground() {
       .then(() => {
         pruneImagePreviews(state.chat);
         pruneAgentHistory(state.chat);
-        return chrome.storage.local.set({ [REMOTE_CHAT_LOG_KEY]: structuredClone(state.chat) });
+        return diagnosticStorage('write', () =>
+          chrome.storage.local.set({ [REMOTE_CHAT_LOG_KEY]: structuredClone(state.chat) }),
+        );
       });
     saveQueue = saving;
     return saving;
@@ -283,15 +312,17 @@ export function startRemoteBackground() {
     },
     cancel: () => idem.cancel(),
     error: () => {
+      endDiagnosticTask('interrupted', true);
       state.error = 'ui.error.chatSaveFailed';
       if (loop.taskId) send({ type: 'agent-turn-end', taskId: loop.taskId, status: 'interrupted' });
       setTimeout(publish, 0);
     },
-    execute: (actions, assertActive, requestId, hasUpdates) =>
+    execute: (actions, assertActive, requestId, hasUpdates, expectedControl) =>
       runBrowserRound(
         actions,
         async (method, params, id) => {
           assertActive();
+          const diagnosticOperation = startDiagnosticOperation(method);
           const taskId = loop.taskId;
           const step = activity.begin(method, params);
           step?.start();
@@ -307,6 +338,7 @@ export function startRemoteBackground() {
               },
             );
             assertActive();
+            endDiagnosticOperation(diagnosticOperation);
             step?.finish();
             preview.result(method, false, activity.hasUnresolvedErrors());
             // Diagnostics carry bounded metadata, never screenshot Base64/page bodies.
@@ -323,6 +355,7 @@ export function startRemoteBackground() {
             });
             return result;
           } catch (error) {
+            endDiagnosticOperation(diagnosticOperation, error, true);
             const e = error as { code?: string; message?: string };
             step?.finish(e.code || 'EXT_ERROR');
             send({
@@ -341,8 +374,9 @@ export function startRemoteBackground() {
         assertActive,
         requestId,
         hasUpdates,
+        expectedControl,
       ),
-    finish: async (text, status, taskId, notice) => {
+    finish: async (text, status, taskId, notice, interruption) => {
       state.agentActivity = undefined;
       idem.cancel();
       preview.finish(status === 'done' ? 'completed' : 'error');
@@ -368,7 +402,14 @@ export function startRemoteBackground() {
         final: true,
         ts: Date.now(),
       });
-      send({ type: 'agent-turn-end', taskId, status, text });
+      send({
+        type: 'agent-turn-end',
+        taskId,
+        status,
+        text,
+        ...(interruption ? { interruption } : {}),
+      });
+      endDiagnosticTask(status);
       // BrowserLoop releases ownership after this durable completion callback.
       setTimeout(publish, 0);
     },
@@ -378,6 +419,7 @@ export function startRemoteBackground() {
     state.agentActivity = undefined;
     chatRevision++; // Also invalidate a message still collecting its initial page overview.
     const taskId = loop.taskId;
+    if (taskId) endDiagnosticTask(status, true);
     loop.cancel();
     if (taskId) {
       const message = state.chat.find((entry) => entry.role === 'user' && entry.id === taskId);
@@ -416,7 +458,7 @@ export function startRemoteBackground() {
           // Revoke browser control immediately, independently of the runtime key
           // receipt and storage. Hold the send lock until both operations settle.
           const [cleanup, remote] = await Promise.allSettled([
-            release(),
+            release(true, false, 'panel_stop'),
             confirmation ?? Promise.resolve(false),
           ]);
           if (taskId && (remote.status !== 'fulfilled' || !remote.value))
@@ -447,6 +489,7 @@ export function startRemoteBackground() {
   }
 
   function disconnect(reason: string) {
+    if (socket) recordDiagnostic('socket-close', 'remote_disconnect', { closeCode: 1000 });
     if (loop.active) {
       cancelLoop('interrupted');
       void completeTask().catch(() => {});
@@ -476,6 +519,7 @@ export function startRemoteBackground() {
     if (!config.enabled || !state.configured) return;
     if (socket && socket.readyState <= WebSocket.OPEN) return;
     const gen = ++generation;
+    recordLifecycle('transport-connect');
     state.connecting = true;
     state.error = '';
     publish();
@@ -486,6 +530,11 @@ export function startRemoteBackground() {
         `${REMOTE_KEY_PROTO_PREFIX}${config.key}`,
       ]);
     } catch (e) {
+      recordLifecycle('transport-error', {
+        level: 'error',
+        ...safeError(e),
+        code: 'INVALID_RELAY',
+      });
       state.connecting = false;
       state.error = 'ui.error.invalidRelayUrl';
       publish();
@@ -494,6 +543,7 @@ export function startRemoteBackground() {
     socket = ws;
     ws.onopen = () => {
       if (gen !== generation) return;
+      recordLifecycle('transport-open');
       backoff = BACKOFF_MIN_MS;
       state.connected = false;
       state.connecting = true;
@@ -503,6 +553,7 @@ export function startRemoteBackground() {
         version: REMOTE_VERSION,
         capabilities: [
           ...REMOTE_CAPABILITIES,
+          DIAGNOSTICS_CAPABILITY,
           INSTANCE_CAPABILITY,
           AGENT_MESSAGE_CAPABILITY,
           AGENT_ACTIVITY_CAPABILITY,
@@ -513,6 +564,7 @@ export function startRemoteBackground() {
       });
       handshakeTimer = setTimeout(() => {
         if (gen !== generation || loopReady) return;
+        recordLifecycle('transport-error', { level: 'error', code: 'PROTOCOL_MISMATCH' });
         state.error = 'ui.error.protocolMismatch';
         ws.close(4002, 'agent-loop-v1 required');
       }, HANDSHAKE_TIMEOUT_MS);
@@ -520,6 +572,9 @@ export function startRemoteBackground() {
     };
     ws.onclose = (ev) => {
       if (gen !== generation) return;
+      recordDiagnostic('socket-close', 'remote_disconnect', {
+        closeCode: ev.code >= 1000 && ev.code <= 4999 ? ev.code : undefined,
+      });
       if (loop.active) {
         cancelLoop('interrupted');
         void completeTask().catch(() => {});
@@ -544,6 +599,7 @@ export function startRemoteBackground() {
     };
     ws.onerror = () => {
       if (gen !== generation) return;
+      recordLifecycle('transport-error', { level: 'error', code: 'SOCKET_ERROR' });
       state.error = state.error || 'ui.error.connectionFailed';
       publish();
     };
@@ -558,10 +614,14 @@ export function startRemoteBackground() {
     try {
       parsed = JSON.parse(raw);
     } catch {
+      recordLifecycle('transport-error', { level: 'warn', code: 'BAD_PARAMS' });
       return;
     }
     const frame = relayFrameSchema.safeParse(parsed);
-    if (!frame.success) return;
+    if (!frame.success) {
+      recordLifecycle('transport-error', { level: 'warn', code: 'BAD_PARAMS' });
+      return;
+    }
     const m = frame.data;
     switch (m.type) {
       case 'ready':
@@ -573,10 +633,12 @@ export function startRemoteBackground() {
           m.endpointId !== `${state.keyId}.${state.browserId}`
         ) {
           state.error = 'ui.error.protocolMismatch';
+          recordLifecycle('transport-error', { level: 'error', code: 'PROTOCOL_MISMATCH' });
           socket?.close(4002, 'agent-message-v2 and matching browser endpoint required');
           return;
         }
         state.endpointId = m.endpointId;
+        recordLifecycle('transport-ready');
         attachmentsReady = m.capabilities.includes(ATTACHMENT_CAPABILITY);
         state.steeringSupported = m.capabilities.includes(STEER_CAPABILITY);
         interruptReady = m.capabilities.includes(INTERRUPT_CAPABILITY);
@@ -648,9 +710,35 @@ export function startRemoteBackground() {
     },
     gen: number,
   ) {
+    const diagnostic = diagnosticRequest(m.method);
     const reply = (frame: Record<string, unknown>) => {
+      const { captureEpoch, ...metadata } = diagnostic;
+      if (captureEpoch === diagnosticsEpoch())
+        recordLifecycle('response', {
+          ...metadata,
+          status: frame.type === 'error' ? 'error' : 'success',
+          level: frame.type === 'error' ? 'warn' : 'debug',
+          ...(frame.type === 'error' ? safeError({ code: frame.code }) : {}),
+        });
       if (gen === generation) send({ id: m.id, ...frame });
     };
+    if (m.method === 'diagnostics.get') {
+      try {
+        reply({ type: 'resp', result: await getDiagnostics(m.params) });
+      } catch (error) {
+        reply({
+          type: 'error',
+          code:
+            error instanceof z.ZodError
+              ? 'BAD_PARAMS'
+              : safeError(error).code === 'DIAGNOSTICS_RESET'
+                ? 'DIAGNOSTICS_RESET'
+                : 'DIAGNOSTICS_UNAVAILABLE',
+          message: 'Diagnostics request failed',
+        });
+      }
+      return;
+    }
     if (m.method === 'agent-decision') {
       try {
         const { id, decision, inputId } = z
@@ -681,6 +769,8 @@ export function startRemoteBackground() {
 
   // ---------------------------------------------------------------- config
   async function applyConfig(next: RemoteConfig) {
+    if (config.key && (next.key !== config.key || next.relayUrl !== config.relayUrl))
+      await setDiagnosticsEnabled(false);
     const changed =
       next.relayUrl !== config.relayUrl ||
       next.key !== config.key ||
@@ -695,7 +785,7 @@ export function startRemoteBackground() {
     if (!config.enabled) {
       // Kill switch: the owner flipped it, so end any task too.
       idem.cancel();
-      await release().catch(() => {});
+      await release(true, false, 'config_disabled').catch(() => {});
       state.error = '';
       publish();
       return;
@@ -710,14 +800,17 @@ export function startRemoteBackground() {
 
   // ---------------------------------------------------------------- boot
   const boot = (async () => {
+    await initializeDiagnostics().catch(() => setDiagnosticsEnabled(false).catch(() => {}));
     await chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }).catch(() => {});
     await recoverTasks();
-    const saved = await chrome.storage.local.get([
-      REMOTE_CONFIG_KEY,
-      REMOTE_BROWSER_ID_KEY,
-      REMOTE_CHAT_LOG_KEY,
-      LANGUAGE_STORAGE_KEY,
-    ]);
+    const saved = await diagnosticStorage('read', () =>
+      chrome.storage.local.get([
+        REMOTE_CONFIG_KEY,
+        REMOTE_BROWSER_ID_KEY,
+        REMOTE_CHAT_LOG_KEY,
+        LANGUAGE_STORAGE_KEY,
+      ]),
+    );
     const storedBrowserId = saved[REMOTE_BROWSER_ID_KEY];
     state.browserId =
       typeof storedBrowserId === 'string' && BROWSER_ID_RE.test(storedBrowserId)
@@ -725,7 +818,9 @@ export function startRemoteBackground() {
         : crypto.randomUUID();
     // Persist before dialing: failure must not create a new identity every reconnect.
     if (state.browserId !== storedBrowserId)
-      await chrome.storage.local.set({ [REMOTE_BROWSER_ID_KEY]: state.browserId });
+      await diagnosticStorage('write', () =>
+        chrome.storage.local.set({ [REMOTE_BROWSER_ID_KEY]: state.browserId }),
+      );
     setWorkerLanguage(saved[LANGUAGE_STORAGE_KEY]);
     const cfg = remoteConfigSchema.safeParse(saved[REMOTE_CONFIG_KEY] ?? {});
     const log = z.array(chatEntrySchema).safeParse(saved[REMOTE_CHAT_LOG_KEY] ?? []);
@@ -746,6 +841,7 @@ export function startRemoteBackground() {
     publish();
   })();
   void boot.catch((e) => {
+    recordLifecycle('runtime-error', { level: 'error', ...safeError(e) });
     state.error = `ui.error.initializationFailed\n${panelErrorMessage(e)}`;
     publish();
   });
@@ -757,6 +853,7 @@ export function startRemoteBackground() {
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name !== KEEPALIVE_ALARM) return;
     void boot.then(() => {
+      expireDiagnostics();
       if (
         !socket &&
         config.enabled &&
@@ -773,10 +870,16 @@ export function startRemoteBackground() {
     if (!isPanelSender(sender)) return false;
     const parsed = remoteRequestSchema.safeParse(raw);
     if (!parsed.success) return false;
-    void (async () => {
+    const run = async () => {
       await boot;
       const m = parsed.data;
       switch (m.type) {
+        case 'remote-diagnostics-event':
+          return { accepted: acceptPanelDiagnostic(m.consent, m.event) };
+        case 'remote-diagnostics-set-enabled':
+          await setDiagnosticsEnabled(m.enabled);
+          publish();
+          return snapshot();
         case 'remote-state':
           return snapshot();
         case 'remote-save': {
@@ -786,13 +889,21 @@ export function startRemoteBackground() {
             enabled: config.enabled,
           });
           if (!next.relayUrl || !next.key) throw new Error('ui.error.credentialsRequired');
-          await chrome.storage.local.set({ [REMOTE_CONFIG_KEY]: next });
+          // Revoke sharing before persisting a different recipient. A worker
+          // suspension between these writes must never expose the old records.
+          if (next.key !== config.key || next.relayUrl !== config.relayUrl)
+            await setDiagnosticsEnabled(false);
+          await diagnosticStorage('write', () =>
+            chrome.storage.local.set({ [REMOTE_CONFIG_KEY]: next }),
+          );
           await applyConfig(next);
           return snapshot();
         }
         case 'remote-set-enabled': {
           const next = { ...config, enabled: m.enabled };
-          await chrome.storage.local.set({ [REMOTE_CONFIG_KEY]: next });
+          await diagnosticStorage('write', () =>
+            chrome.storage.local.set({ [REMOTE_CONFIG_KEY]: next }),
+          );
           await applyConfig(next);
           return snapshot();
         }
@@ -889,7 +1000,13 @@ export function startRemoteBackground() {
               }
               throw new Error('ui.error.sendFailed');
             }
-            loop.start(id, m.message, context);
+            startDiagnosticTask();
+            try {
+              loop.start(id, m.message, context);
+            } catch (error) {
+              endDiagnosticTask('interrupted', true);
+              throw error;
+            }
             return snapshot();
           } finally {
             sendingChat = false;
@@ -916,7 +1033,17 @@ export function startRemoteBackground() {
           await stopCurrentTask();
           return snapshot();
       }
-    })().then(
+    };
+    // A second panel must not re-enable sharing between recipient revocation
+    // and the durable connection update. Serialize these whole transactions.
+    const mutatesConsent = [
+      'remote-save',
+      'remote-set-enabled',
+      'remote-diagnostics-set-enabled',
+    ].includes(parsed.data.type);
+    const pending = mutatesConsent ? panelMutations.catch(() => {}).then(run) : run();
+    if (mutatesConsent) panelMutations = pending;
+    void pending.then(
       (value) => reply({ ok: true, value }),
       (e) => {
         const message =

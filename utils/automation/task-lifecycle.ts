@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { translate, workerLocale } from '../i18n';
+import { diagnosticStorage } from '../diagnostics';
 
 const recordSchema = z.object({
   taskId: z.string().uuid(),
@@ -30,13 +31,17 @@ function refreshWarning() {
 async function load() {
   if (!loaded)
     loaded = (async () => {
-      const session = await chrome.storage.session.get('taskBrowserNonce');
+      const session = await diagnosticStorage('read', () =>
+        chrome.storage.session.get('taskBrowserNonce'),
+      );
       browser =
         typeof session.taskBrowserNonce === 'string'
           ? session.taskBrowserNonce
           : crypto.randomUUID();
-      await chrome.storage.session.set({ taskBrowserNonce: browser });
-      const stored = await chrome.storage.local.get(key);
+      await diagnosticStorage('write', () =>
+        chrome.storage.session.set({ taskBrowserNonce: browser }),
+      );
+      const stored = await diagnosticStorage('read', () => chrome.storage.local.get(key));
       const parsed = z
         .array(recordSchema)
         .max(100)
@@ -48,7 +53,9 @@ async function load() {
   await loaded;
 }
 async function save() {
-  await chrome.storage.local.set({ [key]: [...records.values()] });
+  await diagnosticStorage('write', () =>
+    chrome.storage.local.set({ [key]: [...records.values()] }),
+  );
   refreshWarning();
 }
 export async function recordTask(

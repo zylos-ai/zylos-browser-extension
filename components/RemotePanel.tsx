@@ -288,6 +288,12 @@ export function RemotePanel() {
             return ok;
           }}
           onToggle={() => void action({ type: 'remote-set-enabled', enabled: !state.enabled })}
+          onDiagnosticsToggle={() =>
+            void action({
+              type: 'remote-diagnostics-set-enabled',
+              enabled: !state.diagnosticsEnabled,
+            })
+          }
         />
       ) : (
         <main className="chat-panel">

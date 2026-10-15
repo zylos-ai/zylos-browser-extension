@@ -6,6 +6,8 @@ import progressInstructions from '../agent/progress-guide.md?raw';
 import { ResearchLedger } from './research-ledger';
 import { workerLocale } from './i18n';
 import { formatTaskNotice, type TaskNotice } from './task-notice';
+import { ControlLoss, type ControlInterruption } from './control-loss';
+import { startDiagnosticOperation, endDiagnosticOperation } from './diagnostics';
 import {
   agentMessage,
   AGENT_MESSAGE_VERSION,
@@ -147,6 +149,7 @@ export type LoopIO = {
     assertActive: () => void,
     requestId: string,
     hasUpdates: () => boolean,
+    expectedControl: boolean,
   ): Promise<RoundResult>;
   updates?(ids: string[], status: 'sent' | 'applied' | 'interrupted'): void;
   finish(
@@ -154,6 +157,7 @@ export type LoopIO = {
     status: 'done' | 'blocked' | 'interrupted',
     taskId: string,
     notice?: TaskNotice,
+    interruption?: ControlInterruption,
   ): Promise<void>;
   cancel(): void;
   error?(error: unknown): void;
@@ -272,8 +276,18 @@ export class BrowserLoop {
     turn.pending = undefined; // Claim synchronously, before any browser work.
     this.receipts.set(requestId, signature);
     while (this.receipts.size > 100) this.receipts.delete(this.receipts.keys().next().value!);
-    void this.advance(turn, decision, requestId, superseded).catch(() => {
-      if (this.turn === turn) void this.endNotice(turn, { kind: 'interrupted' }, 'interrupted');
+    void this.advance(turn, decision, requestId, superseded).catch((error) => {
+      if (this.turn === turn) {
+        if (error instanceof ControlLoss)
+          void this.end(
+            turn,
+            formatTaskNotice(workerLocale(), { kind: 'interrupted' }),
+            'interrupted',
+            { kind: 'interrupted' },
+            error.interruption,
+          );
+        else void this.endNotice(turn, { kind: 'interrupted' }, 'interrupted');
+      }
     });
     return { accepted: true, replayed: false };
   }
@@ -373,15 +387,20 @@ export class BrowserLoop {
     let browserActions = decision.actions;
     const first = decision.actions[0]!;
     if (first.method === 'record-findings' || first.method === 'read-findings') {
+      const operation = startDiagnosticOperation(first.method);
+      let completed = false;
       try {
         const data =
           first.method === 'record-findings'
             ? turn.research.record(first.params)
             : turn.research.read(first.params);
         notes.push({ method: first.method, status: 'success', result: data });
+        completed = true;
+        endDiagnosticOperation(operation);
         this.io.record?.(first.method, data);
         browserActions = decision.actions.slice(1);
       } catch (error) {
+        if (!completed) endDiagnosticOperation(operation, error, true);
         this.request(turn, {
           mode: turn.mode,
           failed: false,
@@ -397,14 +416,25 @@ export class BrowserLoop {
         return;
       }
     }
-    const result = browserActions.length
-      ? await this.io.execute(
-          browserActions,
-          assertActive,
-          requestId,
-          () => turn.inputId !== acceptedInputId,
-        )
-      : { mode: turn.mode, failed: false, observation: reuseObservation(turn.last), results: [] };
+    let result: RoundResult;
+    try {
+      result = browserActions.length
+        ? await this.io.execute(
+            browserActions,
+            assertActive,
+            requestId,
+            () => turn.inputId !== acceptedInputId,
+            turn.mode === 'operating',
+          )
+        : { mode: turn.mode, failed: false, observation: reuseObservation(turn.last), results: [] };
+    } catch (error) {
+      if (error instanceof ControlLoss && notes.length)
+        throw new ControlLoss({
+          ...error.interruption,
+          results: [{ method: first.method, outcome: 'completed' }, ...error.interruption.results],
+        });
+      throw error;
+    }
     result.results = [...notes, ...result.results];
     if (this.turn !== turn) return;
     turn.mode = result.mode;
@@ -419,6 +449,7 @@ export class BrowserLoop {
     text: string,
     status: 'done' | 'blocked' | 'interrupted',
     notice?: TaskNotice,
+    interruption?: ControlInterruption,
   ) {
     if (this.turn !== turn || turn.ending) return Promise.resolve();
     turn.ending = true;
@@ -428,7 +459,8 @@ export class BrowserLoop {
       if (status === 'interrupted' && turn.inputId !== turn.id)
         this.io.updates?.([turn.inputId], 'interrupted');
       try {
-        if (notice) await this.io.finish(text, status, turn.id, notice);
+        if (interruption) await this.io.finish(text, status, turn.id, notice, interruption);
+        else if (notice) await this.io.finish(text, status, turn.id, notice);
         else await this.io.finish(text, status, turn.id);
       } catch (error) {
         if (this.turn === turn) this.io.error?.(error);
