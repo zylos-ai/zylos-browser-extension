@@ -317,7 +317,7 @@ export function startRemoteBackground() {
       if (loop.taskId) send({ type: 'agent-turn-end', taskId: loop.taskId, status: 'interrupted' });
       setTimeout(publish, 0);
     },
-    execute: (actions, assertActive, requestId, hasUpdates) =>
+    execute: (actions, assertActive, requestId, hasUpdates, expectedControl) =>
       runBrowserRound(
         actions,
         async (method, params, id) => {
@@ -374,8 +374,9 @@ export function startRemoteBackground() {
         assertActive,
         requestId,
         hasUpdates,
+        expectedControl,
       ),
-    finish: async (text, status, taskId, notice) => {
+    finish: async (text, status, taskId, notice, interruption) => {
       state.agentActivity = undefined;
       idem.cancel();
       preview.finish(status === 'done' ? 'completed' : 'error');
@@ -401,7 +402,13 @@ export function startRemoteBackground() {
         final: true,
         ts: Date.now(),
       });
-      send({ type: 'agent-turn-end', taskId, status, text });
+      send({
+        type: 'agent-turn-end',
+        taskId,
+        status,
+        text,
+        ...(interruption ? { interruption } : {}),
+      });
       endDiagnosticTask(status);
       // BrowserLoop releases ownership after this durable completion callback.
       setTimeout(publish, 0);

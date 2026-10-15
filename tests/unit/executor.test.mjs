@@ -85,6 +85,20 @@ async function setup() {
     executor.createTask({ sourceTabId: 1, windowId: 1, url: tab.url, taskId: crypto.randomUUID() });
   return { executor, attached, entered, proceed, tab, start };
 }
+test('control loss revision excludes ordinary cleanup but records external debugger cancellation', async () => {
+  const s = await observationSetup();
+  s.executor.initializeExecutor();
+  const initial = s.executor.controlLossRevision();
+  await s.executor.completeTask();
+  assert.equal(s.executor.controlLossRevision(), initial);
+  const fresh = await observationSetup();
+  fresh.executor.initializeExecutor();
+  const before = fresh.executor.controlLossRevision();
+  chrome.debugger.onDetach.emit({ tabId: fresh.tab.id }, 'canceled_by_user');
+  assert.equal(fresh.executor.controlLossRevision(), before + 1);
+  assert.equal(fresh.executor.currentControl(), null);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+});
 test('finish detaches, stays parked on tab events, resumes on a tool, and stop still revokes', async () => {
   const s = await observationSetup();
   s.executor.initializeExecutor();

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- End active browser work consistently when control is revoked. Preserve bounded
+  completed, uncertain and not-executed action receipts in the interrupted
+  terminal response instead of discarding prior successes or requesting another
+  decision that could implicitly reattach. New user input is required to begin
+  another task; actions are never replayed by this recovery path.
+
 - Add an owner-controlled diagnostic sharing switch, disabled by default. The
   connected agent can retrieve task, operation, control, transport and runtime
   metadata with local task/operation correlation through `diagnostics-v2`.

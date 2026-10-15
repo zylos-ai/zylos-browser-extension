@@ -1,11 +1,13 @@
 import {
   browserPageVersion,
   currentControl,
+  controlLossRevision,
   currentGrant,
   flushTaskPopups,
   taskPopupOpener,
 } from './automation/executor';
 import type { LoopAction, RoundResult } from './browser-loop';
+import { ControlLoss, type ControlInterruption } from './control-loss';
 
 type Call = (
   method: string,
@@ -36,6 +38,54 @@ export async function runBrowserRound(
   assertActive: () => void,
   requestId: string,
   hasUpdates: () => boolean = () => false,
+  expectedControl = false,
+): Promise<RoundResult> {
+  const startLoss = controlLossRevision();
+  const hadControl = expectedControl || !!currentControl();
+  const results: ControlInterruption['results'] = actions.map(({ method }) => ({
+    method,
+    outcome: 'not-executed',
+  }));
+  const lost = () => controlLossRevision() !== startLoss || (hadControl && !currentControl());
+  const guarded: Call = async (method, params, id) => {
+    if (lost()) throw Object.assign(new Error('Control lost'), { code: 'STOPPED' });
+    const index = actions.findIndex((_, i) => id === `${requestId}:${i}`);
+    if (index >= 0) results[index]!.outcome = 'uncertain';
+    const value = await call(method, params, id);
+    if (index >= 0) results[index]!.outcome = 'completed';
+    if (lost()) throw Object.assign(new Error('Control lost'), { code: 'STOPPED' });
+    return value;
+  };
+  try {
+    const result = await executeRound(actions, guarded, assertActive, requestId, hasUpdates);
+    if (
+      lost() ||
+      (result.mode === 'reading' &&
+        results.some(
+          (r) =>
+            r.outcome === 'completed' && ['open', 'use-current-tab', 'new-tab'].includes(r.method),
+        ))
+    )
+      throw Object.assign(new Error('Control lost'), { code: 'STOPPED' });
+    return result;
+  } catch (error) {
+    if (lost() || ['STOPPED', 'TASK_TAB_UNAVAILABLE'].includes(errorInfo(error).code))
+      throw new ControlLoss({
+        reason: 'CONTROL_LOST',
+        results,
+        observation: 'unavailable',
+        resume: 'new-user-message-required',
+      });
+    throw error;
+  }
+}
+
+async function executeRound(
+  actions: LoopAction[],
+  call: Call,
+  assertActive: () => void,
+  requestId: string,
+  hasUpdates: () => boolean,
 ): Promise<RoundResult> {
   // A standalone DOM read is already its own observation. In particular, it
   // must not fall through to CDP snapshot/settle/tabs or establish task control.

@@ -21,6 +21,8 @@ let pauseTimer: ReturnType<typeof setTimeout> | undefined;
 let attachmentQueue: Promise<unknown> = Promise.resolve();
 let consentRevision = 0;
 let operationRevision = 0;
+let lossRevision = 0;
+export const controlLossRevision = () => lossRevision;
 const refs = new Map<string, ElementRef>();
 const networkActivity = new NetworkActivity();
 let pendingScroll: Target | undefined;
@@ -240,6 +242,22 @@ export async function release(cleanup = true, strict = false, reason: Diagnostic
   clearTimeout(pauseTimer);
 
   const previous = control;
+  if (
+    previous &&
+    [
+      'debugger_detach',
+      'target_unavailable',
+      'target_refresh_failed',
+      'tab_scope_changed',
+      'tab_lost',
+      'window_closed',
+      'pause_timeout',
+      'panel_stop',
+      'config_disabled',
+      'command_stop',
+    ].includes(reason)
+  )
+    lossRevision++;
   // Revoke synchronously: queued or in-flight attachments cannot revive consent.
   control = null;
   newPopups.length = 0;
