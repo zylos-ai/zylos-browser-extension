@@ -207,6 +207,31 @@ test('stop during debugger attachment cannot resurrect window consent', async ()
   );
 });
 
+test('consent revocation during task creation has a precise diagnostic reason', async () => {
+  const s = await setup();
+  const diagnostics = await import('../../utils/diagnostics');
+  const recorded = vi.spyOn(diagnostics, 'recordDiagnostic');
+  const entered = deferred(),
+    proceed = deferred();
+  const get = chrome.tabs.get;
+  chrome.tabs.get = async (id) => {
+    entered.resolve();
+    await proceed.promise;
+    return get(id);
+  };
+  const starting = s.start();
+  const rejected = assert.rejects(starting, (error) => error.code === 'STOPPED');
+  await entered.promise;
+  await s.executor.release();
+  proceed.resolve();
+  await rejected;
+  assert.ok(
+    recorded.mock.calls.some(
+      ([event, reason]) => event === 'stopped' && reason === 'consent_changed',
+    ),
+  );
+});
+
 async function observationSetup() {
   const s = await setup();
   const methods = [];

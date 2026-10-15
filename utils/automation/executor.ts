@@ -149,7 +149,7 @@ export async function useExistingTab(
     const revision = consentRevision;
     await finishing;
     assertActive();
-    if (revision !== consentRevision) fail('STOPPED');
+    if (revision !== consentRevision) stopped('consent_changed');
     const session: Scope = {
       scope: 'task',
       phase: 'ready',
@@ -163,7 +163,7 @@ export async function useExistingTab(
     await recordTask(session.sessionId, session.windowId, null, expected.tabId, false);
     if (revision !== consentRevision) {
       await cleanupTask(session.sessionId).catch(() => {});
-      fail('STOPPED');
+      stopped('consent_changed');
     }
     assertActive();
     control = session;
@@ -300,7 +300,7 @@ export async function createTask(initial: {
   const revision = consentRevision;
   await releasing;
   const source = await chrome.tabs.get(initial.sourceTabId);
-  if (revision !== consentRevision) fail('STOPPED');
+  if (revision !== consentRevision) stopped('consent_changed');
   if (source.incognito) fail('UNSUPPORTED_WINDOW', '不支持无痕窗口');
   if (source.windowId !== initial.windowId) fail('INVALID_TASK_SOURCE');
   const taskId = initial.taskId;
@@ -320,7 +320,7 @@ export async function createTask(initial: {
   }
   if (revision !== consentRevision) {
     await cleanupTask(taskId).catch(() => {});
-    fail('STOPPED');
+    stopped('consent_changed');
   }
   let groupId: number;
   try {
@@ -344,7 +344,7 @@ export async function createTask(initial: {
   };
   if (revision !== consentRevision) {
     await cleanupTask(taskId).catch(() => {});
-    fail('STOPPED');
+    stopped('consent_changed');
   }
   control = session;
   parked = false;

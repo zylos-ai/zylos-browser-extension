@@ -29,6 +29,8 @@ export const diagnosticEventName = z.enum([
   'capture-overflow',
 ]);
 export const diagnosticReason = z.enum([
+  'consent_changed',
+  'queue_cancelled',
   'other',
   'target_closed',
   'canceled_by_user',

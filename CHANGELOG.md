@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Preserve completed research-operation receipts when a later browser action loses
+  control, and include research operations in the diagnostic event stream.
+- Mark mid-task diagnostic capture as partial while retaining local task correlation;
+  distinguish consent-revision and queued-command cancellation checks.
+- Synchronize the authoritative plugin protocol and development documentation.
+
 - End active browser work consistently when control is revoked. Preserve bounded
   completed, uncertain and not-executed action receipts in the interrupted
   terminal response instead of discarding prior successes or requesting another

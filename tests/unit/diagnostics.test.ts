@@ -54,6 +54,30 @@ it('defaults off and rejects parameters that could change consent', async () => 
     await expect(d.getDiagnostics(params)).rejects.toThrow();
 });
 
+it('rebinds an active task in a partial capture and rejects stale operation receipts', async () => {
+  const d = await import('../../utils/diagnostics');
+  await d.initializeDiagnostics();
+  d.startDiagnosticTask();
+  const old = d.startDiagnosticOperation('fill');
+  await d.setDiagnosticsEnabled(true);
+  d.endDiagnosticOperation(old);
+  d.recordDiagnostic('invalidate', 'navigation', { source: 'executor' });
+  const operation = d.startDiagnosticOperation('snapshot');
+  d.endDiagnosticOperation(operation);
+  const result = await d.getDiagnostics({});
+  expect(result.partialCapture).toBe(true);
+  expect(result.events.find((e) => e.event === 'operation-start')).toMatchObject({
+    task: 1,
+    method: 'snapshot',
+  });
+  expect(result.events.some((e) => e.method === 'fill')).toBe(false);
+  expect(result.events.find((e) => e.event === 'invalidate')?.op).toBeUndefined();
+  vi.resetModules();
+  const restarted = await import('../../utils/diagnostics');
+  await restarted.initializeDiagnostics();
+  expect((await restarted.getDiagnostics({})).partialCapture).toBe(true);
+});
+
 it('bounds records, paginates, expires, and survives worker restart', async () => {
   vi.useFakeTimers();
   let d = await import('../../utils/diagnostics');

@@ -1,5 +1,6 @@
 // Guarded local browser actions used only by the extension-owned loop.
 import { actionParams, commandSchema, type Command } from './commands';
+import { recordDiagnostic } from './diagnostics';
 import { isBlockedUrl } from './guard';
 import { createTask, currentControl, currentGrant, execute } from './automation/executor';
 import { usePageContext, readPageContext } from './page-context';
@@ -92,7 +93,10 @@ export class IdempotencyCache {
         return previous.promise.then((value) => ({ ...(value as object), replayed: true }));
     }
     const assertActive = () => {
-      if (epoch !== this.epoch) fail('STOPPED', 'Command was queued before control was stopped');
+      if (epoch !== this.epoch) {
+        recordDiagnostic('stopped', 'queue_cancelled', { source: 'executor', level: 'warn' });
+        fail('STOPPED', 'Command was queued before control was stopped');
+      }
     };
     const execute = async () => {
       assertActive();

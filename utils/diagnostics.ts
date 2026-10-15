@@ -26,10 +26,12 @@ let seq = 0;
 let dropped = 0;
 let restartCount = 0;
 let storageHealthy = true;
+let partialCapture = false;
 let taskCounter = 0;
 let opCounter = 0;
 let currentTask: number | undefined;
 let currentOp: number | undefined;
+let activeOperation: { captureEpoch: string; op: number } | undefined;
 let events: DiagnosticEvent[] = [];
 let queue: Promise<unknown> = Promise.resolve();
 let consentWrites: Promise<unknown> = Promise.resolve();
@@ -60,6 +62,7 @@ function snapshot() {
     dropped,
     restartCount,
     storageHealthy,
+    partialCapture,
     taskCounter,
     opCounter,
     events,
@@ -100,6 +103,7 @@ const savedSchema = z.object({
   dropped: integer,
   restartCount: integer,
   storageHealthy: z.boolean(),
+  partialCapture: z.boolean().default(false),
   taskCounter: integer,
   opCounter: integer,
   events: z.array(diagnosticEventSchema).max(CAP),
@@ -111,10 +115,12 @@ export async function initializeDiagnostics() {
   dropped = 0;
   currentTask = undefined;
   currentOp = undefined;
+  activeOperation = undefined;
   taskCounter = 0;
   opCounter = 0;
   restartCount = 0;
   storageHealthy = true;
+  partialCapture = false;
   epoch = crypto.randomUUID();
   consent = '';
   const settings = await chrome.storage.local.get([DIAGNOSTICS_ENABLED_KEY]);
@@ -131,6 +137,7 @@ export async function initializeDiagnostics() {
       taskCounter = s.taskCounter;
       opCounter = s.opCounter;
       storageHealthy = s.storageHealthy;
+      partialCapture = s.partialCapture;
       consent = enabled ? s.consent : '';
       events = enabled ? s.events : [];
     } else if (enabled && saved[KEY] !== undefined) {
@@ -147,6 +154,8 @@ export async function initializeDiagnostics() {
   await queue;
 }
 export async function setDiagnosticsEnabled(value: boolean) {
+  const taskActive = currentTask !== undefined;
+  const operationActive = currentOp !== undefined;
   enabled = value;
   consent = value ? crypto.randomUUID() : '';
   // New consent gets a new epoch; no queued panel event can cross this boundary.
@@ -157,10 +166,11 @@ export async function setDiagnosticsEnabled(value: boolean) {
   dropped = 0;
   restartCount = 0;
   storageHealthy = true;
-  currentTask = undefined;
-  currentOp = undefined;
-  taskCounter = 0;
-  opCounter = 0;
+  partialCapture = value && (taskActive || operationActive);
+  currentTask = taskActive ? 1 : undefined;
+  currentOp = operationActive ? 1 : undefined;
+  taskCounter = taskActive ? 1 : 0;
+  opCounter = operationActive ? 1 : 0;
   const saving = consentWrites
     .catch(() => {})
     .then(() => chrome.storage.local.set({ [DIAGNOSTICS_ENABLED_KEY]: value }));
@@ -219,6 +229,7 @@ export function recordLifecycle(
 export function startDiagnosticTask() {
   currentTask = ++taskCounter;
   currentOp = undefined;
+  activeOperation = undefined;
   recordLifecycle('task-start');
   return currentTask;
 }
@@ -229,6 +240,7 @@ export function endDiagnosticTask(
   recordLifecycle(cancel ? 'task-cancel' : 'task-end', { status });
   currentTask = undefined;
   currentOp = undefined;
+  activeOperation = undefined;
 }
 export function startDiagnosticOperation(method: string) {
   const parsed = diagnosticMethod.safeParse(method);
@@ -239,14 +251,22 @@ export function startDiagnosticOperation(method: string) {
   };
   currentOp = context.op;
   recordLifecycle('operation-start', context);
-  return { ...context, captureEpoch: epoch };
+  const capture = { ...context, captureEpoch: epoch };
+  activeOperation = capture;
+  return capture;
 }
 export function endDiagnosticOperation(
   context: ReturnType<typeof startDiagnosticOperation>,
   error?: unknown,
   failed = error !== undefined,
 ) {
-  if (context.captureEpoch !== epoch) return;
+  if (context.captureEpoch !== epoch) {
+    if (activeOperation === context) {
+      currentOp = undefined;
+      activeOperation = undefined;
+    }
+    return;
+  }
   const { captureEpoch: _, ...metadata } = context;
   recordLifecycle(failed ? 'operation-error' : 'operation-result', {
     ...metadata,
@@ -254,7 +274,10 @@ export function endDiagnosticOperation(
     level: failed ? 'error' : 'info',
     ...(failed ? safeError(error) : {}),
   });
-  if (currentOp === context.op) currentOp = undefined;
+  if (activeOperation === context) {
+    currentOp = undefined;
+    activeOperation = undefined;
+  }
 }
 export function diagnosticRequest(method: string) {
   const parsed = diagnosticMethod.safeParse(method);
@@ -327,5 +350,6 @@ export async function getDiagnostics(params: unknown) {
     truncated: enabled && after < (events[0]?.seq ?? seq + 1) - 1,
     storageHealthy,
     restartCount,
+    partialCapture,
   };
 }

@@ -1,6 +1,6 @@
 # Zylos Browser Privacy Policy
 
-Last updated: October 15, 2026.
+Last updated: October 16, 2026.
 
 This policy describes Zylos Browser, the Chrome extension maintained in the [zylos-ai/zylos-browser-extension project](https://github.com/zylos-ai/zylos-browser-extension). It includes the optional diagnostics feature in the current source; diagnostics requires a compatible extension and Remote build.
 
@@ -34,7 +34,7 @@ The extension does not include a mechanism that sells user data or sends it to a
 
 Connection settings, the installation identifier, language preferences, recent chat history, bounded Agent progress history, attachment metadata, small image previews, and task-recovery information are stored in the extension's local storage in your Chrome profile. The extension uses local storage, not Chrome's sync storage, for these records.
 
-The diagnostic preference is stored locally. Diagnostic records are kept separately in Chrome extension session storage, limited to 1,000 events and 256 KiB, and records older than 30 minutes are excluded when the buffer is read or updated. Capture identifiers, local counters and restart/loss metadata accompany that buffer. Browser-session storage is not a permanent log archive. Turning diagnostics off clears the local buffer; changing the Relay URL or connection Key also disables diagnostics and clears it before saving the new recipient. The diagnostic retrieval endpoint does not create a separate persistent log archive on Remote. Your Agent or other tools may retain or export a fetched copy; turning the switch off cannot retract copies already returned to those services.
+The diagnostic preference is stored locally. Diagnostic records are kept separately in Chrome extension session storage, limited to 1,000 events and 256 KiB, and records older than 30 minutes are excluded when the buffer is read or updated. Capture identifiers, local counters, partial-capture and restart/loss metadata accompany that buffer. Enabling diagnostics during a task starts a new partial capture and does not recover earlier events. Browser-session storage is not a permanent log archive. Turning diagnostics off clears the local buffer; changing the Relay URL or connection Key also disables diagnostics and clears it before saving the new recipient. The diagnostic retrieval endpoint does not create a separate persistent log archive on Remote. Your Agent or other tools may retain or export a fetched copy; turning the switch off cannot retract copies already returned to those services.
 
 Original attachment files are not retained in local chat history. Zylos Browser Remote 0.10.0 writes task-owned temporary attachments and screenshots on the Agent host and attempts to delete those files when their task ends. A process crash or filesystem failure can prevent that cleanup. This cleanup does not delete your original local files or independent copies, conversation records, logs, or backups made by the Agent, Relay deployment, model providers, or other tools.
 

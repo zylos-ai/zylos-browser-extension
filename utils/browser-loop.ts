@@ -7,6 +7,7 @@ import { ResearchLedger } from './research-ledger';
 import { workerLocale } from './i18n';
 import { formatTaskNotice, type TaskNotice } from './task-notice';
 import { ControlLoss, type ControlInterruption } from './control-loss';
+import { startDiagnosticOperation, endDiagnosticOperation } from './diagnostics';
 import {
   agentMessage,
   AGENT_MESSAGE_VERSION,
@@ -386,15 +387,20 @@ export class BrowserLoop {
     let browserActions = decision.actions;
     const first = decision.actions[0]!;
     if (first.method === 'record-findings' || first.method === 'read-findings') {
+      const operation = startDiagnosticOperation(first.method);
+      let completed = false;
       try {
         const data =
           first.method === 'record-findings'
             ? turn.research.record(first.params)
             : turn.research.read(first.params);
         notes.push({ method: first.method, status: 'success', result: data });
+        completed = true;
+        endDiagnosticOperation(operation);
         this.io.record?.(first.method, data);
         browserActions = decision.actions.slice(1);
       } catch (error) {
+        if (!completed) endDiagnosticOperation(operation, error, true);
         this.request(turn, {
           mode: turn.mode,
           failed: false,
@@ -410,15 +416,25 @@ export class BrowserLoop {
         return;
       }
     }
-    const result = browserActions.length
-      ? await this.io.execute(
-          browserActions,
-          assertActive,
-          requestId,
-          () => turn.inputId !== acceptedInputId,
-          turn.mode === 'operating',
-        )
-      : { mode: turn.mode, failed: false, observation: reuseObservation(turn.last), results: [] };
+    let result: RoundResult;
+    try {
+      result = browserActions.length
+        ? await this.io.execute(
+            browserActions,
+            assertActive,
+            requestId,
+            () => turn.inputId !== acceptedInputId,
+            turn.mode === 'operating',
+          )
+        : { mode: turn.mode, failed: false, observation: reuseObservation(turn.last), results: [] };
+    } catch (error) {
+      if (error instanceof ControlLoss && notes.length)
+        throw new ControlLoss({
+          ...error.interruption,
+          results: [{ method: first.method, outcome: 'completed' }, ...error.interruption.results],
+        });
+      throw error;
+    }
     result.results = [...notes, ...result.results];
     if (this.turn !== turn) return;
     turn.mode = result.mode;
