@@ -1,5 +1,7 @@
 import { Component, type ReactNode } from 'react';
 import { useI18n } from './LanguageProvider';
+import { reportPanelDiagnostic } from '../utils/diagnostics-panel';
+import { safeError } from '../utils/diagnostics-schema';
 
 function ErrorFallback() {
   const { t } = useI18n();
@@ -17,6 +19,9 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { failed: 
   override state = { failed: false };
   static getDerivedStateFromError() {
     return { failed: true };
+  }
+  override componentDidCatch(error: Error) {
+    reportPanelDiagnostic({ event: 'runtime-error', level: 'error', ...safeError(error) });
   }
   override render() {
     return this.state.failed ? <ErrorFallback /> : this.props.children;

@@ -43,11 +43,12 @@ let generation = 0;
 let navigationRevision = 0;
 let changed: (tab: GrantedTab | null) => void = () => {};
 function fail(code: string, message = code): never {
-  if (code === 'STOPPED') recordDiagnostic('stopped', 'other');
+  if (code === 'STOPPED')
+    recordDiagnostic('stopped', 'other', { source: 'executor', level: 'warn' });
   throw Object.assign(new Error(message), { code });
 }
 function stopped(reason: DiagnosticReason): never {
-  recordDiagnostic('stopped', reason);
+  recordDiagnostic('stopped', reason, { source: 'executor', level: 'warn' });
   throw Object.assign(new Error('STOPPED'), { code: 'STOPPED' });
 }
 export const currentGrant = () => (control && grant ? { ...grant } : null);
@@ -59,7 +60,7 @@ export const onState = (fn: typeof changed) => {
   changed = fn;
 };
 function invalidate(reason: DiagnosticReason = 'other') {
-  recordDiagnostic('invalidate', reason);
+  recordDiagnostic('invalidate', reason, { source: 'executor', level: 'debug' });
   generation++;
   refs.clear();
   pendingScroll = undefined;
@@ -235,7 +236,7 @@ async function clearCursor() {
     .catch(() => {});
 }
 export async function release(cleanup = true, strict = false, reason: DiagnosticReason = 'other') {
-  recordDiagnostic('release', reason);
+  recordDiagnostic('release', reason, { source: 'executor' });
   clearTimeout(pauseTimer);
 
   const previous = control;
@@ -413,6 +414,7 @@ export function initializeExecutor() {
     recordDiagnostic(
       'detach',
       reason === 'target_closed' || reason === 'canceled_by_user' ? reason : 'other',
+      { source: 'executor', level: 'warn' },
     );
     if (grant?.id !== source.tabId) return;
 

@@ -4,6 +4,9 @@ import { RemotePanel } from '../../components/RemotePanel';
 import { ErrorBoundary } from '../../components/ErrorBoundary';
 import { LanguageProvider } from '../../components/LanguageProvider';
 import '../../assets/styles.css';
+import { startPanelDiagnostics } from '../../utils/diagnostics-panel';
+
+startPanelDiagnostics();
 
 const root = document.getElementById('root');
 if (!root) throw new Error('Missing React root');

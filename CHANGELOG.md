@@ -3,10 +3,15 @@
 ## Unreleased
 
 - Add an owner-controlled diagnostic sharing switch, disabled by default. The
-  connected agent can retrieve up to 200 allowlisted control events from the last
-  30 minutes, including debugger detach reasons and STOPPED checks. Records are
-  session-local and cleared on disable or connection credential changes.
-- Report the installed manifest version in diagnostic responses.
+  connected agent can retrieve task, operation, control, transport and runtime
+  metadata with local task/operation correlation through `diagnostics-v2`.
+- Keep at most 1,000 events, 256 KiB and 30 minutes in session storage. Return
+  the actual manifest version, filtered snapshot pages, capture epoch, restart,
+  overflow and storage-health information without claiming complete raw logs.
+- Observe background and sidepanel errors, rejections and console severity
+  without collecting console arguments, exception messages/stacks or page data.
+- Serialize consent and recipient changes, clear on disable, reject stale
+  queued events and revoke sharing before saving a different relay or key.
 
 ## [0.17.0] - 2026-10-09
 
