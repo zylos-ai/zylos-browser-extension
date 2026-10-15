@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Add an owner-controlled diagnostic sharing switch, disabled by default. The
+  connected agent can retrieve up to 200 allowlisted control events from the last
+  30 minutes, including debugger detach reasons and STOPPED checks. Records are
+  session-local and cleared on disable or connection credential changes.
+- Report the installed manifest version in diagnostic responses.
+
 ## [0.17.0] - 2026-10-09
 
 Pairs with Zylos Browser Remote 0.10.0; Remote needs no update.

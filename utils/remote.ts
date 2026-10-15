@@ -107,6 +107,7 @@ export const chatEntrySchema = z
 export type ChatEntry = z.infer<typeof chatEntrySchema>;
 
 export const remoteStateSchema = z.object({
+  diagnosticsEnabled: z.boolean().optional(),
   configured: z.boolean(),
   enabled: z.boolean(),
   connected: z.boolean(),
@@ -153,6 +154,7 @@ export const initialRemoteState: RemoteState = {
 
 // Panel -> background. Only the bundled sidepanel may send these.
 export const remoteRequestSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('remote-diagnostics-set-enabled'), enabled: z.boolean() }).strict(),
   z.object({ type: z.literal('remote-state') }).strict(),
   z.object({ type: z.literal('remote-save'), relayUrl: z.string(), key: z.string() }).strict(),
   z.object({ type: z.literal('remote-set-enabled'), enabled: z.boolean() }).strict(),

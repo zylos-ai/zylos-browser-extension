@@ -1,4 +1,13 @@
 import { LANGUAGE_STORAGE_KEY, setWorkerLanguage, panelErrorMessage } from '../../utils/i18n';
+import {
+  DIAGNOSTICS_CAPABILITY,
+  diagnosticsEnabled,
+  expireDiagnostics,
+  getDiagnostics,
+  initializeDiagnostics,
+  recordDiagnostic,
+  setDiagnosticsEnabled,
+} from '../../utils/diagnostics';
 // Extension-owned conversations: request Agent decisions, execute locally, and
 // return observations over the authenticated Remote connection.
 import { captureCurrentPage, clearPageContexts, forgetPageContext } from '../../utils/page-context';
@@ -91,6 +100,7 @@ export function startRemoteBackground() {
     void chrome.runtime.sendMessage({ type: 'remote-updated', state: snapshot() }).catch(() => {});
   };
   function snapshot(): RemoteState {
+    state.diagnosticsEnabled = diagnosticsEnabled();
     if (!loop?.active || state.agentActivity?.taskId !== loop.taskId)
       state.agentActivity = undefined;
     state.loopActive = loop?.active ?? false;
@@ -416,7 +426,7 @@ export function startRemoteBackground() {
           // Revoke browser control immediately, independently of the runtime key
           // receipt and storage. Hold the send lock until both operations settle.
           const [cleanup, remote] = await Promise.allSettled([
-            release(),
+            release(true, false, 'panel_stop'),
             confirmation ?? Promise.resolve(false),
           ]);
           if (taskId && (remote.status !== 'fulfilled' || !remote.value))
@@ -503,6 +513,7 @@ export function startRemoteBackground() {
         version: REMOTE_VERSION,
         capabilities: [
           ...REMOTE_CAPABILITIES,
+          DIAGNOSTICS_CAPABILITY,
           INSTANCE_CAPABILITY,
           AGENT_MESSAGE_CAPABILITY,
           AGENT_ACTIVITY_CAPABILITY,
@@ -520,6 +531,7 @@ export function startRemoteBackground() {
     };
     ws.onclose = (ev) => {
       if (gen !== generation) return;
+      recordDiagnostic('socket-close', 'remote_disconnect');
       if (loop.active) {
         cancelLoop('interrupted');
         void completeTask().catch(() => {});
@@ -651,6 +663,18 @@ export function startRemoteBackground() {
     const reply = (frame: Record<string, unknown>) => {
       if (gen === generation) send({ id: m.id, ...frame });
     };
+    if (m.method === 'diagnostics.get') {
+      try {
+        reply({ type: 'resp', result: await getDiagnostics(m.params) });
+      } catch (error) {
+        reply({
+          type: 'error',
+          code: error instanceof z.ZodError ? 'BAD_PARAMS' : 'DIAGNOSTICS_UNAVAILABLE',
+          message: 'Diagnostics request failed',
+        });
+      }
+      return;
+    }
     if (m.method === 'agent-decision') {
       try {
         const { id, decision, inputId } = z
@@ -681,6 +705,8 @@ export function startRemoteBackground() {
 
   // ---------------------------------------------------------------- config
   async function applyConfig(next: RemoteConfig) {
+    if (config.key && (next.key !== config.key || next.relayUrl !== config.relayUrl))
+      await setDiagnosticsEnabled(false);
     const changed =
       next.relayUrl !== config.relayUrl ||
       next.key !== config.key ||
@@ -695,7 +721,7 @@ export function startRemoteBackground() {
     if (!config.enabled) {
       // Kill switch: the owner flipped it, so end any task too.
       idem.cancel();
-      await release().catch(() => {});
+      await release(true, false, 'config_disabled').catch(() => {});
       state.error = '';
       publish();
       return;
@@ -710,6 +736,7 @@ export function startRemoteBackground() {
 
   // ---------------------------------------------------------------- boot
   const boot = (async () => {
+    await initializeDiagnostics().catch(() => setDiagnosticsEnabled(false).catch(() => {}));
     await chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }).catch(() => {});
     await recoverTasks();
     const saved = await chrome.storage.local.get([
@@ -757,6 +784,7 @@ export function startRemoteBackground() {
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name !== KEEPALIVE_ALARM) return;
     void boot.then(() => {
+      expireDiagnostics();
       if (
         !socket &&
         config.enabled &&
@@ -777,6 +805,10 @@ export function startRemoteBackground() {
       await boot;
       const m = parsed.data;
       switch (m.type) {
+        case 'remote-diagnostics-set-enabled':
+          await setDiagnosticsEnabled(m.enabled);
+          publish();
+          return snapshot();
         case 'remote-state':
           return snapshot();
         case 'remote-save': {
@@ -786,6 +818,10 @@ export function startRemoteBackground() {
             enabled: config.enabled,
           });
           if (!next.relayUrl || !next.key) throw new Error('ui.error.credentialsRequired');
+          // Revoke sharing before persisting a different recipient. A worker
+          // suspension between these writes must never expose the old records.
+          if (next.key !== config.key || next.relayUrl !== config.relayUrl)
+            await setDiagnosticsEnabled(false);
           await chrome.storage.local.set({ [REMOTE_CONFIG_KEY]: next });
           await applyConfig(next);
           return snapshot();

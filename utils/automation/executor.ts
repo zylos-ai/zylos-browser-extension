@@ -10,6 +10,7 @@ import type { CdpResults, Cursor, GrantedTab, Point, Scope } from './types';
 import { canReadPage, assertPageDocument } from '../page-reader';
 import { screenshotAttachment } from '../attachments';
 import { translate, workerLocale } from '../i18n';
+import { recordDiagnostic, type DiagnosticReason } from '../diagnostics';
 
 let grant: GrantedTab | null = null;
 const pointerMotion = new PointerMotion();
@@ -42,7 +43,12 @@ let generation = 0;
 let navigationRevision = 0;
 let changed: (tab: GrantedTab | null) => void = () => {};
 function fail(code: string, message = code): never {
+  if (code === 'STOPPED') recordDiagnostic('stopped', 'other');
   throw Object.assign(new Error(message), { code });
+}
+function stopped(reason: DiagnosticReason): never {
+  recordDiagnostic('stopped', reason);
+  throw Object.assign(new Error('STOPPED'), { code: 'STOPPED' });
 }
 export const currentGrant = () => (control && grant ? { ...grant } : null);
 export const currentControl = () => (control ? { ...control, tabIds: [...control.tabIds] } : null);
@@ -52,7 +58,8 @@ export const flushTaskPopups = () => popupQueue;
 export const onState = (fn: typeof changed) => {
   changed = fn;
 };
-function invalidate() {
+function invalidate(reason: DiagnosticReason = 'other') {
+  recordDiagnostic('invalidate', reason);
   generation++;
   refs.clear();
   pendingScroll = undefined;
@@ -107,14 +114,14 @@ function serial<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 async function groupOwnedTab(session: Scope, tabId: number) {
-  if (control !== session) fail('STOPPED');
+  if (control !== session) stopped('control_changed');
   const groupId = await chrome.tabs.group({
     tabIds: [tabId],
     ...(session.groupId === null
       ? { createProperties: { windowId: session.windowId } }
       : { groupId: session.groupId }),
   });
-  if (control !== session) fail('STOPPED');
+  if (control !== session) stopped('control_changed');
   session.groupId = groupId;
   await recordTask(session.sessionId, session.windowId, groupId, tabId, true);
 }
@@ -164,17 +171,19 @@ export async function useExistingTab(
   try {
     await syncTarget();
     assertActive();
-    if (control !== session || grant?.id !== expected.tabId) fail('STOPPED');
+    if (control !== session) stopped('control_changed');
+    if (grant?.id !== expected.tabId) stopped('grant_changed');
     if (expected.documentId)
       await assertPageDocument({ ...expected, documentId: expected.documentId });
     assertActive();
-    if (control !== session) fail('STOPPED');
+    if (control !== session) stopped('control_changed');
     const fresh = await chrome.tabs.get(expected.tabId);
-    if (control !== session || !inScope(fresh, session)) fail('STOPPED');
+    if (control !== session) stopped('control_changed');
+    if (!inScope(fresh, session)) stopped('tab_scope_changed');
     if (!canReadPage(fresh) || fresh.url !== expected.url) fail('PAGE_CHANGED');
     await markTask(session, 'ready');
     assertActive();
-    if (control !== session) fail('STOPPED');
+    if (control !== session) stopped('control_changed');
     return {
       selected: true,
       tabId: expected.tabId,
@@ -193,7 +202,7 @@ async function detachCurrent(strict = false) {
   dialog = null;
   dragData = null;
   grant = null;
-  invalidate();
+  invalidate('target_detach');
   publish();
   await clearCursor();
   if (old) {
@@ -225,7 +234,8 @@ async function clearCursor() {
     })
     .catch(() => {});
 }
-export async function release(cleanup = true, strict = false) {
+export async function release(cleanup = true, strict = false, reason: DiagnosticReason = 'other') {
+  recordDiagnostic('release', reason);
   clearTimeout(pauseTimer);
 
   const previous = control;
@@ -236,7 +246,7 @@ export async function release(cleanup = true, strict = false) {
   parked = true;
   consentRevision++;
   operationRevision++;
-  invalidate();
+  invalidate('release');
   publish();
   try {
     await serial(() => detachCurrent(strict));
@@ -252,7 +262,7 @@ export async function release(cleanup = true, strict = false) {
 export async function completeTask() {
   const previous = currentControl();
   // Revoke immediately, including a task that is still being created.
-  const releasing = release(false, true);
+  const releasing = release(false, true, 'task_complete');
   // Persist retained tabs even if debugger detachment fails, so recovery cannot close them.
   await Promise.all([
     releasing,
@@ -322,12 +332,12 @@ export async function createTask(initial: {
   publish();
   try {
     await markTask(session, 'ready');
-    if (control !== session) fail('STOPPED');
+    if (control !== session) stopped('control_changed');
     await chrome.action.setBadgeBackgroundColor({ color: '#326C53' });
-    if (control !== session) fail('STOPPED');
+    if (control !== session) stopped('control_changed');
     await chrome.action.setBadgeText({ text: translate(workerLocale(), 'browserBadge') });
     await syncTarget();
-    if (control !== session) fail('STOPPED');
+    if (control !== session) stopped('control_changed');
   } catch (error) {
     if (control === session) await release();
     throw error;
@@ -344,7 +354,7 @@ function syncTarget() {
     if (!tab || !inScope(tab, session)) {
       // No active-tab fallback. Closing/moving/ungrouping the task target revokes
       // control even while it was parked after finish.
-      void release();
+      void release(true, false, 'target_unavailable');
       fail('TASK_TAB_UNAVAILABLE', '工作标签已关闭或移出任务组，请重新创建任务');
     }
     if (!inspectable(tab)) {
@@ -354,7 +364,7 @@ function syncTarget() {
     if (grant?.id === tab.id) {
       if (grant.url !== tab.url) {
         grant.url = tab.url;
-        invalidate();
+        invalidate('navigation');
       }
       grant.title = (tab.title || '').slice(0, 500);
       publish();
@@ -381,7 +391,7 @@ function syncTarget() {
         url: fresh.url,
         title: (fresh.title || '').slice(0, 500),
       };
-      invalidate();
+      invalidate('target_attach');
       await enableFrames({ tabId: tab.id });
       // Keep the controlled renderer active without selecting the user's tab.
       await chrome.debugger.sendCommand({ tabId: tab.id }, 'Emulation.setFocusEmulationEnabled', {
@@ -395,19 +405,23 @@ function syncTarget() {
 }
 function refreshTaskTarget() {
   void syncTarget().catch(() => {
-    if (control) void release();
+    if (control) void release(true, false, 'target_refresh_failed');
   });
 }
 export function initializeExecutor() {
   chrome.debugger.onDetach.addListener((source, reason) => {
+    recordDiagnostic(
+      'detach',
+      reason === 'target_closed' || reason === 'canceled_by_user' ? reason : 'other',
+    );
     if (grant?.id !== source.tabId) return;
 
     cursor = null; // The visual's short TTL also cleans up after external detachment.
     grant = null;
 
-    invalidate();
+    invalidate('debugger_detach');
     publish();
-    void release(); // Closing the task tab / Chrome Cancel / DevTools ends control.
+    void release(true, false, 'debugger_detach'); // Closing the task tab / Chrome Cancel / DevTools ends control.
   });
   chrome.debugger.onEvent.addListener((source, method, params) => {
     if (source.tabId !== grant?.id) return;
@@ -435,7 +449,7 @@ export function initializeExecutor() {
     if (grant && method === 'Page.frameNavigated' && frame && !frame.parentId) {
       navigationRevision++;
       cursor = null;
-      invalidate();
+      invalidate('navigation');
       if (!allowed(frame.url)) refreshTaskTarget();
       else {
         grant.url = frame.url;
@@ -453,7 +467,7 @@ export function initializeExecutor() {
   chrome.tabs.onUpdated.addListener((id, info, tab) => {
     if (!control || !control.tabIds.includes(id)) return;
     if (!inScope(tab, control)) {
-      if (id === control.tabId) void release();
+      if (id === control.tabId) void release(true, false, 'tab_scope_changed');
       else {
         control.tabIds = control.tabIds.filter((t) => t !== id);
         publish();
@@ -466,7 +480,7 @@ export function initializeExecutor() {
     }
     if (info.url) {
       navigationRevision++;
-      invalidate();
+      invalidate('navigation');
       if (!allowed(info.url)) {
         refreshTaskTarget();
         return;
@@ -539,7 +553,7 @@ export function initializeExecutor() {
   // Browser focus is the user's, not an authorization or routing signal.
   const lostTab = (id: number) => {
     if (!control?.tabIds.includes(id)) return;
-    if (id === control.tabId) void release();
+    if (id === control.tabId) void release(true, false, 'tab_lost');
     else {
       control.tabIds = control.tabIds.filter((t) => t !== id);
       publish();
@@ -548,7 +562,7 @@ export function initializeExecutor() {
   chrome.tabs.onDetached.addListener(lostTab);
   chrome.tabs.onRemoved.addListener(lostTab);
   chrome.windows.onRemoved.addListener((id) => {
-    if (control?.windowId === id) void release();
+    if (control?.windowId === id) void release(true, false, 'window_closed');
   });
 }
 
@@ -560,7 +574,7 @@ export async function revealTask() {
   if (control !== session || !inScope(tab, session)) fail('TASK_TAB_UNAVAILABLE');
   if (session.groupId !== null && session.tabId !== session.borrowedTabId)
     await chrome.tabGroups.update(session.groupId, { collapsed: false });
-  if (control !== session) fail('STOPPED');
+  if (control !== session) stopped('control_changed');
   await chrome.tabs.update(session.tabId, { active: true });
   if (control === session) await chrome.windows.update(session.windowId, { focused: true });
 }
@@ -602,7 +616,7 @@ export async function execute(command: Command, deadline: number) {
       fail('STALE_TASK', '该任务已经结束，不能清理另一个任务');
     if (control && command.keep.some((id) => !control!.tabIds.includes(id)))
       fail('TAB_NOT_GRANTED');
-    await release(false, true);
+    await release(false, true, 'finalize');
     const result = await cleanupTask(command.taskId, command.keep);
     publish();
     return result;
@@ -615,7 +629,7 @@ export async function execute(command: Command, deadline: number) {
     parked = true;
     invalidate();
     await serial(() => detachCurrent(true));
-    if (control !== session) fail('STOPPED');
+    if (control !== session) stopped('control_changed');
     if (session)
       await markTask(session, command.op === 'finish' ? 'finished' : 'paused').catch(() => {});
     if (Date.now() > deadline) fail('COMMAND_EXPIRED');
@@ -624,14 +638,14 @@ export async function execute(command: Command, deadline: number) {
     if (session)
       pauseTimer = setTimeout(
         () => {
-          if (control === session && parked) void release();
+          if (control === session && parked) void release(true, false, 'pause_timeout');
         },
         10 * 60 * 1000,
       );
     return { finished: true, debuggerDetached: true };
   }
   if (command.op === 'stop') {
-    await release();
+    await release(true, false, 'command_stop');
     return { stopped: true };
   }
   const session = control;
@@ -641,8 +655,8 @@ export async function execute(command: Command, deadline: number) {
     fail('CONTROL_NOT_GRANTED', '请先用 open 创建 Agent 工作标签');
   }
   const checkSession = () => {
-    if (operationRevision !== startedOperationRevision) fail('STOPPED');
-    if (control !== session) fail('STOPPED');
+    if (operationRevision !== startedOperationRevision) stopped('operation_changed');
+    if (control !== session) stopped('control_changed');
     if (Date.now() > deadline) fail('COMMAND_EXPIRED');
   };
   if (command.op === 'tabs') {
@@ -897,7 +911,7 @@ export async function execute(command: Command, deadline: number) {
   const check = () => {
     checkSession();
     if (Date.now() > deadline) fail('COMMAND_EXPIRED');
-    if (grant !== lease) fail('STOPPED');
+    if (grant !== lease) stopped('grant_changed');
     if (generation !== startGeneration) fail('PAGE_CHANGED', '页面已变化，请重新 snapshot');
   };
   async function cdp<M extends keyof CdpResults>(

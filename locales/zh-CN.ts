@@ -1,4 +1,7 @@
 export default {
+  diagnostics: '分享诊断事件',
+  diagnosticsHint:
+    '允许已连接的 Agent 读取最近 30 分钟的控制和连接事件（最多 200 条）。不含网页内容、网址、输入或密钥。默认关闭；关闭后清除已存事件。',
   settings: '设置',
   back: '返回',
   loading: '正在加载…',
