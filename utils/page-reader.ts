@@ -53,7 +53,6 @@ export async function assertPageDocument(expected: PageDocument) {
 export function extractPageText(options: ReadPageOptions = {}) {
   const offset = options.offset || 0;
   const limit = options.limit || 6000;
-  const started = performance.now();
   const maxText = 120000;
   const chunks: string[] = [];
   const links: { text: string; url: string }[] = [];
@@ -402,6 +401,9 @@ export function extractPageText(options: ReadPageOptions = {}) {
     };
   };
   const viewport = options.overview ? readViewport() : undefined;
+  // Each bounded traversal owns its budget; a slow viewport must not erase the
+  // document text/version that subsequent read-page chunks are compared with.
+  const started = performance.now();
   if (document.body) walk(document.body, 0);
   const text = chunks
     .join('')

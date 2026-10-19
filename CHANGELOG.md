@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Give viewport and document-text extraction independent elapsed-time budgets,
+  so a slow overview does not consume the following document read's allowance.
+  Make DOM content tests use a controlled clock and explicitly test timeout
+  truncation without relaxing form/editor privacy assertions.
+
 - Negotiate `task-resume-v1` to preserve a live task across temporary transport
   loss for at most two minutes. Reconcile runtime/task/request identity and
   acknowledge queued request, owner-input and terminal frames without replaying
