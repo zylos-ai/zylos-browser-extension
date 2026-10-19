@@ -132,6 +132,7 @@ type Turn = {
   round: number;
   memory: string;
   pending?: string;
+  executingRequest?: string;
   ending?: boolean;
   mode: BrowserMode;
   sentMode?: BrowserMode;
@@ -177,6 +178,12 @@ export class BrowserLoop {
   }
   get pendingId() {
     return this.turn?.pending;
+  }
+  get currentRequestId() {
+    return this.turn?.pending ?? this.turn?.executingRequest;
+  }
+  get round() {
+    return this.turn?.round;
   }
   get inputId() {
     return this.turn?.inputId;
@@ -274,6 +281,7 @@ export class BrowserLoop {
         { code: 'BAD_DECISION' },
       );
     turn.pending = undefined; // Claim synchronously, before any browser work.
+    turn.executingRequest = requestId;
     this.receipts.set(requestId, signature);
     while (this.receipts.size > 100) this.receipts.delete(this.receipts.keys().next().value!);
     void this.advance(turn, decision, requestId, superseded).catch((error) => {
@@ -297,6 +305,7 @@ export class BrowserLoop {
     // event. Time, round count and recoverable action failures do not end a task.
     const id = crypto.randomUUID();
     turn.pending = id;
+    turn.executingRequest = undefined;
     const first = turn.round++ === 0;
     turn.requestedInputId = turn.inputId;
     const execution: AgentRequest['execution'] = {

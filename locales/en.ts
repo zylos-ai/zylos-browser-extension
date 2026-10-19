@@ -16,6 +16,12 @@ export default {
   extensionDisabled: 'The extension is disabled',
   connectingAgent: 'Connecting to your Agent…',
   reconnecting: 'Disconnected. Trying to reconnect…',
+  taskDisconnected: 'Connection lost. New browser actions are paused.',
+  taskReconnecting: 'Reconnecting. Browser actions remain paused.',
+  taskConnectionRestored: 'Connection restored.',
+  taskCompletionPending: 'Waiting for the previous task completion receipt.',
+  taskRecoveryFailed: 'This task could not reconnect safely. Start a new message to continue.',
+  taskRecoveryExpired: 'The task reconnect window expired. Start a new message to continue.',
   connectionSettings: 'Connection settings',
   welcomeTitle: 'What would you like to do?',
   welcomeDescription:

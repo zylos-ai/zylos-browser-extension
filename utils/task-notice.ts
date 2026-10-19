@@ -25,6 +25,8 @@ const reasonKeys: Record<string, TranslationKey> = {
   BAD_AGENT_REQUEST: 'protocolMismatch',
   EXT_OFFLINE: 'progressDisconnected',
   STALE_DECISION: 'taskDecisionExpired',
+  TASK_RECOVERY_FAILED: 'taskRecoveryFailed',
+  TASK_RECOVERY_EXPIRED: 'taskRecoveryExpired',
 };
 export function formatTaskNotice(locale: Locale, notice: TaskNotice): string {
   switch (notice.kind) {

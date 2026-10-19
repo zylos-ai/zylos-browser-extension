@@ -315,3 +315,42 @@ it('stop during settling prevents observation and any continuation', async () =>
   await rejected;
   expect(call).toHaveBeenCalledTimes(1);
 });
+
+it('pauses between batch operations, retains the completed result and respects new owner input', async () => {
+  let offline = false;
+  let updated = false;
+  let resume!: () => void;
+  const gate = async () => {
+    if (offline)
+      await new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+  };
+  const call = vi.fn(async (method: string) => {
+    if (method === 'fill') offline = true;
+    return { completed: true };
+  });
+  const round = runBrowserRound(
+    [
+      { method: 'fill', params: { ref: 'a', text: 'one' } },
+      { method: 'fill', params: { ref: 'b', text: 'two' } },
+    ],
+    call,
+    () => {},
+    'request',
+    () => updated,
+    true,
+    gate,
+  );
+  await vi.advanceTimersByTimeAsync(0);
+  expect(call.mock.calls.map(([method]) => method)).toEqual(['fill']);
+  updated = true;
+  offline = false;
+  resume();
+  const result = await round;
+  expect(call.mock.calls.map(([method]) => method)).toEqual(['fill', 'snapshot', 'tabs']);
+  expect(result.results).toEqual([
+    expect.objectContaining({ method: 'fill', status: 'success' }),
+    expect.objectContaining({ status: 'skipped', count: 1 }),
+  ]);
+});

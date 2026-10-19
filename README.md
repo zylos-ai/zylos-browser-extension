@@ -30,6 +30,10 @@ Zylos Browser 是 Zylos Agent 的 Chrome 插件。在同一个侧边栏里，你
 
 插件运行在你的 Chrome 中，Agent 可以运行在本机或远程服务器，通过 [Zylos Browser Remote](https://github.com/zylos-ai/zylos-browser-remote) 连接。
 
+配合支持 `task-resume-v1` 的 Remote，临时断线会暂停新的浏览器操作，并在最多两分钟内尝试恢复同一任务。
+已开始的操作不会因断线被重做。侧栏会显示断开、重连、恢复或失败状态；停止和撤销控制仍立即生效。
+这不恢复插件 worker、浏览器或 Remote 重启前的任务；恢复失败后需要发送新消息。
+
 <a id="features"></a>
 
 ## 在浏览器里，完成更多事

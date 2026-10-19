@@ -41,6 +41,33 @@ Remote 验证 Key 和浏览器身份，返回：
 但不能追加指令；更新后的输入框始终显示发送箭头，停止操作在顶部和预览窗口。
 `hello.version` 是现有实现标识，`agent-request.version` 才是本文的消息结构版本。
 
+### 临时断线恢复：`task-resume-v1`
+
+双方声明此能力后，仅在同一个插件 background 实例和同一个 Remote 进程仍存活时恢复。
+插件在 background 启动时生成 `runtimeEpoch`（UUID，不持久化），每次 `hello` 携带此字段。
+断线重连的 `hello.resume` 包含 `taskId`、`phase`（`waiting` / `executing` / `terminal`），
+以及活跃轮次的 `requestId`、`round`。执行中的请求沿用已接收的决策 ID；新一轮使用新 ID。
+Remote 必须核对同一个运行实例、任务、请求和阶段，不能把未知实例当作新任务继续执行。
+
+`ready` 的顶层 `runtimeEpoch` 回显插件的值，`recoveryWindowMs` 指定恢复窗口；插件最多接受
+120000 毫秒。`ready.resume` 为 `{ "status": "fresh" | "resumed" | "rejected", "reason"?: string }`。
+首次协商使用 `fresh`；带任务的重连必须得到 `resumed`。拒绝、能力退化、实例不匹配或窗口过期
+都会结束旧任务，并保留本地可翻译的失败说明。停止、撤销控制、配置变化和关闭码
+4001 / 4002 / 4004 / 4005 不是临时网络故障，不可复活旧任务。
+4005 清除旧任务后，只尝试一次不带恢复描述的新连接，供用户发起新任务；再次被拒绝则停止重连。
+
+可恢复的 `agent-request`、`agent-input`、`agent-turn-end` 帧携带 `deliveryId`（UUID）与
+`runtimeEpoch`。插件在收到 `{ "type": "task-ack", "deliveryId": "...", "runtimeEpoch": "..." }`
+之前保留该帧。重连后原样重送，Remote 按运行实例和 deliveryId 去重。Remote 只有接受该消息后
+才能确认。任务结束回执也必须确认，不能把 WebSocket.send 成功等同于对端收到。
+待确认队列最多 64 帧；耗尽会明确结束恢复，不静默丢弃。此队列只存在内存中。
+上一任务的结束回执未确认时，侧栏保留新消息草稿，但不能启动下一任务；确认后即可发送。
+
+断线时，已开始的操作继续产生结果；下一项操作和下一次浏览器读取等待连接恢复。
+补送决策必须保留原请求 ID 和原内容，插件现有决策签名回执只返回确认，不再次执行。
+结果不确定的操作不得由传输层重试。追加指令的 ID 和顺序保留，过时决策不能覆盖新的用户意图。
+插件 worker、浏览器或 Remote 进程重启不在恢复范围内，需要用户发送新消息。
+
 `browserId` 在每个 Chrome 安装/profile 内持久保存。同一个 Key 的不同
 browserId 可同时连接；同一 profile 的多个窗口共享一个 browserId。
 任务和回复按认证连接的 endpointId 路由，不能由后续消息指定其他浏览器。

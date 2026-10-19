@@ -19,6 +19,7 @@ export function ChatComposer({
   attachments,
   steeringSupported = false,
   stopping = false,
+  completionPending = false,
   files = [],
   onAddFiles,
   onRemoveFile,
@@ -37,6 +38,7 @@ export function ChatComposer({
   attachments?: React.ReactNode;
   steeringSupported?: boolean;
   stopping?: boolean;
+  completionPending?: boolean;
   files?: DraftAttachment[];
   onAddFiles?: (files: File[]) => void;
   onRemoveFile?: (id: string) => void;
@@ -48,12 +50,15 @@ export function ChatComposer({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
   const [dragging, setDragging] = useState(false);
-  const showStop = stopping || (busy && !draft.trim() && !files.length && !readingAttachments);
+  const showStop =
+    !completionPending &&
+    (stopping || (busy && !draft.trim() && !files.length && !readingAttachments));
   const disabled =
     !connected ||
     (!draft.trim() && !files.length) ||
     sending ||
     stopping ||
+    completionPending ||
     (busy && !steeringSupported) ||
     readingAttachments;
   useLayoutEffect(() => {

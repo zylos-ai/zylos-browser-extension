@@ -112,7 +112,7 @@ beforeEach(() => {
     executor.currentControl.mockReturnValue(null);
     executor.currentGrant.mockReturnValue(null);
   });
-  executor.execute.mockImplementation(async (c: { op: string }) => ({ ran: c.op }));
+  executor.execute.mockReset().mockImplementation(async (c: { op: string }) => ({ ran: c.op }));
   vi.stubGlobal('WebSocket', Socket);
   let id = 0;
   vi.stubGlobal('crypto', {
@@ -159,7 +159,12 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function bootConnected(attachments = false, interrupt = false, steering = true) {
+async function bootConnected(
+  attachments = false,
+  interrupt = false,
+  steering = true,
+  resume = false,
+) {
   startRemoteBackground();
   await flush();
   const ws = sockets[0]!;
@@ -173,8 +178,16 @@ async function bootConnected(attachments = false, interrupt = false, steering = 
       ...(attachments ? ['attachments-v1'] : []),
       ...(interrupt ? ['agent-interrupt-v1'] : []),
       ...(steering ? ['agent-input-v1'] : []),
+      ...(resume ? ['task-resume-v1'] : []),
     ],
     endpointId: `abababababab.${storage.remoteBrowserId}`,
+    ...(resume
+      ? {
+          runtimeEpoch: ws.last('hello')!.runtimeEpoch,
+          recoveryWindowMs: 120000,
+          resume: { status: 'fresh' },
+        }
+      : {}),
   });
   await flush();
   return ws;
@@ -210,6 +223,258 @@ const respond = async (
 };
 
 describe('decision transport background', () => {
+  async function reconnect(status = 'resumed', epoch?: string) {
+    await vi.advanceTimersByTimeAsync(1600);
+    const ws = sockets.at(-1)!;
+    ws.open();
+    ws.receive({
+      type: 'ready',
+      capabilities: [
+        'agent-loop-v1',
+        'browser-instance-v1',
+        'agent-message-v2',
+        'agent-input-v1',
+        'task-resume-v1',
+      ],
+      endpointId: `abababababab.${storage.remoteBrowserId}`,
+      runtimeEpoch: epoch ?? ws.last('hello')!.runtimeEpoch,
+      recoveryWindowMs: 120000,
+      resume: { status },
+    });
+    await flush();
+    return ws;
+  }
+  function ack(ws: Socket, frame: Record<string, unknown>) {
+    ws.receive({
+      type: 'task-ack',
+      deliveryId: frame.deliveryId,
+      runtimeEpoch: frame.runtimeEpoch,
+    });
+  }
+  it('retains pending request identity until acknowledgement and resumes the same runtime', async () => {
+    const ws = await bootConnected(false, false, true, true);
+    const request = await begin(ws);
+    ws.serverClose(1006);
+    expect((await state()).loopActive).toBe(true);
+    expect((await state()).recovery).toBe('disconnected');
+    expect((await state()).error).toBe('');
+    expect(executor.completeTask).not.toHaveBeenCalled();
+    const next = await reconnect();
+    expect(next.last('hello')!.runtimeEpoch).toBe(ws.last('hello')!.runtimeEpoch);
+    expect(next.last('hello')!.resume).toEqual({
+      taskId: request.taskId,
+      requestId: request.id,
+      round: 1,
+      phase: 'waiting',
+    });
+    expect(next.last('agent-request')).toEqual(request);
+    expect((await state()).recovery).toBe('restored');
+    ack(next, request);
+    next.serverClose(1006);
+    const third = await reconnect();
+    expect(third.last('agent-request')).toBeUndefined();
+    await respond(third, request, { kind: 'done', text: 'Answer' });
+    expect((await state()).loopActive).toBe(false);
+  });
+  it('retains a started operation result, queues its next request and never repeats a decision', async () => {
+    const ws = await bootConnected(false, false, true, true);
+    const request = await selectPage(ws);
+    ack(ws, request);
+    let finish!: () => void;
+    executor.execute.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      return { ran: 'find' };
+    });
+    const decision = {
+      kind: 'actions',
+      actions: [{ method: 'find', params: { selector: 'table' } }],
+    };
+    await respond(ws, request, decision);
+    expect(executor.execute).toHaveBeenCalledTimes(1);
+    ws.serverClose(1006);
+    finish();
+    await flush();
+    expect((await state()).loopActive).toBe(true);
+    const next = await reconnect();
+    const nextRequest = next.last('agent-request')!;
+    expect(nextRequest.id).not.toBe(request.id);
+    expect(nextRequest.taskId).toBe(request.taskId);
+    await respond(next, request, decision, 2);
+    expect(next.last('resp')!.result).toEqual({ accepted: true, replayed: true });
+    expect(executor.execute).toHaveBeenCalledTimes(1);
+    await respond(next, request, { kind: 'done', text: 'Changed' }, 3);
+    expect(next.last('error')!.code).toBe('DECISION_CONFLICT');
+  });
+  it('pauses the next operation of a batch and lets stop cancel that continuation', async () => {
+    const ws = await bootConnected(false, false, true, true);
+    const request = await selectPage(ws);
+    executor.execute.mockClear();
+    executor.execute.mockImplementationOnce(async () => {
+      ws.serverClose(1006);
+      return { ran: 'fill' };
+    });
+    await respond(ws, request, {
+      kind: 'actions',
+      actions: [
+        { method: 'fill', params: { ref: 'e1', text: 'a' } },
+        { method: 'fill', params: { ref: 'e2', text: 'b' } },
+      ],
+    });
+    expect(executor.execute).toHaveBeenCalledTimes(1);
+    await ask({ type: 'remote-stop' });
+    const next = await reconnect();
+    expect((next.last('hello')!.resume as { phase: string }).phase).toBe('terminal');
+    expect(next.last('agent-turn-end')!.status).toBe('stopped');
+    expect(next.last('agent-request')).toBeUndefined();
+    expect(executor.execute).toHaveBeenCalledTimes(1);
+    expect((await state()).loopActive).toBe(false);
+  });
+  it('replays a terminal receipt after its acknowledgement was lost', async () => {
+    const ws = await bootConnected(false, false, true, true);
+    const request = await begin(ws);
+    ack(ws, request);
+    await respond(ws, request, { kind: 'done', text: 'Answer' });
+    const terminal = ws.last('agent-turn-end')!;
+    ws.serverClose(1006);
+    const next = await reconnect();
+    expect(next.last('agent-turn-end')).toEqual(terminal);
+    expect((await state()).chat).toEqual(
+      expect.arrayContaining([expect.objectContaining({ text: 'Answer' })]),
+    );
+    expect(executor.execute).not.toHaveBeenCalled();
+  });
+  it('retains latest steering and rejects an old goal after reconnect', async () => {
+    const ws = await bootConnected(false, false, true, true);
+    const request = await begin(ws);
+    ack(ws, request);
+    expect((await ask({ type: 'remote-chat-send', text: 'Only read, do not click' })).ok).toBe(
+      true,
+    );
+    const input = ws.last('agent-input')!;
+    ws.serverClose(1006);
+    const next = await reconnect();
+    expect(next.last('agent-input')).toEqual(input);
+    await respond(next, request, { kind: 'done', text: 'Old goal' });
+    expect((await state()).loopActive).toBe(true);
+    expect(next.last('agent-request')!.id).not.toBe(request.id);
+    expect(executor.execute).not.toHaveBeenCalled();
+  });
+  it('does not start the next task until the previous terminal receipt is acknowledged', async () => {
+    const ws = await bootConnected(false, false, true, true);
+    const request = await begin(ws);
+    ack(ws, request);
+    await respond(ws, request, { kind: 'done', text: 'First answer' });
+    const terminal = ws.last('agent-turn-end')!;
+    expect((await state()).completionPending).toBe(true);
+    const second = await ask({ type: 'remote-chat-send', text: 'Second task' });
+    expect(second).toMatchObject({ ok: false, error: 'ui.error.taskCompletionPending' });
+    expect(ws.last('agent-request')!.id).toBe(request.id);
+    ack(ws, terminal);
+    expect((await state()).completionPending).toBe(false);
+    const next = await begin(ws, 'Second task');
+    expect(next.taskId).not.toBe(request.taskId);
+  });
+  it.each(['rejected', 'fresh', 'wrong-epoch'])('fails closed for %s recovery', async (mode) => {
+    const ws = await bootConnected(false, false, true, true);
+    const request = await begin(ws);
+    ws.serverClose(1006);
+    const next = await reconnect(
+      mode === 'wrong-epoch' ? 'resumed' : mode,
+      mode === 'wrong-epoch' ? '22222222-2222-4222-8222-222222222222' : undefined,
+    );
+    expect((await state()).loopActive).toBe(false);
+    expect((await state()).recovery).toBe('failed');
+    expect(next.last('agent-request')).toBeUndefined();
+    await respond(next, request, {
+      kind: 'actions',
+      actions: [{ method: 'open', params: { url: 'https://example.com' } }],
+    });
+    expect(next.readyState).toBe(3);
+    expect(executor.execute).not.toHaveBeenCalled();
+  });
+  it('expires recovery once and keeps the failure in durable localized history', async () => {
+    const ws = await bootConnected(false, false, true, true);
+    await begin(ws);
+    ws.serverClose(1006);
+    await vi.advanceTimersByTimeAsync(120001);
+    expect((await state()).loopActive).toBe(false);
+    expect((await state()).recovery).toBe('failed');
+    expect(storage.remoteChatLog).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          notice: { kind: 'request-failed', code: 'TASK_RECOVERY_EXPIRED' },
+        }),
+      ]),
+    );
+  });
+  it.each([4001, 4002, 4004])('does not resume terminal close %s', async (code) => {
+    const ws = await bootConnected(false, false, true, true);
+    await begin(ws);
+    ws.serverClose(code);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(sockets).toHaveLength(1);
+    expect((await state()).loopActive).toBe(false);
+  });
+  it('allows one fresh reconnect after rejection without retaining the old task', async () => {
+    const ws = await bootConnected(false, false, true, true);
+    const old = await begin(ws);
+    ws.serverClose(4005);
+    const next = await reconnect('fresh');
+    expect(next.last('hello')!.resume).toBeUndefined();
+    expect(next.last('agent-request')).toBeUndefined();
+    expect((await state()).loopActive).toBe(false);
+    expect((await state()).recovery).toBe('failed');
+    await respond(next, old, { kind: 'done', text: 'Stale' });
+    expect(next.last('error')!.code).toBe('STALE_DECISION');
+    const fresh = await begin(next, 'New task');
+    expect(fresh.taskId).not.toBe(old.taskId);
+  });
+  it('does not loop when the single fresh reconnect is rejected again', async () => {
+    const ws = await bootConnected(false, false, true, true);
+    await begin(ws);
+    ws.serverClose(4005);
+    await vi.advanceTimersByTimeAsync(1600);
+    const next = sockets.at(-1)!;
+    next.open();
+    expect(next.last('hello')!.resume).toBeUndefined();
+    next.serverClose(4005);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(sockets).toHaveLength(2);
+    expect((await state()).loopActive).toBe(false);
+  });
+  it('true control loss while disconnected ends the task instead of reviving it', async () => {
+    const ws = await bootConnected(false, false, true, true);
+    await selectPage(ws);
+    const notify = executor.onState.mock.calls[0]![0] as () => void;
+    executor.currentControl.mockReturnValue({
+      sessionId: 'session',
+      tabId: 3,
+      tabIds: [3],
+      phase: 'ready',
+    });
+    notify();
+    ws.serverClose(1006);
+    executor.currentControl.mockReturnValue(null);
+    notify();
+    const next = await reconnect();
+    expect(next.last('agent-turn-end')!.status).toBe('interrupted');
+    expect(next.last('agent-request')).toBeUndefined();
+    expect((await state()).loopActive).toBe(false);
+  });
+  it('configuration revocation drops recovery payloads and starts a fresh handshake', async () => {
+    const ws = await bootConnected(false, false, true, true);
+    await begin(ws);
+    ws.serverClose(1006);
+    await ask({ type: 'remote-set-enabled', enabled: false });
+    expect((await state()).loopActive).toBe(false);
+    await ask({ type: 'remote-set-enabled', enabled: true });
+    const next = sockets.at(-1)!;
+    next.open();
+    expect(next.last('hello')!.resume).toBeUndefined();
+    expect(next.last('agent-request')).toBeUndefined();
+  });
   it('correlates task and operation lifecycle without logging task text or tool arguments', async () => {
     const ws = await bootConnected();
     await ask({ type: 'remote-diagnostics-set-enabled', enabled: true });
@@ -722,6 +987,7 @@ describe('decision transport background', () => {
       'agent-activity-v1',
       'agent-history-v1',
       'agent-input-v1',
+      'task-resume-v1',
     ]);
     const request = await begin(ws, 'Hello');
     expect(ws.last('chat')).toBeUndefined();

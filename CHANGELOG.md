@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Negotiate `task-resume-v1` to preserve a live task across temporary transport
+  loss for at most two minutes. Reconcile runtime/task/request identity and
+  acknowledge queued request, owner-input and terminal frames without replaying
+  browser actions. Pause new operations until reconnection and keep started
+  operation results. Show localized recovery state and durable failure notices.
+  Stop, control revocation, configuration changes and process restarts cannot
+  revive the old task. Requires a compatible Remote; no version bump or release.
+
 - Preserve completed research-operation receipts when a later browser action loses
   control, and include research operations in the diagnostic event stream.
 - Mark mid-task diagnostic capture as partial while retaining local task correlation;
