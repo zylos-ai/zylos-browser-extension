@@ -361,6 +361,48 @@ agent-turn-end 的 status 为 done、blocked、interrupted 或 stopped。
 此终止回执不包含参数、页面内容或异常原文，也不产生下一轮决策。Remote 只校验结构、大小和关联，
 不维护浏览器动作注册表，不解释或重放动作。旧版 Remote 可以忽略附加字段；任务仍然终止。
 
+### Optional one-time detailed sharing `diagnostics-detail-share-v1`
+
+The optional `diagnostics-incident-bundle-v2` capability identifies previews
+whose JSON text has `schemaVersion: 2` and `kind: "browser-incident-bundle"`.
+The fetch envelope remains version 1 with the exact immutable `text` and
+`sha256`. The bundle nests the previous detailed capture in `capture`, and adds
+bounded `correlations`, `incidents`, `previewRuntime`, `clock` and `limitations`.
+Incidents contain `runtimeAtTrigger`, `pageBefore`, `pageState`, partial windows
+and record sequence references. Trigger categories are `debugger-detach`,
+`control-lost` and `operation-error`. The clock declares
+`remoteComparable: false`; receipt times from another process do not establish
+cross-process causal order. Remote companion evidence must remain outside the
+previewed text/hash and must join exact endpoint, task and action identifiers.
+
+Each incident also includes `triggerFacts` (one to three distinct trigger
+categories, each with `reason`, `triggeredAt`, `runtimeAtTrigger`) and
+`pageBeforeTiming` (`actionStartedAt` when available and `relation` equal to
+`before-action`, `after-action-start`, `same-millisecond` or `unknown`). Merging
+requires exact action and scope; uncorrelated between-action detach remains
+task-level evidence. Gaps disclose priority eviction, unresolved timestamp
+ordering and page state observed before a promoted detach trigger. Iframe
+record times are observation times; their text metadata also retains receipt
+time. Other record times remain receipt times.
+
+This independent capability does not change `diagnostics.get`. A trusted local
+sidepanel must prepare an immutable snapshot and explicitly authorize its transfer
+to the configured Remote. The extension requires WSS and binds authorization to
+the current connection generation, exact configured endpoint, and capture consent.
+The snapshot expires within two minutes or at capture expiry, whichever is earlier.
+Disconnect, configuration changes, capture disable, or local revocation remove it.
+
+The only remote operation is `diagnostics.detail.fetch` with strict empty `{}`
+params. Success returns `{schemaVersion:1,text,sha256}`. `text` is the exact
+UTF-8 JSON preview, capped at 2 MiB; `sha256` is its lower-case hexadecimal digest.
+The capture's original bounds and schema remain inside that JSON. The grant is
+consumed before sending, so a lost response cannot be retried under that grant.
+Missing, consumed, expired, or revoked grants return `DETAIL_SHARE_UNAVAILABLE`.
+Remote requests cannot enable capture, prepare snapshots, or grant authorization.
+General state, chat, and metadata diagnostics never carry snapshot text or grant IDs.
+Only the local panel receives safe status (prepared, authorized, consumed, expired,
+revoked) and expiry. Consumed means submitted for sending, not confirmed receipt.
+
 ### 可选诊断协议 `diagnostics-v2`
 
 插件在 hello 中声明此能力。诊断默认关闭，只能由可信侧栏开启；Remote 和 Agent 没有开启接口。

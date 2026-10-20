@@ -14,6 +14,7 @@ const executor = vi.hoisted(() => ({
     } => null,
   ),
   currentGrant: vi.fn((): null | { url: string; title: string } => null),
+  diagnosticNavigationRevision: vi.fn(() => 0),
   execute: vi.fn(async (c: { op: string }, _deadline: number) => ({ ran: c.op })),
   onState: vi.fn(),
   initializeExecutor: vi.fn(),
@@ -223,6 +224,42 @@ const respond = async (
 };
 
 describe('decision transport background', () => {
+  it('detailed logs stay local, require separate consent and purge on recipient changes', async () => {
+    const ws = await bootConnected();
+    expect((await state()).detailedDiagnostics).toMatchObject({ enabled: false });
+    await ask({ type: 'remote-detailed-set-enabled', enabled: true });
+    const details = (await state()).detailedDiagnostics as { consent: string };
+    const token = details.consent;
+    const event = {
+      kind: 'console',
+      level: 'error',
+      at: Date.now(),
+      text: 'LOCAL_PRIVATE_STACK',
+      truncated: false,
+    };
+    expect((await ask({ type: 'remote-detailed-event', consent: token, event })).value).toEqual({
+      accepted: true,
+    });
+    expect(
+      JSON.stringify((await ask({ type: 'remote-detailed-preview', consent: token })).value),
+    ).toContain('LOCAL_PRIVATE_STACK');
+    expect(JSON.stringify(await state())).not.toContain('LOCAL_PRIVATE_STACK');
+    ws.receive({
+      type: 'req',
+      id: 989,
+      method: 'remote-detailed-preview',
+      params: { consent: token },
+    });
+    await flush();
+    expect(ws.last('error')!.code).toBe('UNKNOWN_METHOD');
+    expect(JSON.stringify(ws.frames)).not.toContain('LOCAL_PRIVATE_STACK');
+    await ask({ type: 'remote-save', relayUrl: 'wss://new.example/ext', key: 'b'.repeat(64) });
+    expect((await state()).detailedDiagnostics).toMatchObject({ enabled: false, count: 0 });
+    expect((await ask({ type: 'remote-detailed-event', consent: token, event })).value).toEqual({
+      accepted: false,
+    });
+    expect((await ask({ type: 'remote-detailed-preview', consent: token })).ok).toBe(false);
+  });
   async function reconnect(status = 'resumed', epoch?: string) {
     await vi.advanceTimersByTimeAsync(1600);
     const ws = sockets.at(-1)!;
@@ -1030,6 +1067,8 @@ describe('decision transport background', () => {
     const ws = await bootConnected();
     expect(ws.protocols).toEqual([REMOTE_SUBPROTOCOL, `key.${KEY}`]);
     expect(ws.last('hello')!.capabilities).toEqual([
+      'diagnostics-detail-share-v1',
+      'diagnostics-incident-bundle-v2',
       'agent-loop-v1',
       'diagnostics-v2',
       'browser-instance-v1',

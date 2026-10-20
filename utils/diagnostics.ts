@@ -28,6 +28,8 @@ let restartCount = 0;
 let storageHealthy = true;
 let partialCapture = false;
 let taskCounter = 0;
+let detailedTaskGeneration = 0;
+export const currentDetailedTaskGeneration = () => detailedTaskGeneration;
 let opCounter = 0;
 let currentTask: number | undefined;
 let currentOp: number | undefined;
@@ -227,12 +229,14 @@ export function recordLifecycle(
   }
 }
 export function startDiagnosticTask() {
+  detailedTaskGeneration++;
   currentTask = ++taskCounter;
   currentOp = undefined;
   activeOperation = undefined;
   recordLifecycle('task-start');
   return currentTask;
 }
+export const detailedContext = () => ({ task: currentTask, operation: currentOp });
 export function endDiagnosticTask(
   status: 'done' | 'blocked' | 'stopped' | 'interrupted',
   cancel = false,

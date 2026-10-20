@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Combine detailed capture, bounded CDP/iframe diagnostics and one-time sharing
+  in a schema-2 incident bundle. Record exact task/action correlations, runtime
+  at the trigger, limited non-value page state and explicit capture gaps for
+  debugger detach, control loss and operation errors. Preserve the reviewed
+  snapshot and hash; Remote transport evidence remains a separate companion.
+  No automatic recovery, action replay or root-cause inference is added.
+
+- Add separate, explicit one-time sharing of an inspected detailed diagnostic snapshot with the configured Remote over WSS. Grants expire within two minutes and are revoked on disconnect, capture disable or configuration changes.
+
+- Add a separate, default-off detailed local capture for extension console text
+  and Error stacks. Keep at most ten minutes, 1 MiB and 1,000 events in worker
+  memory; clear on disable, expiry, connection changes or worker restart.
+  Preview and explicitly download the reviewed JSON with a SHA-256 identifier.
+  Preserve the existing safe Remote diagnostics contract: detailed logs are
+  never automatically shared or exposed through diagnostics.get.
+
 - Show successful reconnection in the existing connection status for three
   seconds, then return to Connected. Keep offline/reconnecting notices visible
   and guard delayed dismissal against newer recovery states and panel reopening.

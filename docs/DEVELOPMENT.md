@@ -34,6 +34,86 @@ Remote 只承担认证、请求关联和传递。普通聊天和任务最终回�
 实际浏览器验收只能使用隔离 profile 和本地测试 Remote，切断 WebSocket 后检查页面副作用计数、
 下一轮 ID、停止状态和侧栏提示。不得在用户已登录的浏览器上注入断线或重载测试。
 
+## Detailed Local Diagnostics
+
+`utils/detailed-diagnostics.ts` owns a separate in-memory, default-off capture;
+`detailed-runtime.ts` observes extension console/error events only. The panel
+uses consent-fenced `remote-detailed-*` messages, not the relay request path.
+No raw payload is added to RemoteState, chat, session/local storage, or
+`diagnostics.get`. RemoteState contains only capture status and a local consent
+token. Task/operation correlation uses existing local diagnostic counters.
+
+Limits are ten minutes,1MiB,1,000 events,20 console arguments,8,192 characters
+per inspected string and16,384 characters per serialized event before final
+storage/redaction bounds. Opaque objects and unsafe fields are explicitly
+marked omitted. Custom getters/toJSON are not deliberately called. Chrome's
+cached native stack getter is allowed only for native Error prototypes with
+default formatting and safe string name/message descriptors; custom formatters
+and prototype cycles are rejected with bounded reflection. Error reflection
+can execute Proxy traps. This is not full DevTools object inspection. Redaction
+is best effort; arbitrary secrets can remain. Panel losses are counted when a
+loss report arrives; crash/closure can leave unreported loss, so exports always
+declare partial capture.
+
+Preview returns a detached snapshot. Download validates current consent again,
+checks component lifetime/consent after asynchronous work, and saves exactly the
+preview bytes with a SHA-256 filename suffix. Revocation clears previews and
+rejects stale events; it cannot retract an already-started/downloaded file.
+Build metadata is generated during build with a unique ID, actual Git commit
+when available, dirty flag and timestamp; no manifest version bump is needed.
+
+`utils/incident-bundle.ts` wraps the detailed capture in schema version 2,
+kind `browser-incident-bundle`. The original version-1 capture is nested in
+`capture`. Correlations use exact protocol task/action IDs and local counters;
+they contain no arguments. `previewRuntime` is distinct from each incident's
+`runtimeAtTrigger`. `pageBefore` and `pageState` use independent asynchronous
+document-pinned reads with a one-second deadline and explicit unavailable,
+stale or pending statuses. A late pre-state is labeled in the window gaps.
+All windows remain partial. Already previewed or shared bytes never gain later
+records. There is no recovery, replay or page modification in this collector.
+
+Incidents merge only when exact task/action IDs and the original action's
+consent, task generation, document revision and tab scope match within two
+seconds. `triggerFacts` retains up to three distinct trigger categories with
+their original runtime snapshots and times. The primary trigger favors detach;
+merged page state may precede that trigger and is labeled accordingly. Detach
+attribution requires the currently active operation, never the latest completed
+action. The eight-incident limit evicts ordinary incidents before detach; full
+detach buffers reject new ordinary incidents and report an eviction gap.
+`pageBeforeTiming` compares the observation to action start; equal milliseconds
+are explicitly unresolved, not proof that observation preceded the action.
+
+Successful `Page.screencastFrameAck` calls emit at most one cumulative, partial
+summary per five seconds per task/capture, rather than per-call start/success
+records. Failed calls and successes taking at least 250 ms remain individual
+records. The summary can omit the unreported tail when capture stops.
+Iframe records use the observer's `observedAt` as record `at`, with independent
+`receivedAt` inside metadata. Polling latency has no 250 ms upper-bound promise.
+Other records use receipt time. Parent debugger detach identifies its event
+source and an optional earlier, timestamped `getTargets` type; a subsequent
+query reports its own timestamp. Neither type identifies the cause of detachment.
+
+## One-Time Detailed Sharing
+
+`utils/detailed-sharing.ts` owns one immutable preview in memory, bounded to
+2 MiB of UTF-8 JSON. Trusted sidepanel messages prepare and explicitly grant
+its ID; remote callers cannot create consent. The fixed remote request
+`diagnostics.detail.fetch` consumes an authorized snapshot before responding.
+WSS, current capture consent, exact configured endpoint and live connection
+generation must still match. The deadline is the earlier of two minutes and
+capture expiry. Local-only status reports prepared/authorized/consumed/expired/
+revoked without exposing text or grant IDs. A consumed grant is a send attempt,
+not proof of receipt. Remote services and AI providers may retain received data.
+
+The UI tests cover independent unchecked consent, late replies, recipient changes
+and revocation from a newly mounted panel. The sharing unit tests cover immutable
+bytes, single use, TLS, bounds, expiry, recipient/generation fencing and in-flight
+preview invalidation. `tests/e2e/detailed-sharing.mjs` runs actual Chrome in a
+disposable profile, a temporary self-signed local TLS listener and a source Remote.
+Its certificate bypass applies only to that disposable browser process. Set
+`SHARE_REMOTE` to the compatible Remote `src/index.js` absolute path and
+`SHARE_EVIDENCE_DIR` to retain screenshots/results. It never loads the owner profile.
+
 ## 目录
 
 | 文件                                               | 职责                                         |

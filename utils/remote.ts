@@ -3,6 +3,7 @@
 // The extension dials out to a zylos-browser-remote relay with `relayUrl + key`
 // and nothing else. The relay is a pipe; every safety decision is made here.
 import { z } from 'zod';
+import { detailStateSchema, detailEventSchema } from './detailed-diagnostics';
 import {
   agentActivityFrameSchema,
   agentActivitySchema,
@@ -110,6 +111,13 @@ export const chatEntrySchema = z
 export type ChatEntry = z.infer<typeof chatEntrySchema>;
 
 export const remoteStateSchema = z.object({
+  detailedSharing: z
+    .object({
+      phase: z.enum(['idle', 'prepared', 'authorized', 'consumed', 'expired', 'revoked']),
+      expiresAt: z.number(),
+    })
+    .optional(),
+  detailedDiagnostics: detailStateSchema.optional(),
   diagnosticsEnabled: z.boolean().optional(),
   diagnosticsConsent: z.string().optional(),
   configured: z.boolean(),
@@ -160,6 +168,19 @@ export const initialRemoteState: RemoteState = {
 
 // Panel -> background. Only the bundled sidepanel may send these.
 export const remoteRequestSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('remote-detailed-set-enabled'), enabled: z.boolean() }).strict(),
+  z.object({ type: z.literal('remote-detailed-preview'), consent: z.string().uuid() }).strict(),
+  z.object({ type: z.literal('remote-detail-share-prepare'), consent: z.string().uuid() }).strict(),
+  z.object({ type: z.literal('remote-detail-share-grant'), id: z.string().uuid() }).strict(),
+  z.object({ type: z.literal('remote-detail-share-revoke') }).strict(),
+  z.object({ type: z.literal('remote-detailed-validate'), consent: z.string().uuid() }).strict(),
+  z
+    .object({
+      type: z.literal('remote-detailed-event'),
+      consent: z.string().uuid(),
+      event: detailEventSchema,
+    })
+    .strict(),
   z
     .object({
       type: z.literal('remote-diagnostics-event'),

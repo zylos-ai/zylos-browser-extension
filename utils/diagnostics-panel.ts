@@ -1,5 +1,7 @@
 import { installRuntimeDiagnostics } from './diagnostics-runtime';
 import type { PanelDiagnostic } from './diagnostics-schema';
+import { installDetailedRuntime } from './detailed-runtime';
+import type { DetailEvent } from './detailed-diagnostics';
 
 let consent = '';
 let pending = 0;
@@ -20,8 +22,15 @@ export function reportPanelDiagnostic(event: PanelDiagnostic) {
   const token = consent;
   pending++;
   let sending: Promise<{ ok?: boolean; value?: { accepted?: boolean } }>;
-  try { sending = chrome.runtime.sendMessage({ type: 'remote-diagnostics-event', consent: token, event }); }
-  catch { sending = Promise.reject(new Error('Diagnostic transport unavailable')); }
+  try {
+    sending = chrome.runtime.sendMessage({
+      type: 'remote-diagnostics-event',
+      consent: token,
+      event,
+    });
+  } catch {
+    sending = Promise.reject(new Error('Diagnostic transport unavailable'));
+  }
   void sending
     .then((reply) => {
       if (!reply?.ok || !reply.value?.accepted) throw new Error('Diagnostic event not accepted');
@@ -45,8 +54,57 @@ export function reportPanelDiagnostic(event: PanelDiagnostic) {
     });
 }
 export function startPanelDiagnostics() {
+  let detailToken = '';
+  let detailExpires = 0;
+  let detailPending = 0;
+  let detailLost = 0;
+  const reportDetail = (event: DetailEvent) => {
+    if (!detailToken || Date.now() >= detailExpires) return;
+    if (detailPending >= 10) {
+      detailLost = Math.min(1000000, detailLost + 1);
+      return;
+    }
+    const token = detailToken;
+    const lost = detailLost;
+    detailLost = 0;
+    detailPending++;
+    void Promise.resolve()
+      .then(() =>
+        chrome.runtime.sendMessage({
+          type: 'remote-detailed-event',
+          consent: token,
+          event: { ...event, lost },
+        }),
+      )
+      .then((reply) => {
+        if (!reply?.ok || !reply.value?.accepted) throw new Error('Not accepted');
+      })
+      .catch(() => {
+        if (token === detailToken) detailLost = Math.min(1000000, detailLost + lost + 1);
+      })
+      .finally(() => {
+        detailPending--;
+        if (token === detailToken && detailLost && event.kind !== 'panel-loss')
+          reportDetail({
+            kind: 'panel-loss',
+            level: 'warn',
+            at: Date.now(),
+            text: 'Panel events were dropped.',
+            truncated: true,
+          });
+      });
+  };
+  installDetailedRuntime(reportDetail, () => !!detailToken && Date.now() < detailExpires);
   let receivedUpdate = false;
-  const update = (state: { diagnosticsEnabled?: boolean; diagnosticsConsent?: string }) => {
+  const update = (state: {
+    diagnosticsEnabled?: boolean;
+    diagnosticsConsent?: string;
+    detailedDiagnostics?: { enabled: boolean; consent: string; expiresAt: number };
+  }) => {
+    const nextDetail = state.detailedDiagnostics?.enabled ? state.detailedDiagnostics.consent : '';
+    if (nextDetail !== detailToken) detailLost = 0;
+    detailToken = nextDetail;
+    detailExpires = state.detailedDiagnostics?.expiresAt ?? 0;
     const next =
       state.diagnosticsEnabled && typeof state.diagnosticsConsent === 'string'
         ? state.diagnosticsConsent

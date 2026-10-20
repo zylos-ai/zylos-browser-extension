@@ -1,6 +1,28 @@
 import type zh from './zh-CN';
 
 export default {
+  detailSharePreview: 'Preview a snapshot for Remote sharing',
+  detailShareRecipient: 'Recipient Remote:',
+  detailShareExpires: 'Sharing expires at',
+  detailShareDisclosure:
+    'This exact snapshot may contain sensitive text. After authorization, the configured Remote, its operator, the Agent and its configured AI provider can receive and retain a copy. One retrieval is allowed for up to two minutes over WSS. Revocation stops future retrieval only; it cannot delete received copies. A lost response may consume authorization without delivery. No automatic retry or reauthorization.',
+  detailShareConsent: 'I reviewed this snapshot and consent to this one-time transfer.',
+  detailShareAuthorize: 'Authorize one retrieval',
+  detailShareAuthorized: 'One retrieval is authorized until the expiry shown.',
+  detailShareConsumed:
+    'Authorization consumed. The snapshot was handed to the connection for sending; receipt is not confirmed.',
+  detailShareExpired: 'Sharing authorization expired. The snapshot was cleared.',
+  detailShareRevoked: 'Sharing authorization revoked. The snapshot was cleared.',
+  detailShareRevoke: 'Revoke and clear snapshot',
+  detailedDiagnostics: 'Detailed local diagnostics',
+  detailedDiagnosticsHint:
+    'Temporarily record extension logs, errors, task and connection details, and limited page state for troubleshooting. Off by default; never shared automatically. Retained for up to 10 minutes, 1 MiB / 1,000 events. No page text, input values or screenshots are collected, but error logs may contain sensitive information. Review before sharing. Cleared on disable, expiry, connection changes or background restart.',
+  detailedExpires: 'Capture clears at',
+  detailedPreview: 'Preview captured logs',
+  detailedReviewWarning:
+    'Review the exact file before downloading or sharing. Omitted, truncated and dropped events are reported in the file. This is not a complete DevTools recording.',
+  detailedDownload: 'Download reviewed JSON',
+  detailedExpired: 'Capture expired or changed. Enable a new capture and preview again.',
   diagnostics: 'Share diagnostic events',
   diagnosticsHint:
     'Allow the connected agent to read task, control, connection, error-type and console-severity events from the last 30 minutes (up to 1,000). No page content, URLs, input, keys, error text or console arguments. Off by default. Turning off clears stored events.',

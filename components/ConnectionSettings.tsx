@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useI18n } from './LanguageProvider';
 import { languagePreference } from '../utils/i18n';
 import type { RemoteState } from '../utils/remote';
+import { DetailedDiagnosticsSettings } from './DetailedDiagnosticsSettings';
 
 export function ConnectionSettings({
   state,
@@ -10,6 +11,7 @@ export function ConnectionSettings({
   onSave,
   onToggle,
   onDiagnosticsToggle,
+  onDetailedToggle,
 }: {
   state: RemoteState;
   saving: boolean;
@@ -17,6 +19,7 @@ export function ConnectionSettings({
   onSave: (relayUrl: string, key: string) => Promise<boolean>;
   onToggle: () => void;
   onDiagnosticsToggle?: () => void;
+  onDetailedToggle?: () => void;
 }) {
   const { t, preference, changeLanguage, savingLanguage, languageError } = useI18n();
   const [relayUrl, setRelayUrl] = useState(state.relayUrl || 'ws://127.0.0.1:3802/ext');
@@ -81,6 +84,11 @@ export function ConnectionSettings({
           </button>
         </form>
       </section>
+      <DetailedDiagnosticsSettings
+        state={state}
+        pending={pending}
+        onToggle={() => onDetailedToggle?.()}
+      />
       <section
         className="settings-section preferences-settings"
         aria-labelledby="preferences-heading"
