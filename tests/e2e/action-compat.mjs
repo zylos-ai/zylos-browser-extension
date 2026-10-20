@@ -316,7 +316,7 @@ try {
     'compat-plain,compat-textarea,compat-editor,compat-shadow,compat-same-frame,compat-oopif,compat-selection,compat-readonly,compat-focus,compat-replace,compat-child-race,auxframe'
   ).split(','))
     for (const method of process.env.FOCUS_METHODS?.split(',') || [
-      mode === 'compat-child-race' ? 'snapshot' : 'fill',
+      mode === 'compat-child-race' ? 'wait-for-page' : 'fill',
     ]) {
       const started = Date.now(),
         eventStart = events.length;
@@ -385,7 +385,7 @@ try {
               params:
                 method === 'fill'
                   ? { ref, text: 'probe-value' }
-                  : method === 'snapshot'
+                  : method === 'wait-for-page'
                     ? {}
                     : { ref },
             },
@@ -445,10 +445,24 @@ try {
           assert.ok(insertCalls <= 1);
           const requestToRecover = result.next;
           const commandsBefore = (await evaluate('cdpCommands', workerSession)).length;
-          if (mode === 'recovery-remove')
+          if (mode === 'recovery-remove') {
+            const connection = relay.ext.conns.get(requestToRecover.endpointId);
+            connection.ws.terminate();
+            await sleep(1500);
+            await until(async () => (await state()).connected);
+            assert.notEqual(relay.ext.conns.get(requestToRecover.endpointId), connection);
+            const resumed = relay.agent.exchange.states.get(requestToRecover.endpointId).next;
+            assert.equal(resumed.id, requestToRecover.id);
+            assert.deepEqual(resumed.execution.recovery, recovery);
+            rows.at(-1).transportResume = {
+              samePendingRequest: true,
+              unchangedRecoveryId: recovery.recoveryId,
+              unchangedExpiresAt: recovery.expiresAt,
+            };
             await evaluate(
               `chrome.scripting.executeScript({target:{tabId:${tab.id}},world:'MAIN',func:()=>document.querySelector('#aux')?.remove()})`,
             );
+          }
           if (mode === 'recovery-expired')
             await evaluate(
               'globalThis.originalCompatNow=Date.now;Date.now=()=>originalCompatNow()+121000;true',
