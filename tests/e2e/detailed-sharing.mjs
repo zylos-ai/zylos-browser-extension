@@ -381,9 +381,54 @@ try {
   await command({ type: 'remote-detail-share-revoke' });
   assert.equal((await post('/diagnostics/detail', { endpoint })).ok, false);
   const third = (await command({ type: 'remote-detail-share-prepare', consent })).value;
+  const offTab = await evaluate(
+    `chrome.tabs.create({url:${JSON.stringify(`http://127.0.0.1:${site.address().port}/?mode=off`)},active:true})`,
+  );
+  await until(async () => (await evaluate(`chrome.tabs.get(${offTab.id})`)).status === 'complete');
+  const offText = `Active diagnostics disable ${Date.now()}`;
+  await command({
+    type: 'remote-chat-send',
+    message: { role: 'user', content: [{ type: 'text', text: offText }] },
+    tabId: offTab.id,
+    windowId: offTab.windowId,
+  });
+  const offRequest = await until(() =>
+    requests.find((message) => message.text === offText && message.request),
+  );
+  const offResult = await post('/decision', {
+    endpoint,
+    id: offRequest.request.id,
+    decision: {
+      kind: 'actions',
+      actions: [
+        {
+          method: 'use-current-tab',
+          params: { contextId: offRequest.request.context.pages[0].contextId },
+        },
+      ],
+    },
+  });
+  assert.ok(offResult.next);
+  const probeCount = async () =>
+    (
+      await evaluate(
+        `chrome.scripting.executeScript({target:{tabId:${offTab.id}},world:'ISOLATED',func:()=>Object.keys(globalThis).filter(key=>key.startsWith('__coco_frame_diagnostic_')).length})`,
+      )
+    )[0].result;
+  await until(async () => (await probeCount()) > 0);
   await command({ type: 'remote-detailed-set-enabled', enabled: false });
+  await until(async () => (await probeCount()) === 0);
+  assert.equal((await state()).detailedDiagnostics.count, 0);
+  assert.equal((await command({ type: 'remote-detailed-preview', consent })).ok, false);
+  await post('/decision', {
+    endpoint,
+    id: offResult.next.id,
+    decision: { kind: 'done', text: 'Local disable fixture complete' },
+  });
   assert.equal((await command({ type: 'remote-detail-share-grant', id: third.id })).ok, false);
-  evidence.checks.push('explicit revoke; capture-disable after preview rejects grant');
+  evidence.checks.push(
+    'explicit revoke; active capture-disable purges records and page probe; old preview and grant rejected',
+  );
   await command({ type: 'remote-detailed-set-enabled', enabled: true });
   const currentConsent = (await state()).detailedDiagnostics.consent;
   const fourth = (await command({ type: 'remote-detail-share-prepare', consent: currentConsent }))
