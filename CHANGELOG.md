@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add a separate, default-off detailed local capture for extension console text
+  and Error stacks. Keep at most ten minutes, 1 MiB and 1,000 events in worker
+  memory; clear on disable, expiry, connection changes or worker restart.
+  Preview and explicitly download the reviewed JSON with a SHA-256 identifier.
+  Preserve the existing safe Remote diagnostics contract: detailed logs are
+  never automatically shared or exposed through diagnostics.get.
+
 - Show successful reconnection in the existing connection status for three
   seconds, then return to Connected. Keep offline/reconnecting notices visible
   and guard delayed dismissal against newer recovery states and panel reopening.

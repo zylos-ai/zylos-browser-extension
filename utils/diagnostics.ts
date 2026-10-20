@@ -233,6 +233,7 @@ export function startDiagnosticTask() {
   recordLifecycle('task-start');
   return currentTask;
 }
+export const detailedContext = () => ({ task: currentTask, operation: currentOp });
 export function endDiagnosticTask(
   status: 'done' | 'blocked' | 'stopped' | 'interrupted',
   cancel = false,

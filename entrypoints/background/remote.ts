@@ -7,6 +7,7 @@ import {
 import { formatTaskNotice, type TaskNotice } from '../../utils/task-notice';
 import {
   DIAGNOSTICS_CAPABILITY,
+  detailedContext,
   diagnosticsEnabled,
   diagnosticsConsent,
   diagnosticsEpoch,
@@ -25,6 +26,8 @@ import {
   setDiagnosticsEnabled,
 } from '../../utils/diagnostics';
 import { installRuntimeDiagnostics } from '../../utils/diagnostics-runtime';
+import { DetailedCapture, serializeDetail } from '../../utils/detailed-diagnostics';
+import { installDetailedRuntime } from '../../utils/detailed-runtime';
 import { safeError } from '../../utils/diagnostics-schema';
 // Extension-owned conversations: request Agent decisions, execute locally, and
 // return observations over the authenticated Remote connection.
@@ -118,6 +121,15 @@ export function startRemoteBackground() {
   let pendingStop: { taskId: string; resolve: (ok: boolean) => void } | undefined;
   let chatRevision = 0;
   let loop: BrowserLoop;
+  const detailed = new DetailedCapture(
+    () => publish(),
+    () => [config.key],
+  );
+  installDetailedRuntime(
+    (event) => detailed.append(detailed.state().consent, 'background', event, detailedContext()),
+    () => detailed.state().enabled,
+    () => [config.key],
+  );
   const runtimeEpoch = crypto.randomUUID();
   let resumeReady = false;
   let recoveryWindowMs = RECOVERY_WINDOW_MS;
@@ -213,6 +225,7 @@ export function startRemoteBackground() {
     void chrome.runtime.sendMessage({ type: 'remote-updated', state: snapshot() }).catch(() => {});
   };
   function snapshot(): RemoteState {
+    state.detailedDiagnostics = detailed.state();
     state.diagnosticsEnabled = diagnosticsEnabled();
     state.diagnosticsConsent = diagnosticsConsent();
     if (!loop?.active || state.agentActivity?.taskId !== loop.taskId)
@@ -474,6 +487,18 @@ export function startRemoteBackground() {
             });
             return result;
           } catch (error) {
+            if (detailed.state().enabled)
+              detailed.append(
+                detailed.state().consent,
+                'background',
+                {
+                  kind: 'error',
+                  level: 'error',
+                  at: Date.now(),
+                  ...serializeDetail([error], [config.key]),
+                },
+                detailedContext(),
+              );
             endDiagnosticOperation(diagnosticOperation, error, true);
             const e = error as { code?: string; message?: string };
             step?.finish(e.code || 'EXT_ERROR');
@@ -960,6 +985,12 @@ export function startRemoteBackground() {
 
   // ---------------------------------------------------------------- config
   async function applyConfig(next: RemoteConfig) {
+    if (
+      next.key !== config.key ||
+      next.relayUrl !== config.relayUrl ||
+      next.enabled !== config.enabled
+    )
+      detailed.clear();
     if (config.key && (next.key !== config.key || next.relayUrl !== config.relayUrl))
       await setDiagnosticsEnabled(false);
     const changed =
@@ -1065,6 +1096,16 @@ export function startRemoteBackground() {
       await boot;
       const m = parsed.data;
       switch (m.type) {
+        case 'remote-detailed-set-enabled':
+          if (m.enabled) detailed.enable();
+          else detailed.clear();
+          return snapshot();
+        case 'remote-detailed-preview':
+          return detailed.preview(m.consent);
+        case 'remote-detailed-validate':
+          return { valid: detailed.valid(m.consent) };
+        case 'remote-detailed-event':
+          return { accepted: detailed.append(m.consent, 'sidepanel', m.event, detailedContext()) };
         case 'remote-diagnostics-event':
           return { accepted: acceptPanelDiagnostic(m.consent, m.event) };
         case 'remote-diagnostics-set-enabled':
@@ -1082,8 +1123,10 @@ export function startRemoteBackground() {
           if (!next.relayUrl || !next.key) throw new Error('ui.error.credentialsRequired');
           // Revoke sharing before persisting a different recipient. A worker
           // suspension between these writes must never expose the old records.
-          if (next.key !== config.key || next.relayUrl !== config.relayUrl)
+          if (next.key !== config.key || next.relayUrl !== config.relayUrl) {
+            detailed.clear();
             await setDiagnosticsEnabled(false);
+          }
           await diagnosticStorage('write', () =>
             chrome.storage.local.set({ [REMOTE_CONFIG_KEY]: next }),
           );
@@ -1091,6 +1134,7 @@ export function startRemoteBackground() {
           return snapshot();
         }
         case 'remote-set-enabled': {
+          if (config.enabled !== m.enabled) detailed.clear();
           const next = { ...config, enabled: m.enabled };
           await diagnosticStorage('write', () =>
             chrome.storage.local.set({ [REMOTE_CONFIG_KEY]: next }),
@@ -1238,6 +1282,7 @@ export function startRemoteBackground() {
       'remote-save',
       'remote-set-enabled',
       'remote-diagnostics-set-enabled',
+      'remote-detailed-set-enabled',
     ].includes(parsed.data.type);
     const pending = mutatesConsent ? panelMutations.catch(() => {}).then(run) : run();
     if (mutatesConsent) panelMutations = pending;

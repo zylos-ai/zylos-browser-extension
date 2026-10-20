@@ -1,6 +1,6 @@
 # Zylos Browser Privacy Policy
 
-Last updated: October 19, 2026.
+Last updated: October 20, 2026.
 
 This policy describes Zylos Browser, the Chrome extension maintained in the [zylos-ai/zylos-browser-extension project](https://github.com/zylos-ai/zylos-browser-extension). It includes the optional diagnostics feature in the current source; diagnostics requires a compatible extension and Remote build.
 
@@ -31,6 +31,12 @@ Messages, original attachments, selected text, page context, and task observatio
 The extension does not include a mechanism that sells user data or sends it to advertising services. It does not use user data for advertising, creditworthiness decisions, or lending. Data use and transfers through the extension are limited to its stated user-facing functionality. Zylos Browser's use of information received through Chrome APIs adheres to the Chrome Web Store User Data Policy, including its Limited Use requirements.
 
 ## Storage, retention, and deletion
+
+**Detailed local diagnostics is a separate opt-in.** It captures bounded console strings and Error messages/stacks from the extension background and sidepanel, plus handled browser-operation errors. It does not subscribe to webpage consoles or DevTools logs. Ordinary objects, functions, symbols and bigints are omitted and marked incomplete. Error string data fields are read directly; Chrome's cached native stack getter is allowed only for known native Error prototypes with default formatting and no name/message accessors. Custom getters, custom stack formatters and toJSON methods are not deliberately invoked. Prototype/descriptor inspection can trigger Proxy reflection traps, so this is best-effort diagnostic instrumentation, not a sandbox for hostile JavaScript objects.
+
+Detailed records remain in background-worker memory for at most ten minutes, 1 MiB and 1,000 records. Overflow evicts oldest records and reports drop counts; serialization limits and reported panel transport losses are recorded. Capture starts partway through an existing runtime and cannot reconstruct previous events. A panel closing, a process crash or failed loss reporting can lose additional events. Disable, expiry, connection-setting changes or worker restart clear the capture; it is not automatically enabled again.
+
+Detailed text may contain private data from extension operations. The capture removes the configured connection Key and recognizable credential patterns, and removes credentials/query/fragment parts of HTTP URLs. These rules cannot identify all secrets or personal information. Review the local JSON preview before explicitly downloading or sharing it. Download uses the exact preview bytes and displays their SHA-256; files include capture/runtime identifiers, timestamps, extension version, a unique build identifier and available source-commit/dirty metadata. The existing Remote diagnostics interface never returns these detailed records. Disabling capture cannot retract a file already downloaded or copies you explicitly shared.
 
 Connection settings, the installation identifier, language preferences, recent chat history, bounded Agent progress history, attachment metadata, small image previews, and task-recovery information are stored in the extension's local storage in your Chrome profile. The extension uses local storage, not Chrome's sync storage, for these records.
 

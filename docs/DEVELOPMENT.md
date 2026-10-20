@@ -34,6 +34,34 @@ Remote 只承担认证、请求关联和传递。普通聊天和任务最终回�
 实际浏览器验收只能使用隔离 profile 和本地测试 Remote，切断 WebSocket 后检查页面副作用计数、
 下一轮 ID、停止状态和侧栏提示。不得在用户已登录的浏览器上注入断线或重载测试。
 
+## Detailed Local Diagnostics
+
+`utils/detailed-diagnostics.ts` owns a separate in-memory, default-off capture;
+`detailed-runtime.ts` observes extension console/error events only. The panel
+uses consent-fenced `remote-detailed-*` messages, not the relay request path.
+No raw payload is added to RemoteState, chat, session/local storage, or
+`diagnostics.get`. RemoteState contains only capture status and a local consent
+token. Task/operation correlation uses existing local diagnostic counters.
+
+Limits are ten minutes,1MiB,1,000 events,20 console arguments,8,192 characters
+per inspected string and16,384 characters per serialized event before final
+storage/redaction bounds. Opaque objects and unsafe fields are explicitly
+marked omitted. Custom getters/toJSON are not deliberately called. Chrome's
+cached native stack getter is allowed only for native Error prototypes with
+default formatting and safe string name/message descriptors; custom formatters
+and prototype cycles are rejected with bounded reflection. Error reflection
+can execute Proxy traps. This is not full DevTools object inspection. Redaction
+is best effort; arbitrary secrets can remain. Panel losses are counted when a
+loss report arrives; crash/closure can leave unreported loss, so exports always
+declare partial capture.
+
+Preview returns a detached snapshot. Download validates current consent again,
+checks component lifetime/consent after asynchronous work, and saves exactly the
+preview bytes with a SHA-256 filename suffix. Revocation clears previews and
+rejects stale events; it cannot retract an already-started/downloaded file.
+Build metadata is generated during build with a unique ID, actual Git commit
+when available, dirty flag and timestamp; no manifest version bump is needed.
+
 ## 目录
 
 | 文件                                               | 职责                                         |
