@@ -16,7 +16,7 @@ export default {
   detailShareRevoke: 'Revoke and clear snapshot',
   detailedDiagnostics: 'Detailed local diagnostics',
   detailedDiagnosticsHint:
-    'Off by default. Record extension console text, error stacks, CDP call status and limited iframe mutation metadata for 10 minutes, up to 1 MiB / 1,000 events. Incident bundles also include task/action IDs, connection/control state and limited page state: visibility, readiness, iframe count, focus category and input disabled/read-only flags. No page text, input values or screenshots. CDP arguments/results and iframe URLs are omitted. Iframe observation covers only the controlled top document for up to 2 minutes. May contain private information; redaction is incomplete. No webpage console or automatic sharing. Turning off, changing connection settings, expiry or worker restart clears the capture.',
+    'Temporarily record extension logs, errors, task and connection details, and limited page state for troubleshooting. Off by default; never shared automatically. Retained for up to 10 minutes, 1 MiB / 1,000 events. No page text, input values or screenshots are collected, but error logs may contain sensitive information. Review before sharing. Cleared on disable, expiry, connection changes or background restart.',
   detailedExpires: 'Capture clears at',
   detailedPreview: 'Preview captured logs',
   detailedReviewWarning:
