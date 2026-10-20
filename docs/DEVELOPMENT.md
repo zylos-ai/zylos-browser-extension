@@ -108,6 +108,23 @@ Remote 无需维护第二份动作表。
 
 ## 验证
 
+### 诊断和控制权丢失
+
+`utils/diagnostics-schema.ts` 定义插件拥有的语义/隐私白名单；`diagnostics.ts` 管理有界 session 缓冲区、
+本地任务关联、epoch 和分页。`diagnostics-runtime.ts` 只记录异常类型及 console 级别，
+`diagnostics-panel.ts` 通过可信侧栏和同意令牌发送事件。研究台账与浏览器动作均记录操作结果。
+Remote 只负责鉴权、实例关联和有界传输，不复制动作注册表或决定恢复策略。
+协议字段和保留上限以 [线路协议](EXTENSION-WEBSOCKET-PROTOCOL.md) 的 diagnostics-v2 节为准。
+
+中途开启诊断会重新建立本地任务关联，并标记 `partialCapture`。这不补造已经错过的开始事件，
+也不会把旧 epoch 的迟到结果加入新记录。开关、接收方变更、worker 重启和队列溢出都需回归验证。
+
+控制权丢失与普通观察失败不同：`ControlLoss` 保留当前批次已完成的研究操作和浏览器操作的安全回执，
+终止任务，不恢复控制、不重放输入。`PAGE_CHANGED/PAGE_LOADING` 等可恢复观察错误仍返回决策循环；
+尚未取得控制的初始选择失败仍保留 reading 模式。细节见 [控制丢失回执](CONTROL-LOSS.md)。
+修改这些行为需同时验证真实 Chrome、用户停止/取消、迟到响应、研究前缀和普通只读路径。
+改线路字段时同步两仓权威协议文档；Agent 提示词按代码评审，不另建替代开发手册。
+
 ```sh
 npm test
 npm run test:build

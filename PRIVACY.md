@@ -1,8 +1,8 @@
 # Zylos Browser Privacy Policy
 
-Last updated: October 9, 2026.
+Last updated: October 16, 2026.
 
-This policy describes Zylos Browser, the Chrome extension maintained in the [zylos-ai/zylos-browser-extension project](https://github.com/zylos-ai/zylos-browser-extension). It reflects extension version 0.17.0 and Zylos Browser Remote 0.10.0.
+This policy describes Zylos Browser, the Chrome extension maintained in the [zylos-ai/zylos-browser-extension project](https://github.com/zylos-ai/zylos-browser-extension). It includes the optional diagnostics feature in the current source; diagnostics requires a compatible extension and Remote build.
 
 ## How Zylos Browser works
 
@@ -18,6 +18,8 @@ Your Relay operator, Agent operator, and any AI model or tool providers used by 
 - **Browser-task observations.** For a requested task, the extension can read page text and accessibility/DOM information and capture screenshots. It can process navigation, element, viewport, and operation results so the Agent can decide the next step. Page observations can contain personal information that is visible on the page.
 - **Task activity.** The extension keeps a bounded local activity history, such as operation names, timing, status, and short target hints. When supported by your Remote, it also receives public Agent progress messages and limited tool activity from the task's Agent session. Accepted decision summaries are included in this history. Hidden model reasoning is not collected for this display. During a task it also observes network request identifiers and timing to determine whether a page has finished loading; this readiness tracker does not retain request headers or response bodies. This supports browser-task execution, rather than general browsing analytics or a recording of everything you type.
 
+- **Optional diagnostics.** Diagnostics is off by default. When you enable it in extension Settings, the extension records allowlisted task, operation, control, connection and runtime events. Records include timestamps, sequence numbers, severity, source context, predefined methods/reasons/error codes, and locally generated task/operation numbers. Background and sidepanel console calls contribute severity and argument counts only; runtime errors contribute safe error classes/codes, not messages or stacks. Your configured Relay and Agent can request and export these records, the actual extension version, and capture completeness metadata. Diagnostic records do not include page text, URLs, input values, cookies, connection Keys, request/response bodies, or arbitrary console/error messages. Your Agent cannot turn this setting on remotely.
+
 The extension has no separate registration form requesting your name, email address, age, postal address, or government identification. It does not request device geolocation or include advertising or third-party analytics SDKs. Content you choose to send, or that appears in a task page or screenshot, may itself contain personal or sensitive information.
 
 ## How information is used and shared
@@ -31,6 +33,8 @@ The extension does not include a mechanism that sells user data or sends it to a
 ## Storage, retention, and deletion
 
 Connection settings, the installation identifier, language preferences, recent chat history, bounded Agent progress history, attachment metadata, small image previews, and task-recovery information are stored in the extension's local storage in your Chrome profile. The extension uses local storage, not Chrome's sync storage, for these records.
+
+The diagnostic preference is stored locally. Diagnostic records are kept separately in Chrome extension session storage, limited to 1,000 events and 256 KiB, and records older than 30 minutes are excluded when the buffer is read or updated. Capture identifiers, local counters, partial-capture and restart/loss metadata accompany that buffer. Enabling diagnostics during a task starts a new partial capture and does not recover earlier events. Browser-session storage is not a permanent log archive. Turning diagnostics off clears the local buffer; changing the Relay URL or connection Key also disables diagnostics and clears it before saving the new recipient. The diagnostic retrieval endpoint does not create a separate persistent log archive on Remote. Your Agent or other tools may retain or export a fetched copy; turning the switch off cannot retract copies already returned to those services.
 
 Original attachment files are not retained in local chat history. Zylos Browser Remote 0.10.0 writes task-owned temporary attachments and screenshots on the Agent host and attempts to delete those files when their task ends. A process crash or filesystem failure can prevent that cleanup. This cleanup does not delete your original local files or independent copies, conversation records, logs, or backups made by the Agent, Relay deployment, model providers, or other tools.
 

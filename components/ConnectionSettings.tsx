@@ -9,12 +9,14 @@ export function ConnectionSettings({
   pending,
   onSave,
   onToggle,
+  onDiagnosticsToggle,
 }: {
   state: RemoteState;
   saving: boolean;
   pending: boolean;
   onSave: (relayUrl: string, key: string) => Promise<boolean>;
   onToggle: () => void;
+  onDiagnosticsToggle?: () => void;
 }) {
   const { t, preference, changeLanguage, savingLanguage, languageError } = useI18n();
   const [relayUrl, setRelayUrl] = useState(state.relayUrl || 'ws://127.0.0.1:3802/ext');
@@ -84,6 +86,31 @@ export function ConnectionSettings({
         aria-labelledby="preferences-heading"
       >
         <h2 id="preferences-heading">{t('preferences')}</h2>
+        <div className="settings-row">
+          <div className="settings-copy">
+            <label id="diagnostics-label" htmlFor="diagnostics-enabled">
+              {t('diagnostics')}
+            </label>
+            <p id="diagnostics-hint" className="settings-hint">
+              {t('diagnosticsHint')}
+            </p>
+          </div>
+          <button
+            id="diagnostics-enabled"
+            className="connection-toggle"
+            type="button"
+            role="switch"
+            aria-checked={!!state.diagnosticsEnabled}
+            aria-labelledby="diagnostics-label"
+            aria-describedby="diagnostics-hint"
+            disabled={pending}
+            onClick={onDiagnosticsToggle}
+          >
+            <span className="settings-switch-track" aria-hidden="true">
+              <span />
+            </span>
+          </button>
+        </div>
         <div className="settings-row language-settings">
           <div className="settings-copy">
             <label htmlFor="interface-language">{t('language')}</label>

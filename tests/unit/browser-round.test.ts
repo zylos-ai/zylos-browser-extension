@@ -6,9 +6,11 @@ const executor = vi.hoisted(() => ({
   browserPageVersion: vi.fn(),
   flushTaskPopups: vi.fn(async () => {}),
   taskPopupOpener: vi.fn(),
+  controlLossRevision: vi.fn(),
 }));
 vi.mock('../../utils/automation/executor', () => executor);
 import { runBrowserRound } from '../../utils/browser-round';
+import { BrowserLoop, type AgentRequest } from '../../utils/browser-loop';
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -16,11 +18,115 @@ beforeEach(() => {
   executor.currentControl.mockReturnValue({ sessionId: 'task', tabId: 1, tabIds: [1] });
   executor.currentGrant.mockReturnValue({ id: 1, url: 'https://example.com' });
   executor.browserPageVersion.mockReturnValue('task:1:1');
+  executor.controlLossRevision.mockReturnValue(0);
   vi.stubGlobal('chrome', {
     tabs: {
       get: vi.fn(async (id: number) => ({ id, url: 'https://example.com', status: 'complete' })),
     },
   });
+});
+
+it.each(['snapshot', 'after-fill', 'during-fill', 'before-round'])(
+  'terminalizes %s control loss with receipts and no new decision',
+  async (stage) => {
+    const requests: AgentRequest[] = [];
+    const finish = vi.fn(async () => {});
+    const call = vi.fn(async (method: string) => {
+      if (
+        (method === 'fill' && ['after-fill', 'during-fill'].includes(stage)) ||
+        (method === 'snapshot' && stage === 'snapshot')
+      ) {
+        executor.currentControl.mockReturnValue(null);
+        executor.controlLossRevision.mockReturnValue(1);
+        if (stage !== 'after-fill')
+          throw Object.assign(new Error('PRIVATE_DETAIL'), {
+            code: stage === 'snapshot' ? 'STOPPED' : 'OTHER',
+          });
+      }
+      return { text: 'PRIVATE_PAGE', filled: true };
+    });
+    const loop = new BrowserLoop({
+      send: (request) => {
+        requests.push(request);
+        return true;
+      },
+      input: () => true,
+      execute: (actions, active, id, updates, expectedControl) =>
+        runBrowserRound(actions, call, active, id, updates, expectedControl),
+      finish,
+      cancel: () => {},
+    });
+    const flush = async () => {
+      for (let i = 0; i < 30; i++) await Promise.resolve();
+    };
+    loop.start(
+      'task',
+      { role: 'user', content: [{ type: 'text', text: 'PRIVATE_GOAL' }] },
+      { type: 'current-page', status: 'unavailable' },
+    );
+    loop.accept(requests[0]!.id, {
+      kind: 'actions',
+      actions: [
+        { method: 'read-page', params: { contextId: '11111111-1111-4111-8111-111111111111' } },
+      ],
+    });
+    await flush();
+    expect(requests).toHaveLength(2);
+    if (stage === 'before-round') executor.currentControl.mockReturnValue(null);
+    loop.accept(requests[1]!.id, {
+      kind: 'actions',
+      actions: [
+        { method: 'fill', params: { ref: '@input', text: 'PRIVATE_INPUT' } },
+        ...(stage === 'snapshot' ? [] : [{ method: 'click', params: { ref: '@submit' } }]),
+      ],
+    });
+    await flush();
+    expect(requests).toHaveLength(2);
+    expect(loop.active).toBe(false);
+    expect(finish).toHaveBeenCalledWith(
+      expect.any(String),
+      'interrupted',
+      'task',
+      { kind: 'interrupted' },
+      {
+        reason: 'CONTROL_LOST',
+        observation: 'unavailable',
+        resume: 'new-user-message-required',
+        results: [
+          {
+            method: 'fill',
+            outcome:
+              stage === 'during-fill'
+                ? 'uncertain'
+                : stage === 'before-round'
+                  ? 'not-executed'
+                  : 'completed',
+          },
+          ...(stage === 'snapshot' ? [] : [{ method: 'click', outcome: 'not-executed' }]),
+        ],
+      },
+    );
+    expect(call.mock.calls.filter(([method]) => method === 'fill')).toHaveLength(
+      stage === 'before-round' ? 0 : 1,
+    );
+    expect(
+      call.mock.calls.some(
+        ([method]) => method === 'click' || method === 'use-current-tab' || method === 'open',
+      ),
+    ).toBe(false);
+    expect(JSON.stringify(finish.mock.calls)).not.toContain('PRIVATE');
+    expect(() => loop.accept(requests[1]!.id + '-stale', { kind: 'done', text: 'late' })).toThrow();
+  },
+);
+
+it('keeps an initial selection failure recoverable when no control was acquired', async () => {
+  executor.currentControl.mockReturnValue(null);
+  const call = vi.fn(async () => {
+    throw Object.assign(new Error('selection denied'), { code: 'TAB_NOT_GRANTED' });
+  });
+  await expect(
+    runBrowserRound([{ method: 'use-current-tab', params: {} }], call, () => {}, 'r'),
+  ).resolves.toMatchObject({ mode: 'reading', failed: true });
 });
 afterEach(() => {
   vi.useRealTimers();

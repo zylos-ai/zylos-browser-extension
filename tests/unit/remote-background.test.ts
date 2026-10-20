@@ -121,6 +121,7 @@ beforeEach(() => {
   });
   vi.stubGlobal('chrome', {
     runtime: {
+      getManifest: () => ({ version: '0.17.0' }),
       id: 'x'.repeat(32),
       onConnect: { addListener: vi.fn() },
       sendMessage: vi.fn(async (m: unknown) => {
@@ -133,6 +134,7 @@ beforeEach(() => {
       },
     },
     storage: {
+      session: { get: vi.fn(async () => ({})), set: vi.fn(async () => {}) },
       onChanged: { addListener: vi.fn(), removeListener: vi.fn() },
       local: {
         setAccessLevel: vi.fn(async () => {}),
@@ -208,6 +210,120 @@ const respond = async (
 };
 
 describe('decision transport background', () => {
+  it('correlates task and operation lifecycle without logging task text or tool arguments', async () => {
+    const ws = await bootConnected();
+    await ask({ type: 'remote-diagnostics-set-enabled', enabled: true });
+    const request = await begin(ws, 'PRIVATE_TASK_INPUT');
+    await respond(ws, request, {
+      kind: 'actions',
+      actions: [{ method: 'open', params: { url: 'https://private.example/?token=PRIVATE_URL' } }],
+    });
+    await respond(ws, ws.last('agent-request')!, { kind: 'done', text: 'PRIVATE_OUTPUT' });
+    ws.receive({ type: 'req', id: 999, method: 'diagnostics.get', params: {} });
+    await flush();
+    const result = ws.last('resp')!.result as { events: any[] };
+    const start = result.events.find((e) => e.event === 'task-start');
+    expect(start.task).toBeTypeOf('number');
+    const operation = result.events.find(
+      (e) => e.event === 'operation-start' && e.method === 'open',
+    );
+    expect(operation.task).toBe(start.task);
+    expect(result.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          event: 'operation-result',
+          task: start.task,
+          op: operation.op,
+          method: 'open',
+        }),
+        expect.objectContaining({ event: 'task-end', task: start.task, status: 'done' }),
+      ]),
+    );
+    expect(JSON.stringify(result)).not.toContain('PRIVATE');
+    expect(JSON.stringify(result)).not.toContain(request.taskId as string);
+  });
+  it('revokes diagnostic sharing before persisting a different recipient', async () => {
+    await bootConnected();
+    await ask({ type: 'remote-diagnostics-set-enabled', enabled: true });
+    const writes: string[] = [];
+    vi.mocked(chrome.storage.local.set).mockImplementation(async (obj: Record<string, unknown>) => {
+      if (obj.remoteConfig) {
+        expect(storage['remote-diagnostics-enabled']).toBe(false);
+        writes.push('config');
+      }
+      if (obj['remote-diagnostics-enabled'] === false) writes.push('disable');
+      Object.assign(storage, obj);
+    });
+    const result = await ask({
+      type: 'remote-save',
+      relayUrl: 'ws://127.0.0.1:9999/ext',
+      key: 'b'.repeat(64),
+    });
+    expect(result.ok).toBe(true);
+    expect(writes.indexOf('disable')).toBeLessThan(writes.indexOf('config'));
+  });
+  it('serializes a recipient change against a second panel enabling diagnostics', async () => {
+    await bootConnected();
+    await ask({ type: 'remote-diagnostics-set-enabled', enabled: true });
+    let resume!: () => void;
+    let firstDisable = true;
+    const writes: string[] = [];
+    vi.mocked(chrome.storage.local.set).mockImplementation(async (obj: Record<string, unknown>) => {
+      if (obj['remote-diagnostics-enabled'] === false && firstDisable) {
+        firstDisable = false;
+        await new Promise<void>((resolve) => {
+          resume = resolve;
+        });
+      }
+      if (obj.remoteConfig) {
+        expect(storage['remote-diagnostics-enabled']).toBe(false);
+        writes.push('config');
+      }
+      if (obj['remote-diagnostics-enabled'] === true) writes.push('enable');
+      Object.assign(storage, obj);
+    });
+    const changing = ask({
+      type: 'remote-save',
+      relayUrl: 'ws://127.0.0.1:9999/ext',
+      key: 'b'.repeat(64),
+    });
+    await flush();
+    const enabling = ask({ type: 'remote-diagnostics-set-enabled', enabled: true });
+    await flush();
+    expect(writes).toEqual([]);
+    resume();
+    expect((await changing).ok).toBe(true);
+    expect((await enabling).ok).toBe(true);
+    expect(writes).toEqual(['config', 'enable']);
+  });
+  it('reads diagnostics without control and cannot enable them through remote requests', async () => {
+    const ws = await bootConnected();
+    ws.receive({ type: 'req', id: 501, method: 'diagnostics.get', params: {} });
+    await flush();
+    expect(ws.last('resp')).toMatchObject({
+      id: 501,
+      result: { enabled: false, events: [], version: '0.17.0' },
+    });
+    ws.receive({ type: 'req', id: 502, method: 'diagnostics.get', params: { enabled: true } });
+    await flush();
+    expect(ws.last('error')).toMatchObject({ id: 502, code: 'BAD_PARAMS' });
+    expect(executor.execute).not.toHaveBeenCalled();
+    expect(executor.release).not.toHaveBeenCalled();
+    expect((await ask({ type: 'remote-diagnostics-set-enabled', enabled: true })).ok).toBe(true);
+    ws.receive({ type: 'req', id: 503, method: 'diagnostics.get', params: {} });
+    await flush();
+    expect(ws.last('resp')).toMatchObject({
+      id: 503,
+      result: {
+        enabled: true,
+        events: expect.arrayContaining([expect.objectContaining({ event: 'enabled' })]),
+      },
+    });
+    await ask({ type: 'remote-diagnostics-set-enabled', enabled: false });
+    ws.receive({ type: 'req', id: 504, method: 'diagnostics.get', params: {} });
+    await flush();
+    expect(ws.last('resp')).toMatchObject({ id: 504, result: { enabled: false, events: [] } });
+  });
   it('lets a slow browser action finish without a default deadline or replay', async () => {
     const ws = await bootConnected();
     const request = await selectPage(ws);
@@ -600,6 +716,7 @@ describe('decision transport background', () => {
     expect(ws.protocols).toEqual([REMOTE_SUBPROTOCOL, `key.${KEY}`]);
     expect(ws.last('hello')!.capabilities).toEqual([
       'agent-loop-v1',
+      'diagnostics-v2',
       'browser-instance-v1',
       'agent-message-v2',
       'agent-activity-v1',
