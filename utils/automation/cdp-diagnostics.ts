@@ -9,6 +9,7 @@ type TargetState = {
   controlled: boolean;
   borrowed: boolean;
   revision?: number;
+  groupReference?: 'none' | 'assigned';
 };
 let hooks:
   | {
@@ -16,6 +17,7 @@ let hooks:
       valid: (lease: Lease) => boolean;
       emit: (lease: Lease, event: DetailEvent) => void;
       secrets: () => string[];
+      incident?: (context: Context, reason?: string) => void;
     }
   | undefined;
 let state: () => TargetState = () => ({ granted: false, controlled: false, borrowed: false });
@@ -101,9 +103,23 @@ function currentState() {
       granted: value.granted,
       controlled: value.controlled,
       borrowed: value.borrowed,
+      groupReference: value.groupReference,
     };
   } catch {
     return undefined;
+  }
+}
+export function recordControlDiagnostic(reason: string) {
+  try {
+    const lease = capture();
+    if (lease)
+      emit(lease, {
+        event: 'release',
+        reason: /^[a-z_]{1,40}$/.test(reason) ? reason : 'other',
+        state: currentState(),
+      });
+  } catch {
+    /* Diagnostics do not affect release. */
   }
 }
 function emit(lease: Lease | undefined, metadata: object, error?: unknown) {
@@ -136,6 +152,7 @@ export function recordDebuggerEvent(
     if (!lease) return;
     const before = state();
     if (!before.controlled || target.tabId !== before.tabId) return;
+    if (event === 'detach') hooks?.incident?.(lease.context, reason);
     emit(lease, {
       event,
       ...targetInfo(target),

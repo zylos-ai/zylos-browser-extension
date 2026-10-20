@@ -14,6 +14,7 @@ const executor = vi.hoisted(() => ({
     } => null,
   ),
   currentGrant: vi.fn((): null | { url: string; title: string } => null),
+  diagnosticNavigationRevision: vi.fn(() => 0),
   execute: vi.fn(async (c: { op: string }, _deadline: number) => ({ ran: c.op })),
   onState: vi.fn(),
   initializeExecutor: vi.fn(),
@@ -1067,6 +1068,7 @@ describe('decision transport background', () => {
     expect(ws.protocols).toEqual([REMOTE_SUBPROTOCOL, `key.${KEY}`]);
     expect(ws.last('hello')!.capabilities).toEqual([
       'diagnostics-detail-share-v1',
+      'diagnostics-incident-bundle-v2',
       'agent-loop-v1',
       'diagnostics-v2',
       'browser-instance-v1',

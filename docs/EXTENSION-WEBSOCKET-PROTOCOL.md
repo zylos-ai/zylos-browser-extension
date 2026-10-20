@@ -363,6 +363,18 @@ agent-turn-end 的 status 为 done、blocked、interrupted 或 stopped。
 
 ### Optional one-time detailed sharing `diagnostics-detail-share-v1`
 
+The optional `diagnostics-incident-bundle-v2` capability identifies previews
+whose JSON text has `schemaVersion: 2` and `kind: "browser-incident-bundle"`.
+The fetch envelope remains version 1 with the exact immutable `text` and
+`sha256`. The bundle nests the previous detailed capture in `capture`, and adds
+bounded `correlations`, `incidents`, `previewRuntime`, `clock` and `limitations`.
+Incidents contain `runtimeAtTrigger`, `pageBefore`, `pageState`, partial windows
+and record sequence references. Trigger categories are `debugger-detach`,
+`control-lost` and `operation-error`. The clock declares
+`remoteComparable: false`; receipt times from another process do not establish
+cross-process causal order. Remote companion evidence must remain outside the
+previewed text/hash and must join exact endpoint, task and action identifiers.
+
 This independent capability does not change `diagnostics.get`. A trusted local
 sidepanel must prepare an immutable snapshot and explicitly authorize its transfer
 to the configured Remote. The extension requires WSS and binds authorization to

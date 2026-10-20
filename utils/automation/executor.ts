@@ -6,6 +6,7 @@ import {
   recordDebuggerEvent,
   setDiagnosticTarget,
   refreshCdpDiagnostics,
+  recordControlDiagnostic,
 } from './cdp-diagnostics';
 import { NetworkActivity, waitForStablePage } from './page-stability';
 import { frameEvent, frameSessions, enableFrames, clearFrameSessions } from './frames';
@@ -51,6 +52,7 @@ export const taskPopupOpener = (id: number) =>
 let generation = 0;
 // Track navigation separately from ref invalidation and debugger attachment.
 let navigationRevision = 0;
+export const diagnosticNavigationRevision = () => navigationRevision;
 let changed: (tab: GrantedTab | null) => void = () => {};
 function fail(code: string, message = code): never {
   if (code === 'STOPPED')
@@ -247,6 +249,7 @@ async function clearCursor() {
   }).catch(() => {});
 }
 export async function release(cleanup = true, strict = false, reason: DiagnosticReason = 'other') {
+  recordControlDiagnostic(reason);
   recordDiagnostic('release', reason, { source: 'executor' });
   clearTimeout(pauseTimer);
 
@@ -443,6 +446,7 @@ export function initializeExecutor() {
     granted: !!grant,
     borrowed: !!control && control.borrowedTabId === control.tabId,
     revision: navigationRevision,
+    groupReference: control && control.groupId !== null ? 'assigned' : 'none',
   }));
   chrome.debugger.onDetach.addListener((source, reason) => {
     recordDebuggerEvent('detach', source, reason);

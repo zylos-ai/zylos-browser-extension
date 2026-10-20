@@ -62,6 +62,16 @@ rejects stale events; it cannot retract an already-started/downloaded file.
 Build metadata is generated during build with a unique ID, actual Git commit
 when available, dirty flag and timestamp; no manifest version bump is needed.
 
+`utils/incident-bundle.ts` wraps the detailed capture in schema version 2,
+kind `browser-incident-bundle`. The original version-1 capture is nested in
+`capture`. Correlations use exact protocol task/action IDs and local counters;
+they contain no arguments. `previewRuntime` is distinct from each incident's
+`runtimeAtTrigger`. `pageBefore` and `pageState` use independent asynchronous
+document-pinned reads with a one-second deadline and explicit unavailable,
+stale or pending statuses. A late pre-state is labeled in the window gaps.
+All windows remain partial. Already previewed or shared bytes never gain later
+records. There is no recovery, replay or page modification in this collector.
+
 ## One-Time Detailed Sharing
 
 `utils/detailed-sharing.ts` owns one immutable preview in memory, bounded to
