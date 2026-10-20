@@ -123,6 +123,19 @@ export function startRemoteBackground() {
   let recoveryWindowMs = RECOVERY_WINDOW_MS;
   let recoveryDeadline = 0;
   let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+  let recoveryNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+  let recoveryNoticeRevision = 0;
+  function setRecovery(value: RemoteState['recovery']) {
+    clearTimeout(recoveryNoticeTimer);
+    const revision = ++recoveryNoticeRevision;
+    state.recovery = value;
+    if (value === 'restored')
+      recoveryNoticeTimer = setTimeout(() => {
+        if (revision !== recoveryNoticeRevision || state.recovery !== 'restored') return;
+        state.recovery = undefined;
+        publish();
+      }, 3000);
+  }
   let reconnectBlocked = false;
   let freshRecoveryAttempted = false;
   const transportWaiters = new Set<() => void>();
@@ -170,7 +183,7 @@ export function startRemoteBackground() {
     const taskId = resumeDescriptor()?.taskId;
     clearTimeout(recoveryTimer);
     recoveryDeadline = 0;
-    state.recovery = 'failed';
+    setRecovery('failed');
     state.error = error;
     if (loop.active) cancelLoop('interrupted');
     outbox.clear();
@@ -612,7 +625,7 @@ export function startRemoteBackground() {
     freshRecoveryAttempted = false;
     outbox.clear();
     wakeTransport();
-    state.recovery = undefined;
+    setRecovery(undefined);
     loopReady = false;
     interruptReady = false;
     clearTimeout(handshakeTimer);
@@ -640,7 +653,7 @@ export function startRemoteBackground() {
     const gen = ++generation;
     recordLifecycle('transport-connect');
     state.connecting = true;
-    if (recoveryDeadline) state.recovery = 'reconnecting';
+    if (recoveryDeadline) setRecovery('reconnecting');
     if (state.recovery !== 'failed') state.error = '';
     publish();
     let ws: WebSocket;
@@ -713,7 +726,7 @@ export function startRemoteBackground() {
             recoveryWindowMs,
           );
         }
-        state.recovery = 'disconnected';
+        setRecovery('disconnected');
         state.error = '';
       } else if (loop.active || recoveryDeadline) failRecovery();
       loopReady = false;
@@ -802,7 +815,7 @@ export function startRemoteBackground() {
         if (recoveryDeadline) {
           clearTimeout(recoveryTimer);
           recoveryDeadline = 0;
-          state.recovery = 'restored';
+          setRecovery('restored');
           state.error = '';
         }
         state.endpointId = m.endpointId;
@@ -1185,7 +1198,7 @@ export function startRemoteBackground() {
             }
             startDiagnosticTask();
             try {
-              state.recovery = undefined;
+              setRecovery(undefined);
               state.error = '';
               loop.start(id, m.message, context);
             } catch (error) {

@@ -176,6 +176,20 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
+test('restored status uses the connected header and does not replay after reopening the panel', async () => {
+  state.recovery = 'restored';
+  await mount();
+  expect(container.querySelector('.connection-status.is-connected')?.textContent).toContain(
+    '连接已恢复',
+  );
+  expect(container.querySelector('.connection-feedback')).toBeNull();
+  await act(async () => root.render(null));
+  state.recovery = undefined;
+  await mount();
+  expect(container.querySelector('.connection-status')?.textContent).toContain('已连接');
+  expect(container.textContent).not.toContain('连接已恢复');
+});
+
 test('saved and live Agent replies render Markdown while user messages retain their literal text', async () => {
   state.chat = [
     { role: 'user', text: '# Keep **this** literal', ts: 1 },

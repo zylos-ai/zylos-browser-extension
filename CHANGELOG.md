@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Show successful reconnection in the existing connection status for three
+  seconds, then return to Connected. Keep offline/reconnecting notices visible
+  and guard delayed dismissal against newer recovery states and panel reopening.
+
 - Give viewport and document-text extraction independent elapsed-time budgets,
   so a slow overview does not consume the following document read's allowance.
   Make DOM content tests use a controlled clock and explicitly test timeout
