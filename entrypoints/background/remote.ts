@@ -8,6 +8,7 @@ import { formatTaskNotice, type TaskNotice } from '../../utils/task-notice';
 import {
   DIAGNOSTICS_CAPABILITY,
   detailedContext,
+  currentDetailedTaskGeneration,
   diagnosticsEnabled,
   diagnosticsConsent,
   diagnosticsEpoch,
@@ -29,6 +30,10 @@ import { installRuntimeDiagnostics } from '../../utils/diagnostics-runtime';
 import { DetailedCapture, serializeDetail } from '../../utils/detailed-diagnostics';
 import { DetailedSharing } from '../../utils/detailed-sharing';
 import { installDetailedRuntime } from '../../utils/detailed-runtime';
+import {
+  configureCdpDiagnostics,
+  refreshCdpDiagnostics,
+} from '../../utils/automation/cdp-diagnostics';
 import { safeError } from '../../utils/diagnostics-schema';
 // Extension-owned conversations: request Agent decisions, execute locally, and
 // return observations over the authenticated Remote connection.
@@ -126,6 +131,7 @@ export function startRemoteBackground() {
   const detailed = new DetailedCapture(
     () => {
       sharing.revoke();
+      refreshCdpDiagnostics();
       publish();
     },
     () => [config.key],
@@ -135,6 +141,20 @@ export function startRemoteBackground() {
     generation,
     recipient: config.relayUrl,
     connected: state.connected && loopReady && socket?.readyState === WebSocket.OPEN,
+  });
+  configureCdpDiagnostics({
+    capture: () => {
+      const token = detailed.state().consent;
+      return token
+        ? { token, context: detailedContext(), generation: currentDetailedTaskGeneration() }
+        : undefined;
+    },
+    valid: (lease) =>
+      detailed.valid(lease.token) && lease.generation === currentDetailedTaskGeneration(),
+    emit: (lease, event) => {
+      detailed.append(lease.token, 'background', event, lease.context);
+    },
+    secrets: () => [config.key],
   });
   installDetailedRuntime(
     (event) => detailed.append(detailed.state().consent, 'background', event, detailedContext()),

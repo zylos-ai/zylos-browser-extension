@@ -1,4 +1,5 @@
 import { isPanelSender } from '../messages';
+import { diagnosticSend } from './cdp-diagnostics';
 import { PREVIEW_PORT, type PreviewFrame, type PreviewState } from '../live-preview';
 import type { GrantedTab, Scope } from './types';
 
@@ -262,7 +263,7 @@ export class LivePreview {
     return [...this.clients].some((c) => c.visible) ? this.target : null;
   }
   private command(tabId: number, method: string, params?: Record<string, unknown>) {
-    return chrome.debugger.sendCommand({ tabId }, method, params);
+    return diagnosticSend({ tabId }, method, params);
   }
   private reconcile() {
     this.queue = this.queue
