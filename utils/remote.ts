@@ -37,6 +37,8 @@ export const REMOTE_CONFIG_KEY = 'remoteConfig';
 export const REMOTE_BROWSER_ID_KEY = 'remoteBrowserId';
 export const INSTANCE_CAPABILITY = 'browser-instance-v1';
 export const INTERRUPT_CAPABILITY = 'agent-interrupt-v1';
+export const RESUME_CAPABILITY = 'task-resume-v1';
+export const RECOVERY_WINDOW_MS = 120_000;
 export const BROWSER_ID_RE =
   /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 export const REMOTE_CHAT_LOG_KEY = 'remoteChatLog';
@@ -114,6 +116,7 @@ export const remoteStateSchema = z.object({
   enabled: z.boolean(),
   connected: z.boolean(),
   connecting: z.boolean(),
+  recovery: z.enum(['disconnected', 'reconnecting', 'restored', 'failed']).optional(),
   error: z.string(),
   keyId: z.string(),
   browserId: z.string().default(''),
@@ -123,6 +126,7 @@ export const remoteStateSchema = z.object({
   agentActivity: agentActivitySchema.optional(),
   loopActive: z.boolean().optional(),
   chatBusy: z.boolean().optional(),
+  completionPending: z.boolean().optional(),
   steeringSupported: z.boolean().optional(),
   stopping: z.boolean().optional(),
   task: z
@@ -187,6 +191,11 @@ export type RemoteRequest = z.infer<typeof remoteRequestSchema>;
 export const relayFrameSchema = z.discriminatedUnion('type', [
   agentActivityFrameSchema,
   z.object({
+    type: z.literal('task-ack'),
+    deliveryId: z.string().uuid(),
+    runtimeEpoch: z.string().uuid(),
+  }),
+  z.object({
     type: z.literal('agent-stop-result'),
     taskId: z.string().min(1).max(128),
     ok: z.boolean(),
@@ -196,6 +205,14 @@ export const relayFrameSchema = z.discriminatedUnion('type', [
     type: z.literal('ready'),
     capabilities: z.array(z.string()).max(32),
     endpointId: z.string().max(80).optional(),
+    runtimeEpoch: z.string().uuid().optional(),
+    recoveryWindowMs: z.number().int().positive().optional(),
+    resume: z
+      .object({
+        status: z.enum(['fresh', 'resumed', 'rejected']),
+        reason: z.string().max(128).optional(),
+      })
+      .optional(),
   }),
   z.object({
     type: z.literal('agent-status'),

@@ -1,4 +1,4 @@
-import { afterEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import {
   extractPageSelection,
   MAX_SELECTION_TEXT,
@@ -6,6 +6,13 @@ import {
   readPageSelection,
 } from '../../utils/page-selection';
 
+let elapsed = 0;
+beforeEach(() => {
+  // Keep semantic assertions independent of cold jsdom style costs. The budget
+  // test advances this clock explicitly instead of weakening content checks.
+  elapsed = 0;
+  vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+});
 afterEach(() => {
   const scope = globalThis as { __zylosSelectionPreview?: { dispose: () => void } };
   scope.__zylosSelectionPreview?.dispose();
@@ -14,6 +21,7 @@ afterEach(() => {
   document.body.innerHTML = '';
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 function select(node: Node) {
   const range = document.createRange();
@@ -86,6 +94,21 @@ test('mixed selections remain bounded and do not include text after the size lim
   select(document.querySelector('section')!);
   expect(extractPageSelection(MAX_SELECTION_TEXT)).toMatchObject({
     text: 'x'.repeat(4000),
+    truncated: true,
+  });
+});
+test('mixed-selection timeout retains only the safe prose already visited', () => {
+  document.body.innerHTML =
+    '<section><p>Public</p><div id="slow">Unvisited</div><textarea>secret</textarea></section>';
+  select(document.querySelector('section')!);
+  const compute = getComputedStyle;
+  vi.spyOn(globalThis, 'getComputedStyle').mockImplementation((element) => {
+    const style = compute(element);
+    if (element.id === 'slow') elapsed += 101;
+    return style;
+  });
+  expect(extractPageSelection(MAX_SELECTION_TEXT)).toMatchObject({
+    text: 'Public',
     truncated: true,
   });
 });

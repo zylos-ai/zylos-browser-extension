@@ -1,4 +1,10 @@
-import { LANGUAGE_STORAGE_KEY, setWorkerLanguage, panelErrorMessage } from '../../utils/i18n';
+import {
+  LANGUAGE_STORAGE_KEY,
+  setWorkerLanguage,
+  panelErrorMessage,
+  workerLocale,
+} from '../../utils/i18n';
+import { formatTaskNotice, type TaskNotice } from '../../utils/task-notice';
 import {
   DIAGNOSTICS_CAPABILITY,
   diagnosticsEnabled,
@@ -39,6 +45,8 @@ import {
   BROWSER_ID_RE,
   INSTANCE_CAPABILITY,
   INTERRUPT_CAPABILITY,
+  RESUME_CAPABILITY,
+  RECOVERY_WINDOW_MS,
   REMOTE_BROWSER_ID_KEY,
   REMOTE_CHAT_LOG_KEY,
   REMOTE_CONFIG_KEY,
@@ -110,6 +118,82 @@ export function startRemoteBackground() {
   let pendingStop: { taskId: string; resolve: (ok: boolean) => void } | undefined;
   let chatRevision = 0;
   let loop: BrowserLoop;
+  const runtimeEpoch = crypto.randomUUID();
+  let resumeReady = false;
+  let recoveryWindowMs = RECOVERY_WINDOW_MS;
+  let recoveryDeadline = 0;
+  let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+  let reconnectBlocked = false;
+  let freshRecoveryAttempted = false;
+  const transportWaiters = new Set<() => void>();
+  const outbox = new Map<string, Record<string, unknown>>();
+  let helloResume:
+    | {
+        taskId: string;
+        requestId?: string;
+        round?: number;
+        phase: 'waiting' | 'executing' | 'terminal';
+      }
+    | undefined;
+
+  function wakeTransport() {
+    for (const wake of transportWaiters) wake();
+    transportWaiters.clear();
+  }
+  async function waitForTransport(assertActive: () => void) {
+    assertActive();
+    while (!state.connected) {
+      if (!recoveryDeadline || Date.now() >= recoveryDeadline)
+        throw Object.assign(new Error('Task transport unavailable'), { code: 'STOPPED' });
+      await new Promise<void>((resolve) => transportWaiters.add(resolve));
+      assertActive();
+    }
+  }
+  function resumeDescriptor() {
+    const terminal = [...outbox.values()].find((frame) => frame.type === 'agent-turn-end');
+    const taskId = loop?.taskId ?? (terminal?.taskId as string | undefined);
+    if (!taskId) return undefined;
+    return {
+      taskId,
+      ...(loop?.currentRequestId ? { requestId: loop.currentRequestId, round: loop.round } : {}),
+      phase: !loop?.active
+        ? ('terminal' as const)
+        : loop.pendingId
+          ? ('waiting' as const)
+          : ('executing' as const),
+    };
+  }
+  function completionPending() {
+    return !loop?.active && [...outbox.values()].some((frame) => frame.type === 'agent-turn-end');
+  }
+  function failRecovery(error = 'ui.error.taskRecoveryFailed') {
+    const taskId = resumeDescriptor()?.taskId;
+    clearTimeout(recoveryTimer);
+    recoveryDeadline = 0;
+    state.recovery = 'failed';
+    state.error = error;
+    if (loop.active) cancelLoop('interrupted');
+    outbox.clear();
+    wakeTransport();
+    preview.finish('interrupted');
+    activity.end('interrupted');
+    void completeTask().catch(() => {});
+    if (taskId) {
+      const notice: TaskNotice = {
+        kind: 'request-failed',
+        code: error.endsWith('Expired') ? 'TASK_RECOVERY_EXPIRED' : 'TASK_RECOVERY_FAILED',
+      };
+      void appendChat({
+        id: `recovery:${taskId}`,
+        role: 'assistant',
+        text: formatTaskNotice(workerLocale(), notice),
+        notice,
+        final: true,
+        ts: Date.now(),
+      }).catch(() => {});
+    }
+    publish();
+  }
 
   const publish = () => {
     preview.sync(currentControl(), currentGrant(), state.connected);
@@ -122,7 +206,8 @@ export function startRemoteBackground() {
       state.agentActivity = undefined;
     state.loopActive = loop?.active ?? false;
     state.stopping = !!stopTaskPromise;
-    state.chatBusy = sendingChat || state.loopActive || state.stopping;
+    state.completionPending = completionPending();
+    state.chatBusy = sendingChat || state.loopActive || state.stopping || state.completionPending;
     const control = currentControl();
     const grant = currentGrant();
     const previous =
@@ -151,7 +236,11 @@ export function startRemoteBackground() {
     const hasControl = !!currentControl();
     // Closing the task tab / Chrome's debugger Cancel while awaiting the model
     // must also cancel that pending decision, not allow a later open to revive it.
-    if (hadControl && !hasControl && loop?.pendingId) {
+    if (
+      hadControl &&
+      !hasControl &&
+      (loop?.pendingId || (recoveryDeadline && loop?.active && !loop.settling))
+    ) {
       cancelLoop('interrupted');
       preview.finish('interrupted');
       activity.end('interrupted');
@@ -240,7 +329,7 @@ export function startRemoteBackground() {
   }
 
   // ---------------------------------------------------------------- socket
-  const send = (frame: Record<string, unknown>) => {
+  const sendRaw = (frame: Record<string, unknown>) => {
     if (socket?.readyState !== WebSocket.OPEN) return false;
     try {
       socket.send(JSON.stringify(frame));
@@ -248,6 +337,22 @@ export function startRemoteBackground() {
     } catch {
       return false;
     }
+  };
+  const send = (frame: Record<string, unknown>) => {
+    const retained =
+      resumeReady &&
+      ['agent-request', 'agent-input', 'agent-turn-end'].includes(String(frame.type));
+    if (!retained) return sendRaw(frame);
+    // Acknowledgement, not WebSocket.send(), transfers ownership to Remote.
+    if (outbox.size >= 64) {
+      queueMicrotask(() => failRecovery('ui.error.taskRecoveryFailed'));
+      return false;
+    }
+    const deliveryId = crypto.randomUUID();
+    const envelope = { ...frame, deliveryId, runtimeEpoch };
+    outbox.set(deliveryId, envelope);
+    if (state.connected && !sendRaw(envelope)) socket?.close();
+    return true;
   };
 
   loop = new BrowserLoop({
@@ -321,6 +426,7 @@ export function startRemoteBackground() {
       runBrowserRound(
         actions,
         async (method, params, id) => {
+          await waitForTransport(assertActive);
           assertActive();
           const diagnosticOperation = startDiagnosticOperation(method);
           const taskId = loop.taskId;
@@ -375,6 +481,7 @@ export function startRemoteBackground() {
         requestId,
         hasUpdates,
         expectedControl,
+        () => waitForTransport(assertActive),
       ),
     finish: async (text, status, taskId, notice, interruption) => {
       state.agentActivity = undefined;
@@ -421,6 +528,10 @@ export function startRemoteBackground() {
     const taskId = loop.taskId;
     if (taskId) endDiagnosticTask(status, true);
     loop.cancel();
+    wakeTransport();
+    // Cancelled requests/steering must never be replayed after a local stop.
+    for (const [id, frame] of outbox)
+      if (frame.taskId === taskId && frame.type !== 'agent-turn-end') outbox.delete(id);
     if (taskId) {
       const message = state.chat.find((entry) => entry.role === 'user' && entry.id === taskId);
       if (message) {
@@ -482,7 +593,7 @@ export function startRemoteBackground() {
 
   function scheduleReconnect() {
     clearTimeout(reconnectTimer);
-    if (!config.enabled || !state.configured) return;
+    if (!config.enabled || !state.configured || reconnectBlocked) return;
     const jitter = Math.floor(Math.random() * 500);
     reconnectTimer = setTimeout(() => void connect(), backoff + jitter);
     backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
@@ -494,6 +605,14 @@ export function startRemoteBackground() {
       cancelLoop('interrupted');
       void completeTask().catch(() => {});
     }
+    clearTimeout(recoveryTimer);
+    recoveryDeadline = 0;
+    resumeReady = false;
+    reconnectBlocked = false;
+    freshRecoveryAttempted = false;
+    outbox.clear();
+    wakeTransport();
+    state.recovery = undefined;
     loopReady = false;
     interruptReady = false;
     clearTimeout(handshakeTimer);
@@ -516,12 +635,13 @@ export function startRemoteBackground() {
 
   async function connect() {
     snapshot();
-    if (!config.enabled || !state.configured) return;
+    if (!config.enabled || !state.configured || reconnectBlocked) return;
     if (socket && socket.readyState <= WebSocket.OPEN) return;
     const gen = ++generation;
     recordLifecycle('transport-connect');
     state.connecting = true;
-    state.error = '';
+    if (recoveryDeadline) state.recovery = 'reconnecting';
+    if (state.recovery !== 'failed') state.error = '';
     publish();
     let ws: WebSocket;
     try {
@@ -547,8 +667,9 @@ export function startRemoteBackground() {
       backoff = BACKOFF_MIN_MS;
       state.connected = false;
       state.connecting = true;
-      state.error = '';
-      send({
+      if (state.recovery !== 'failed') state.error = '';
+      helloResume = recoveryDeadline ? resumeDescriptor() : undefined;
+      sendRaw({
         type: 'hello',
         version: REMOTE_VERSION,
         capabilities: [
@@ -559,8 +680,11 @@ export function startRemoteBackground() {
           AGENT_ACTIVITY_CAPABILITY,
           AGENT_HISTORY_CAPABILITY,
           STEER_CAPABILITY,
+          RESUME_CAPABILITY,
         ],
         browserId: state.browserId,
+        runtimeEpoch,
+        ...(helloResume ? { resume: helloResume } : {}),
       });
       handshakeTimer = setTimeout(() => {
         if (gen !== generation || loopReady) return;
@@ -572,30 +696,46 @@ export function startRemoteBackground() {
     };
     ws.onclose = (ev) => {
       if (gen !== generation) return;
+      state.connected = false;
       recordDiagnostic('socket-close', 'remote_disconnect', {
         closeCode: ev.code >= 1000 && ev.code <= 4999 ? ev.code : undefined,
       });
-      if (loop.active) {
-        cancelLoop('interrupted');
-        void completeTask().catch(() => {});
-      }
+      const terminalClose = [4001, 4002, 4004, 4005].includes(ev.code);
+      const freshRetry = ev.code === 4005 && !freshRecoveryAttempted;
+      if (freshRetry) freshRecoveryAttempted = true;
+      reconnectBlocked = terminalClose && !freshRetry;
+      const recoverable = resumeReady && !terminalClose && !!resumeDescriptor();
+      if (recoverable) {
+        if (!recoveryDeadline) {
+          recoveryDeadline = Date.now() + recoveryWindowMs;
+          recoveryTimer = setTimeout(
+            () => failRecovery('ui.error.taskRecoveryExpired'),
+            recoveryWindowMs,
+          );
+        }
+        state.recovery = 'disconnected';
+        state.error = '';
+      } else if (loop.active || recoveryDeadline) failRecovery();
       loopReady = false;
       state.steeringSupported = false;
       interruptReady = false;
       clearTimeout(handshakeTimer);
-      preview.finish('interrupted');
+      if (!recoverable) preview.finish('interrupted');
       socket = null;
       state.connected = false;
       state.endpointId = '';
       state.connecting = false;
-      idem.cancel();
-      activity.end('interrupted');
+      if (!recoverable) {
+        idem.cancel();
+        activity.end('interrupted');
+      }
       // 4001 = a newer socket of this same installation; do not fight it.
       if (ev.code === 4002) state.error = 'ui.error.protocolMismatch';
       else if (ev.code === 4001) state.error = 'ui.error.connectionTaken';
-      else if (ev.code === 1006 && !state.error) state.error = 'ui.error.connectionRejected';
+      else if (ev.code === 1006 && !recoverable && !state.error)
+        state.error = 'ui.error.connectionRejected';
       publish();
-      if (![4001, 4002].includes(ev.code)) scheduleReconnect();
+      if (!reconnectBlocked) scheduleReconnect();
     };
     ws.onerror = () => {
       if (gen !== generation) return;
@@ -626,6 +766,11 @@ export function startRemoteBackground() {
     switch (m.type) {
       case 'ready':
         clearTimeout(handshakeTimer);
+        if (m.resume?.status === 'rejected') {
+          failRecovery();
+          socket?.close(4005, 'task resume rejected');
+          return;
+        }
         if (
           !m.capabilities.includes('agent-loop-v1') ||
           !m.capabilities.includes(INSTANCE_CAPABILITY) ||
@@ -637,15 +782,44 @@ export function startRemoteBackground() {
           socket?.close(4002, 'agent-message-v2 and matching browser endpoint required');
           return;
         }
+        if (
+          helloResume &&
+          (!m.capabilities.includes(RESUME_CAPABILITY) ||
+            m.runtimeEpoch !== runtimeEpoch ||
+            m.resume?.status !== 'resumed' ||
+            !recoveryDeadline ||
+            Date.now() >= recoveryDeadline)
+        ) {
+          failRecovery();
+          socket?.close(4005, 'task resume mismatch');
+          return;
+        }
+        resumeReady =
+          m.capabilities.includes(RESUME_CAPABILITY) &&
+          m.runtimeEpoch === runtimeEpoch &&
+          !!m.resume;
+        recoveryWindowMs = Math.min(RECOVERY_WINDOW_MS, m.recoveryWindowMs ?? RECOVERY_WINDOW_MS);
+        if (recoveryDeadline) {
+          clearTimeout(recoveryTimer);
+          recoveryDeadline = 0;
+          state.recovery = 'restored';
+          state.error = '';
+        }
         state.endpointId = m.endpointId;
         recordLifecycle('transport-ready');
         attachmentsReady = m.capabilities.includes(ATTACHMENT_CAPABILITY);
         state.steeringSupported = m.capabilities.includes(STEER_CAPABILITY);
         interruptReady = m.capabilities.includes(INTERRUPT_CAPABILITY);
         loopReady = true;
+        freshRecoveryAttempted = false;
         state.connected = true;
         state.connecting = false;
+        if (resumeReady) for (const frame of outbox.values()) sendRaw(frame);
+        wakeTransport();
         publish();
+        return;
+      case 'task-ack':
+        if (m.runtimeEpoch === runtimeEpoch && outbox.delete(m.deliveryId)) publish();
         return;
       case 'agent-activity':
         if (
@@ -741,6 +915,10 @@ export function startRemoteBackground() {
     }
     if (m.method === 'agent-decision') {
       try {
+        if (!state.connected || !loopReady)
+          throw Object.assign(new Error('Transport handshake is not ready'), {
+            code: 'EXT_OFFLINE',
+          });
         const { id, decision, inputId } = z
           .object({
             id: z.string().max(128),
@@ -909,6 +1087,7 @@ export function startRemoteBackground() {
         }
         case 'remote-chat-send': {
           if (!state.connected || !loopReady) throw new Error('ui.error.messageNotSent');
+          if (completionPending()) throw new Error('ui.error.taskCompletionPending');
           const text = messageText(m.message).trim();
           if (!text) throw new Error('ui.error.emptyMessage');
           if (sendingChat || stopTaskPromise) throw new Error('ui.error.chatBusy');
@@ -937,6 +1116,10 @@ export function startRemoteBackground() {
               throw new Error('ui.error.sendFailed');
             }
             if (loop.settling) await loop.settling;
+            if (completionPending()) {
+              forgetPageContext(id);
+              throw new Error('ui.error.taskCompletionPending');
+            }
             if (
               gen !== generation ||
               revision !== chatRevision ||
@@ -1002,6 +1185,8 @@ export function startRemoteBackground() {
             }
             startDiagnosticTask();
             try {
+              state.recovery = undefined;
+              state.error = '';
               loop.start(id, m.message, context);
             } catch (error) {
               endDiagnosticTask('interrupted', true);

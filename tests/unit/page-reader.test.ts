@@ -1,16 +1,56 @@
 // @vitest-environment jsdom
-import { afterEach, expect, test } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { extractPageText } from '../../utils/page-reader';
 const { getBoundingClientRect } = Element.prototype;
 const range = {
   selectNodeContents: Range.prototype.selectNodeContents,
   getBoundingClientRect: Range.prototype.getBoundingClientRect,
 };
+let elapsed = 0;
+beforeEach(() => {
+  // jsdom's cold style initialization can exceed the production browser budget.
+  // Content tests control time; dedicated tests below advance it explicitly.
+  elapsed = 0;
+  vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+});
 afterEach(() => {
+  vi.restoreAllMocks();
   document.body.innerHTML = '';
   Element.prototype.getBoundingClientRect = getBoundingClientRect;
   Range.prototype.selectNodeContents = range.selectNodeContents;
   Range.prototype.getBoundingClientRect = range.getBoundingClientRect;
+});
+
+test('stops document traversal at its elapsed budget while retaining safe partial text', () => {
+  document.body.innerHTML = '<p>Public</p><div id="slow">Unvisited</div><input value="secret">';
+  const compute = getComputedStyle;
+  vi.spyOn(globalThis, 'getComputedStyle').mockImplementation((element) => {
+    const style = compute(element);
+    if (element.id === 'slow') elapsed += 251;
+    return style;
+  });
+  expect(extractPageText()).toMatchObject({ text: 'Public', limited: true, truncated: true });
+});
+
+test('a timed-out viewport does not consume the independent document traversal budget', () => {
+  document.body.innerHTML = '<h1>Article</h1><p>Public paragraph</p><textarea>secret</textarea>';
+  const compute = getComputedStyle;
+  let first = true;
+  vi.spyOn(globalThis, 'getComputedStyle').mockImplementation((element) => {
+    const style = compute(element);
+    if (first) {
+      first = false;
+      elapsed += 251;
+    }
+    return style;
+  });
+  const overview = extractPageText({ overview: true });
+  const full = extractPageText();
+  expect(overview.viewport).toMatchObject({ limited: true, truncated: true });
+  expect(overview.limited).toBe(false);
+  expect(overview.text).toBe('Article\n\nPublic paragraph');
+  expect(overview.contentVersion).toBe(full.contentVersion);
+  expect(overview.outline).toEqual([expect.objectContaining({ name: 'Article', offset: 0 })]);
 });
 
 test('reads rendered text and real links while omitting fields, hidden content and scripts', () => {

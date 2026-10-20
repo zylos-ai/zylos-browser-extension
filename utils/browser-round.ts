@@ -39,6 +39,7 @@ export async function runBrowserRound(
   requestId: string,
   hasUpdates: () => boolean = () => false,
   expectedControl = false,
+  beforeOperation: () => Promise<void> = async () => {},
 ): Promise<RoundResult> {
   const startLoss = controlLossRevision();
   const hadControl = expectedControl || !!currentControl();
@@ -48,6 +49,8 @@ export async function runBrowserRound(
   }));
   const lost = () => controlLossRevision() !== startLoss || (hadControl && !currentControl());
   const guarded: Call = async (method, params, id) => {
+    await beforeOperation();
+    assertActive();
     if (lost()) throw Object.assign(new Error('Control lost'), { code: 'STOPPED' });
     const index = actions.findIndex((_, i) => id === `${requestId}:${i}`);
     if (index >= 0) results[index]!.outcome = 'uncertain';
@@ -57,7 +60,14 @@ export async function runBrowserRound(
     return value;
   };
   try {
-    const result = await executeRound(actions, guarded, assertActive, requestId, hasUpdates);
+    const result = await executeRound(
+      actions,
+      guarded,
+      assertActive,
+      requestId,
+      hasUpdates,
+      beforeOperation,
+    );
     if (
       lost() ||
       (result.mode === 'reading' &&
@@ -86,7 +96,10 @@ async function executeRound(
   assertActive: () => void,
   requestId: string,
   hasUpdates: () => boolean,
+  beforeOperation: () => Promise<void>,
 ): Promise<RoundResult> {
+  await beforeOperation();
+  assertActive();
   // A standalone DOM read is already its own observation. In particular, it
   // must not fall through to CDP snapshot/settle/tabs or establish task control.
   if (actions.length === 1 && actions[0]!.method === 'read-page') {
@@ -118,6 +131,7 @@ async function executeRound(
   let failed = false;
   let suppliedObservation: unknown;
   for (let i = 0; i < actions.length; i++) {
+    await beforeOperation();
     assertActive();
     if (hasUpdates()) {
       results.push({

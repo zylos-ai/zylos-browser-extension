@@ -96,6 +96,7 @@ export function RemotePanel() {
       !text ||
       sendingRef.current ||
       stopping ||
+      state.completionPending ||
       (chatBusy && !state.steeringSupported) ||
       fileAttachments.isReading()
     )
@@ -269,6 +270,22 @@ export function RemotePanel() {
           </p>
         </div>
       )}
+      {state.recovery && state.recovery !== 'failed' && (
+        <div className="connection-feedback" role="status">
+          {t(
+            state.recovery === 'restored'
+              ? 'taskConnectionRestored'
+              : state.recovery === 'reconnecting'
+                ? 'taskReconnecting'
+                : 'taskDisconnected',
+          )}
+        </div>
+      )}
+      {state.completionPending && state.connected && (
+        <div className="connection-feedback" role="status">
+          {t('taskCompletionPending')}
+        </div>
+      )}
       {screen === 'loading' ? (
         <main className="loading-page" role="status">
           <span className="loading loading-spinner loading-sm" />
@@ -348,8 +365,9 @@ export function RemotePanel() {
             connected={connected}
             sending={sending}
             busy={chatBusy}
-            steeringSupported={state.steeringSupported ?? false}
+            steeringSupported={!!state.steeringSupported && !state.completionPending}
             stopping={stopping}
+            completionPending={state.completionPending}
             onSend={() => void sendChat()}
             onStop={() => void action({ type: 'remote-stop' })}
             inputRef={inputRef}
