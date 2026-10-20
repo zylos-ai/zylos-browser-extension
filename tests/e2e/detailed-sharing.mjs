@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import https from 'node:https';
+import http from 'node:http';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createHash } from 'node:crypto';
@@ -31,7 +32,8 @@ async function until(fn) {
   }
   throw last || Error('Timed out');
 }
-let relay, tls, browser, display, socket;
+let relay, tls, browser, display, socket, site;
+const requests = [];
 const evidence = { checks: [], profile };
 try {
   evidence.sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
@@ -46,13 +48,62 @@ try {
   evidence.backgroundSha256 = createHash('sha256')
     .update(await fs.readFile(root + '.output/chrome-mv3/background.js'))
     .digest('hex');
+  const remoteRoot = fileURLToPath(
+    new URL(
+      '../',
+      new URL(
+        process.env.SHARE_REMOTE || '../../../zylos-browser-remote/src/index.js',
+        import.meta.url,
+      ),
+    ),
+  );
+  evidence.remoteSourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+    cwd: remoteRoot,
+    encoding: 'utf8',
+  }).trim();
+  evidence.remoteTrackedChanges = execFileSync(
+    'git',
+    ['status', '--porcelain', '--untracked-files=no'],
+    { cwd: remoteRoot, encoding: 'utf8' },
+  ).trim();
   relay = await start({
     extPort: 0,
     agentPort: 0,
     monitor: false,
     activityEnabled: false,
-    onRequest: async () => ({ ok: true }),
+    onRequest: async (message) => {
+      requests.push(message);
+      return { ok: true };
+    },
   });
+  site = http.createServer((_request, response) => {
+    response.setHeader('content-type', 'text/html');
+    response.end(
+      '<!doctype html><title>Local incident fixture</title><input id="field" aria-label="Fixture field">',
+    );
+  });
+  site.listen(0, '127.0.0.1');
+  await once(site, 'listening');
+  const auxiliary = profile + '/auxiliary';
+  await fs.mkdir(auxiliary);
+  await fs.writeFile(
+    auxiliary + '/manifest.json',
+    JSON.stringify({
+      manifest_version: 3,
+      name: 'Isolated incident fixture',
+      version: '1.0.0',
+      content_scripts: [{ matches: ['http://127.0.0.1/*'], js: ['inject.js'] }],
+      web_accessible_resources: [{ resources: ['frame.html'], matches: ['http://127.0.0.1/*'] }],
+    }),
+  );
+  await fs.writeFile(
+    auxiliary + '/frame.html',
+    '<!doctype html><title>Foreign frame fixture</title>',
+  );
+  await fs.writeFile(
+    auxiliary + '/inject.js',
+    `if(new URL(location.href).searchParams.get('mode')==='foreigniframe')document.addEventListener('focusin',event=>{if(event.target.id!=='field'||document.querySelector('#fixture-frame'))return;const frame=document.createElement('iframe');frame.id='fixture-frame';frame.src=chrome.runtime.getURL('frame.html');document.body.append(frame);});`,
+  );
   execFileSync(
     'openssl',
     [
@@ -148,23 +199,25 @@ try {
     targetId: manager.targetId,
     flatten: true,
   });
-  await cdp(
-    'Runtime.evaluate',
-    {
-      expression:
-        'chrome.developerPrivate.updateProfileConfiguration({inDeveloperMode:true});chrome.developerPrivate.loadUnpacked({failQuietly:true},()=>{});',
-    },
-    management,
-  );
-  await sleep(1000);
-  for (const args of [
-    ['key', 'ctrl+l'],
-    ['type', '--clearmodifiers', root + '.output/chrome-mv3/'],
-    ['key', 'Return'],
-    ['key', 'alt+o'],
-  ]) {
-    execFileSync('/usr/bin/xdotool', args, { env: { ...process.env, DISPLAY: displayName } });
-    await sleep(600);
+  for (const loadPath of [auxiliary, root + '.output/chrome-mv3']) {
+    await cdp(
+      'Runtime.evaluate',
+      {
+        expression:
+          'chrome.developerPrivate.updateProfileConfiguration({inDeveloperMode:true});chrome.developerPrivate.loadUnpacked({failQuietly:true},()=>{});',
+      },
+      management,
+    );
+    await sleep(1000);
+    for (const args of [
+      ['key', 'ctrl+l'],
+      ['type', '--clearmodifiers', loadPath + '/'],
+      ['key', 'Return'],
+      ['key', 'alt+o'],
+    ]) {
+      execFileSync('/usr/bin/xdotool', args, { env: { ...process.env, DISPLAY: displayName } });
+      await sleep(600);
+    }
   }
   const worker = await until(async () =>
     (await cdp('Target.getTargets')).targetInfos.find(
@@ -211,11 +264,83 @@ try {
   assert.equal((await post('/diagnostics/detail', { endpoint })).ok, false);
   await command({ type: 'remote-detailed-set-enabled', enabled: true });
   const consent = (await state()).detailedDiagnostics.consent;
+  evidence.actions = [];
+  for (const mode of ['plain', 'foreigniframe']) {
+    const tab = await evaluate(
+      `chrome.tabs.create({url:${JSON.stringify(`http://127.0.0.1:${site.address().port}/?mode=${mode}`)},active:true})`,
+    );
+    await until(async () => (await evaluate(`chrome.tabs.get(${tab.id})`)).status === 'complete');
+    const text = `Isolated ${mode} ${Date.now()}`;
+    assert.equal(
+      (
+        await command({
+          type: 'remote-chat-send',
+          message: { role: 'user', content: [{ type: 'text', text }] },
+          tabId: tab.id,
+          windowId: tab.windowId,
+        })
+      ).ok,
+      true,
+    );
+    const initial = await until(() =>
+      requests.find((message) => message.text === text && message.request),
+    );
+    const decide = (request, decision) => post('/decision', { endpoint, id: request.id, decision });
+    let result = await decide(initial.request, {
+      kind: 'actions',
+      actions: [
+        {
+          method: 'use-current-tab',
+          params: { contextId: initial.request.context.pages[0].contextId },
+        },
+      ],
+    });
+    assert.ok(result.next, JSON.stringify(result));
+    result = await decide(result.next, {
+      kind: 'actions',
+      actions: [{ method: 'find', params: { selector: '#field' } }],
+    });
+    assert.ok(result.next, JSON.stringify(result));
+    const ref = result.next.execution.observation.page.matches[0].ref;
+    result = await decide(result.next, {
+      kind: 'actions',
+      actions: [{ method: 'fill', params: { ref, text: 'PRIVATE_INPUT_CANARY' } }],
+    });
+    evidence.actions.push({ mode, result });
+    if (mode === 'plain') {
+      assert.ok(result.next && !result.next.execution.failed, JSON.stringify(result));
+      await decide(result.next, { kind: 'done', text: 'Local fixture completed' });
+    } else {
+      assert.ok(result.finished || result.next?.execution?.failed, JSON.stringify(result));
+      if (result.next) await decide(result.next, { kind: 'done', text: 'Local fixture stopped' });
+    }
+    await until(async () => !(await state()).chatBusy);
+  }
+  await sleep(2100);
   await evaluate("console.warn('SHARE_EXACT_CANARY');true");
   await sleep(300);
   const prepared = (await command({ type: 'remote-detail-share-prepare', consent })).value;
   assert.ok(prepared.text.includes('SHARE_EXACT_CANARY'));
-  evidence.extensionBuild = JSON.parse(prepared.text).build;
+  const bundle = JSON.parse(prepared.text);
+  assert.equal(bundle.schemaVersion, 2);
+  assert.equal(bundle.kind, 'browser-incident-bundle');
+  assert.equal(bundle.clock.remoteComparable, false);
+  assert.ok(bundle.incidents.length > 0);
+  assert.ok(
+    bundle.correlations.some((item) => item.method === 'fill' && item.outcome === 'completed'),
+  );
+  for (const incident of bundle.incidents) {
+    assert.equal(incident.window.complete, false);
+    assert.ok(incident.window.gaps.includes('partial-diagnostic-capture'));
+    assert.ok(incident.runtimeAtTrigger);
+    assert.ok(incident.pageBefore && incident.pageState);
+    assert.ok(
+      bundle.correlations.some(
+        (item) => item.taskId === incident.taskId && item.actionId === incident.actionId,
+      ),
+    );
+  }
+  evidence.extensionBuild = bundle.capture.build;
   const unauthorized = await evaluate(
     `chrome.runtime.sendMessage({type:'remote-detail-share-grant',id:${JSON.stringify(prepared.id)}}).catch(()=>null)`,
     workerSession,
@@ -228,6 +353,25 @@ try {
   assert.equal(result.text, prepared.text);
   assert.equal(result.sha256, createHash('sha256').update(prepared.text).digest('hex'));
   assert.ok(!result.text.includes('AFTER_PREVIEW_CANARY'));
+  const companion = result.remoteEvidence;
+  assert.equal(companion.endpointId, endpoint);
+  assert.equal(companion.clockAligned, false);
+  assert.equal(companion.partial, true);
+  assert.ok(companion.gaps.length > 0);
+  assert.ok(
+    companion.records.some((record) => record.kind === 'action' && record.method === 'fill'),
+  );
+  for (const record of companion.records)
+    assert.ok(
+      bundle.correlations.some(
+        (item) =>
+          item.taskId === record.taskId &&
+          (record.kind !== 'action' || item.actionId === record.actionId),
+      ),
+    );
+  assert.ok(!JSON.stringify(companion).includes('PRIVATE_INPUT_CANARY'));
+  evidence.incidentBundle = bundle;
+  evidence.remoteEvidence = companion;
   assert.equal((await post('/diagnostics/detail', { endpoint })).ok, false);
   evidence.checks.push(
     'default deny; trusted panel only; exact immutable hash; one-time retrieval',
@@ -337,9 +481,14 @@ try {
     if (process && process.exitCode === null) {
       process.kill('SIGTERM');
       await Promise.race([once(process, 'exit'), sleep(3000)]);
+      if (process.exitCode === null && process.signalCode === null) {
+        process.kill('SIGKILL');
+        await once(process, 'exit');
+      }
     }
   relay?.close();
   if (tls) await new Promise((resolve) => tls.close(resolve));
+  if (site) await new Promise((resolve) => site.close(resolve));
   await fs.writeFile(evidenceDir + '/results.json', JSON.stringify(evidence, null, 2));
   console.log(JSON.stringify(evidence));
 }
