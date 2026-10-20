@@ -28,6 +28,9 @@ let reporting = false;
 let probeKey = '';
 let stopProbe: (() => void) | undefined;
 let refreshing = false;
+let targetTypes = new Map<number, { type: string; observedAt: number }>();
+let ackSummary:
+  { key: string; startedAt: number; lastReportedAt: number; successful: number } | undefined;
 
 export function configureCdpDiagnostics(value: typeof hooks) {
   hooks = value;
@@ -74,12 +77,16 @@ function capture() {
     if (!lease) {
       epoch = '';
       ids.clear();
+      targetTypes.clear();
+      ackSummary = undefined;
       return;
     }
     if (lease.token !== epoch) {
       epoch = lease.token;
       ids = new Map();
       sequence = 0;
+      targetTypes.clear();
+      ackSummary = undefined;
     }
     return lease;
   } catch {
@@ -128,11 +135,17 @@ function emit(lease: Lease | undefined, metadata: object, error?: unknown) {
   try {
     if (!hooks?.valid(lease)) return;
     const detail = error === undefined ? undefined : serializeDetail([error], hooks.secrets());
+    const receivedAt = Date.now();
+    const frame = metadata as { event?: string; observedAt?: number };
+    const observedAt =
+      frame.event?.startsWith('iframe-') && Number.isFinite(frame.observedAt)
+        ? frame.observedAt
+        : undefined;
     hooks.emit(lease, {
       kind: error === undefined ? 'console' : 'error',
       level: error === undefined ? 'debug' : 'error',
-      at: Date.now(),
-      text: `CDP ${JSON.stringify(metadata)}${detail ? `\n${detail.text}` : ''}`,
+      at: observedAt ?? receivedAt,
+      text: `CDP ${JSON.stringify(observedAt === undefined ? metadata : { ...metadata, receivedAt })}${detail ? `\n${detail.text}` : ''}`,
       truncated: detail?.truncated ?? false,
     });
   } catch {
@@ -153,11 +166,21 @@ export function recordDebuggerEvent(
     const before = state();
     if (!before.controlled || target.tabId !== before.tabId) return;
     if (event === 'detach') hooks?.incident?.(lease.context, reason);
+    const knownType = target.tabId === undefined ? undefined : targetTypes.get(target.tabId);
     emit(lease, {
       event,
       ...targetInfo(target),
       reason: ['target_closed', 'canceled_by_user'].includes(reason || '') ? reason : undefined,
       state: currentState(),
+      ...(event === 'detach'
+        ? {
+            eventSource: 'chrome.debugger.onDetach',
+            targetScope: 'parent-debuggee',
+            targetType: knownType?.type ?? 'unknown',
+            targetTypeSource: knownType ? 'earlier-getTargets' : 'unavailable',
+            targetTypeObservedAt: knownType?.observedAt,
+          }
+        : {}),
     });
     if (event === 'detach') inspectTarget(lease, target, 'detach-target-state');
   } catch {
@@ -193,6 +216,24 @@ function inspectTarget(lease: Lease, target: chrome.debugger.Debuggee, event: st
             targets.status === 'fulfilled'
               ? targets.value.find((value) => value.tabId === tabId)
               : undefined;
+          const observedAt = Date.now();
+          const targetType = targetPresent
+            ? [
+                'page',
+                'background_page',
+                'worker',
+                'iframe',
+                'service_worker',
+                'shared_worker',
+                'other',
+              ].includes(targetPresent.type)
+              ? targetPresent.type
+              : 'other'
+            : 'unknown';
+          if (targetPresent && hooks?.valid(lease)) {
+            if (targetTypes.size >= 32) targetTypes.delete(targetTypes.keys().next().value!);
+            targetTypes.set(tabId, { type: targetType, observedAt });
+          }
           emit(lease, {
             event,
             ...targetInfo(target),
@@ -206,6 +247,9 @@ function inspectTarget(lease: Lease, target: chrome.debugger.Debuggee, event: st
                 : 'unavailable',
             attached: targetPresent?.attached,
             target: opaque('target', targetPresent?.id),
+            targetType,
+            targetTypeSource: 'getTargets-query',
+            targetTypeObservedAt: observedAt,
           });
         })
         .catch(() => {});
@@ -229,15 +273,41 @@ async function trace<T>(
     method: /^[A-Za-z]+\.[A-Za-z]+$/.test(method) ? method : 'other',
     ...targetInfo(target),
   };
-  emit(lease, { ...metadata, phase: 'start', state: currentState() });
+  const ack = method === 'Page.screencastFrameAck';
+  if (!ack) emit(lease, { ...metadata, phase: 'start', state: currentState() });
   try {
     const result = await work();
-    emit(lease, {
-      ...metadata,
-      phase: 'success',
-      durationMs: Math.max(0, Date.now() - started),
-      state: currentState(),
-    });
+    const durationMs = Math.max(0, Date.now() - started);
+    if (!ack || durationMs >= 250)
+      emit(lease, {
+        ...metadata,
+        phase: ack ? 'slow-success' : 'success',
+        durationMs,
+        state: currentState(),
+      });
+    if (ack) {
+      try {
+        if (hooks?.valid(lease)) {
+          const key = `${lease.token}:${lease.generation}:${lease.context.task}`;
+          const now = Date.now();
+          if (ackSummary?.key !== key)
+            ackSummary = { key, startedAt: started, lastReportedAt: -Infinity, successful: 0 };
+          ackSummary.successful++;
+          if (now - ackSummary.lastReportedAt >= 5000) {
+            ackSummary.lastReportedAt = now;
+            emit(lease, {
+              event: 'screencast-ack-summary',
+              successful: ackSummary.successful,
+              from: ackSummary.startedAt,
+              through: now,
+              partial: true,
+            });
+          }
+        }
+      } catch {
+        /* Aggregation must not affect preview acknowledgements. */
+      }
+    }
     if (method === 'Debugger.attach') inspectTarget(lease, target, 'attach-target-state');
     return result;
   } catch (error) {

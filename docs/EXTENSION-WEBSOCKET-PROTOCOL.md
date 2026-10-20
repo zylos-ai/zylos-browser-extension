@@ -375,6 +375,16 @@ and record sequence references. Trigger categories are `debugger-detach`,
 cross-process causal order. Remote companion evidence must remain outside the
 previewed text/hash and must join exact endpoint, task and action identifiers.
 
+Each incident also includes `triggerFacts` (one to three distinct trigger
+categories, each with `reason`, `triggeredAt`, `runtimeAtTrigger`) and
+`pageBeforeTiming` (`actionStartedAt` when available and `relation` equal to
+`before-action`, `after-action-start`, `same-millisecond` or `unknown`). Merging
+requires exact action and scope; uncorrelated between-action detach remains
+task-level evidence. Gaps disclose priority eviction, unresolved timestamp
+ordering and page state observed before a promoted detach trigger. Iframe
+record times are observation times; their text metadata also retains receipt
+time. Other record times remain receipt times.
+
 This independent capability does not change `diagnostics.get`. A trusted local
 sidepanel must prepare an immutable snapshot and explicitly authorize its transfer
 to the configured Remote. The extension requires WSS and binds authorization to

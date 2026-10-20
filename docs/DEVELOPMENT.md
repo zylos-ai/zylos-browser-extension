@@ -72,6 +72,27 @@ stale or pending statuses. A late pre-state is labeled in the window gaps.
 All windows remain partial. Already previewed or shared bytes never gain later
 records. There is no recovery, replay or page modification in this collector.
 
+Incidents merge only when exact task/action IDs and the original action's
+consent, task generation, document revision and tab scope match within two
+seconds. `triggerFacts` retains up to three distinct trigger categories with
+their original runtime snapshots and times. The primary trigger favors detach;
+merged page state may precede that trigger and is labeled accordingly. Detach
+attribution requires the currently active operation, never the latest completed
+action. The eight-incident limit evicts ordinary incidents before detach; full
+detach buffers reject new ordinary incidents and report an eviction gap.
+`pageBeforeTiming` compares the observation to action start; equal milliseconds
+are explicitly unresolved, not proof that observation preceded the action.
+
+Successful `Page.screencastFrameAck` calls emit at most one cumulative, partial
+summary per five seconds per task/capture, rather than per-call start/success
+records. Failed calls and successes taking at least 250 ms remain individual
+records. The summary can omit the unreported tail when capture stops.
+Iframe records use the observer's `observedAt` as record `at`, with independent
+`receivedAt` inside metadata. Polling latency has no 250 ms upper-bound promise.
+Other records use receipt time. Parent debugger detach identifies its event
+source and an optional earlier, timestamped `getTargets` type; a subsequent
+query reports its own timestamp. Neither type identifies the cause of detachment.
+
 ## One-Time Detailed Sharing
 
 `utils/detailed-sharing.ts` owns one immutable preview in memory, bounded to

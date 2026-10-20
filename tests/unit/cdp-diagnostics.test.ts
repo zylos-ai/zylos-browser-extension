@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { beforeEach, expect, it, vi } from 'vitest';
+import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 vi.mock('../../utils/automation/iframe-diagnostics', () => ({
   startFrameDiagnostics: vi.fn(() => vi.fn()),
 }));
@@ -10,12 +10,14 @@ import {
   diagnosticDetach,
   setDiagnosticTarget,
   recordDebuggerEvent,
+  refreshCdpDiagnostics,
 } from '../../utils/automation/cdp-diagnostics';
+import { startFrameDiagnostics } from '../../utils/automation/iframe-diagnostics';
 let token: string;
 let task: number;
 let events: any[];
 beforeEach(() => {
-  token = 'consent';
+  token = crypto.randomUUID();
   task = 1;
   events = [];
   configureCdpDiagnostics({
@@ -37,6 +39,7 @@ beforeEach(() => {
     tabs: { get: vi.fn(async () => ({ id: 42, discarded: false })) },
   });
 });
+afterEach(() => vi.useRealTimers());
 it('does not capture when disabled and preserves the command result', async () => {
   token = '';
   expect(
@@ -106,4 +109,63 @@ it('ignores debugger detach for a tab outside the task', () => {
   recordDebuggerEvent('detach', { tabId: 99 }, 'target_closed');
   expect(events).toHaveLength(0);
   expect(chrome.tabs.get).not.toHaveBeenCalled();
+});
+it('keeps a bounded summary instead of flooding capture with successful preview acknowledgements', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(100_000);
+  await diagnosticSend({ tabId: 42 }, 'Runtime.evaluate');
+  for (let i = 0; i < 2000; i++) await diagnosticSend({ tabId: 42 }, 'Page.screencastFrameAck');
+  expect(events).toHaveLength(3);
+  expect(events[0].event.text).toContain('Runtime.evaluate');
+  expect(events[2].event.text).toContain('screencast-ack-summary');
+  expect(events[2].event.text).toContain('"partial":true');
+  await vi.advanceTimersByTimeAsync(5000);
+  await diagnosticSend({ tabId: 42 }, 'Page.screencastFrameAck');
+  expect(events).toHaveLength(4);
+  expect(events[3].event.text).toContain('"successful":2001');
+});
+it('preserves slow and failed acknowledgements with native failure identity', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(100_000);
+  vi.mocked(chrome.debugger.sendCommand).mockImplementationOnce(async () => {
+    vi.setSystemTime(100_300);
+    return {};
+  });
+  await diagnosticSend({ tabId: 42 }, 'Page.screencastFrameAck');
+  expect(events.some((item) => item.event.text.includes('slow-success'))).toBe(true);
+  const error = new Error('Detached');
+  vi.mocked(chrome.debugger.sendCommand).mockRejectedValueOnce(error);
+  await expect(diagnosticSend({ tabId: 42 }, 'Page.screencastFrameAck')).rejects.toBe(error);
+  expect(events.at(-1).event.text).toContain('"phase":"error"');
+});
+it('records parent target type from an explicitly timestamped prior query, without identity fields', async () => {
+  (chrome.debugger.getTargets as ReturnType<typeof vi.fn>).mockResolvedValue([
+    {
+      id: 'SECRET_ID',
+      tabId: 42,
+      type: 'page',
+      attached: true,
+      title: 'SECRET_TITLE',
+      url: 'https://secret.test/',
+    },
+  ]);
+  await diagnosticAttach({ tabId: 42 }, '1.3');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  recordDebuggerEvent('detach', { tabId: 42 }, 'target_closed');
+  const event = events.find((item) => item.event.text.includes('chrome.debugger.onDetach'));
+  expect(event.event.text).toContain('"targetType":"page"');
+  expect(event.event.text).toContain('earlier-getTargets');
+  expect(event.event.text).toContain('targetTypeObservedAt');
+  expect(JSON.stringify(events)).not.toContain('SECRET');
+  expect(JSON.stringify(events)).not.toContain('secret.test');
+});
+it('uses iframe observation time for record windows and preserves receipt time separately', () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(100_000);
+  refreshCdpDiagnostics();
+  const emit = vi.mocked(startFrameDiagnostics).mock.calls.at(-1)![2];
+  emit({ event: 'iframe-added', frame: 1, scheme: 'extension', observedAt: 90_000 });
+  expect(events.at(-1).event.at).toBe(90_000);
+  expect(events.at(-1).event.text).toContain('"receivedAt":100000');
+  expect(events.at(-1).event.text).toContain('"observedAt":90000');
 });

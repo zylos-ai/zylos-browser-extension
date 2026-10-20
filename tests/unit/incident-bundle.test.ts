@@ -38,8 +38,8 @@ afterEach(() => {
 });
 it('correlates exact protocol IDs and immutable action outcomes without arguments', async () => {
   const op = capture.begin({ task: 1, operation: 2 }, taskId, id, 'fill');
-  capture.end(op, 'error');
   capture.trigger({ task: 1, operation: 2 }, 'debugger-detach', 'target_closed');
+  capture.end(op, 'error');
   await vi.advanceTimersByTimeAsync(0);
   const result = capture.bundle(snapshot(), runtime);
   expect(result.correlations).toEqual([
@@ -186,3 +186,97 @@ it('does not read a newly navigated document for an old incident', async () => {
   expect(page.captureIncidentPageState).not.toHaveBeenCalled();
   expect(capture.bundle(snapshot(), runtime).incidents[0]!.pageState.status).toBe('stale');
 });
+it('merges exact-action error and detach facts, preserves runtime and avoids a second post probe', async () => {
+  capture.begin({ task: 1, operation: 2 }, taskId, id, 'fill');
+  capture.trigger({ task: 1, operation: 2 }, 'operation-error');
+  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(10);
+  capture.trigger({ task: 1, operation: 2 }, 'debugger-detach', 'target_closed');
+  await vi.advanceTimersByTimeAsync(0);
+  const result = capture.bundle(snapshot(), runtime);
+  expect(result.incidents).toHaveLength(1);
+  expect(result.incidents[0]!.trigger).toBe('debugger-detach');
+  expect(result.incidents[0]!.triggerFacts.map((fact) => fact.trigger)).toEqual([
+    'operation-error',
+    'debugger-detach',
+  ]);
+  expect(result.incidents[0]!.window.gaps).toContain('page-state-before-trigger');
+  expect(page.captureIncidentPageState).toHaveBeenCalledTimes(2); // One concurrent pre-state and one post-state.
+});
+it('merges an error following detach using its original action scope after invalidation', () => {
+  const operation = capture.begin({ task: 1, operation: 2 }, taskId, id, 'fill');
+  capture.trigger({ task: 1, operation: 2 }, 'debugger-detach', 'target_closed');
+  scope.navigation++;
+  capture.end(operation, 'error');
+  capture.trigger({ task: 1, operation: 2 }, 'operation-error');
+  const result = capture.bundle(snapshot(), runtime);
+  expect(result.incidents).toHaveLength(1);
+  expect(result.incidents[0]!.triggerFacts).toHaveLength(2);
+});
+it('keeps the primary trigger identical to its retained fact after a repeated notification', async () => {
+  capture.begin({ task: 1, operation: 2 }, taskId, id, 'fill');
+  capture.trigger({ task: 1, operation: 2 }, 'debugger-detach', 'target_closed');
+  await vi.advanceTimersByTimeAsync(10);
+  capture.trigger({ task: 1, operation: 2 }, 'debugger-detach', 'target_closed');
+  const incident = capture.bundle(snapshot(), runtime).incidents[0]!;
+  expect(incident.triggerFacts).toHaveLength(1);
+  expect(incident.triggerFacts[0]!.triggeredAt).toBe(incident.triggeredAt);
+});
+it.each(['completed', 'error'] as const)(
+  'does not attribute a between-action detach to the previous %s action',
+  (outcome) => {
+    const operation = capture.begin({ task: 1, operation: 2 }, taskId, id, 'fill');
+    capture.end(operation, outcome);
+    capture.trigger({ task: 1 }, 'debugger-detach');
+    expect(capture.bundle(snapshot(), runtime).incidents[0]!.actionId).toBeUndefined();
+  },
+);
+it('does not use an orphaned running correlation when no operation is active', () => {
+  capture.begin({ task: 1, operation: 2 }, taskId, id, 'fill');
+  capture.trigger({ task: 1 }, 'debugger-detach');
+  expect(capture.bundle(snapshot(), runtime).incidents[0]!.actionId).toBeUndefined();
+});
+it('does not merge reused wire IDs across a new action scope', () => {
+  capture.begin({ task: 1, operation: 2 }, taskId, id, 'fill');
+  capture.trigger({ task: 1, operation: 2 }, 'operation-error');
+  scope.navigation++;
+  capture.begin({ task: 1, operation: 3 }, taskId, id, 'fill');
+  capture.trigger({ task: 1, operation: 3 }, 'debugger-detach');
+  expect(capture.bundle(snapshot(), runtime).incidents).toHaveLength(2);
+});
+it('retains detach incidents under ordinary-error pressure and reports loss', () => {
+  for (let i = 0; i < 8; i++) {
+    capture.begin({ task: 1, operation: i }, taskId, `${id}:${i}`, 'fill');
+    capture.trigger({ task: 1, operation: i }, 'debugger-detach');
+  }
+  for (let i = 8; i < 30; i++) {
+    capture.begin({ task: 1, operation: i }, taskId, `${id}:${i}`, 'fill');
+    capture.trigger({ task: 1, operation: i }, 'operation-error');
+  }
+  const result = capture.bundle(snapshot(), runtime);
+  expect(result.incidents).toHaveLength(8);
+  expect(result.incidents.every((item) => item.trigger === 'debugger-detach')).toBe(true);
+  expect(result.incidents[0]!.window.gaps).toContain('incidents-evicted');
+});
+it.each([0, 10])(
+  'marks pre-state observed %i milliseconds after action start even before the trigger',
+  async (delay) => {
+    page.captureIncidentPageState.mockResolvedValue({
+      status: 'captured',
+      observedAt: Date.now() + delay,
+      state: { scheme: 'https' },
+    });
+    capture.begin({ task: 1, operation: 2 }, taskId, id, 'fill');
+    await vi.advanceTimersByTimeAsync(20);
+    capture.trigger({ task: 1, operation: 2 }, 'operation-error');
+    await vi.advanceTimersByTimeAsync(0);
+    const incident = capture.bundle(snapshot(), runtime).incidents[0]!;
+    expect(incident.pageBeforeTiming.relation).toBe(
+      delay ? 'after-action-start' : 'same-millisecond',
+    );
+    expect(incident.window.gaps).toContain(
+      delay ? 'pre-state-after-action-start' : 'pre-state-order-unresolved',
+    );
+    expect(incident.window.gaps).not.toContain('pre-state-not-before-trigger');
+  },
+);

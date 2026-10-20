@@ -32,6 +32,12 @@ type Incident = Context & {
   reason: 'target_closed' | 'canceled_by_user' | 'other';
   triggeredAt: number;
   runtimeAtTrigger: Runtime;
+  triggerFacts: {
+    trigger: Incident['trigger'];
+    reason: Incident['reason'];
+    triggeredAt: number;
+    runtimeAtTrigger: Runtime;
+  }[];
   pageBefore: IncidentPageCapture | { status: 'pending'; observedAt: number };
   pageState: IncidentPageCapture | { status: 'pending'; observedAt: number };
 };
@@ -48,6 +54,9 @@ export class IncidentCapture {
   private truncated = false;
   private document?: { scope: Scope; pending: Promise<PageDocument | undefined> };
   private before = new Map<Correlation, Promise<IncidentPageCapture>>();
+  private actionScopes = new WeakMap<Correlation, Scope>();
+  private incidentScopes = new WeakMap<Incident, Scope>();
+  private evictedIncidents = 0;
   constructor(
     private scope: () => Scope,
     private runtime: () => Runtime = () => ({
@@ -65,6 +74,7 @@ export class IncidentCapture {
     this.before.clear();
     this.startedAt = Date.now();
     this.truncated = false;
+    this.evictedIncidents = 0;
   }
   private valid(scope: Scope) {
     const now = this.scope();
@@ -116,6 +126,7 @@ export class IncidentCapture {
       this.truncated = true;
     }
     this.correlations.push(entry);
+    this.actionScopes.set(entry, scope);
     const document = this.document;
     if (document && this.sameDocument(document.scope)) {
       const pending = document.pending
@@ -157,37 +168,67 @@ export class IncidentCapture {
       .find(
         (item) =>
           item.task === context.task &&
-          (context.operation === undefined || item.operation === context.operation),
+          !!this.actionScopes.get(item) &&
+          this.valid(this.actionScopes.get(item)!) &&
+          (context.operation === undefined
+            ? item.outcome === 'running'
+            : item.operation === context.operation) &&
+          (trigger !== 'debugger-detach' ||
+            (context.operation !== undefined && item.outcome === 'running')),
       );
-    // A terminal receipt after the debugger notification is the same incident.
-    if (
-      trigger === 'control-lost' &&
+    const actionScope = match && this.actionScopes.get(match);
+    const fact = {
+      trigger,
+      reason: (reason === 'target_closed' || reason === 'canceled_by_user'
+        ? reason
+        : 'other') as Incident['reason'],
+      triggeredAt: now,
+      runtimeAtTrigger: { ...this.runtime() },
+    };
+    const existing =
       match &&
-      this.incidents.some(
-        (item) =>
-          item.trigger === 'debugger-detach' &&
-          item.task === context.task &&
+      actionScope &&
+      this.incidents.find((item) => {
+        const priorScope = this.incidentScopes.get(item);
+        return (
+          item.task === match.task &&
+          item.taskId === match.taskId &&
           item.actionId === match.actionId &&
-          now - item.triggeredAt < INCIDENT_AFTER_MS,
-      )
-    )
+          priorScope?.consent === actionScope.consent &&
+          priorScope.generation === actionScope.generation &&
+          priorScope.navigation === actionScope.navigation &&
+          priorScope.tabId === actionScope.tabId &&
+          now - item.triggeredAt >= 0 &&
+          now - item.triggeredAt < INCIDENT_AFTER_MS
+        );
+      });
+    if (existing) {
+      if (!existing.triggerFacts.some((item) => item.trigger === trigger)) {
+        existing.triggerFacts.push(fact);
+        if (trigger === 'debugger-detach') Object.assign(existing, fact);
+      }
       return;
+    }
     const incident: Incident = {
       ...context,
       incidentId: crypto.randomUUID(),
       ...(match ? { taskId: match.taskId, actionId: match.actionId } : {}),
-      trigger,
-      reason: reason === 'target_closed' || reason === 'canceled_by_user' ? reason : 'other',
-      triggeredAt: now,
-      runtimeAtTrigger: { ...this.runtime() },
+      ...fact,
+      triggerFacts: [fact],
       pageBefore: { status: 'unavailable', observedAt: now },
       pageState: { status: 'pending', observedAt: now },
     };
     if (this.incidents.length >= 8) {
-      this.incidents.shift();
+      const ordinary = this.incidents.findIndex(
+        (item) => !item.triggerFacts.some((fact) => fact.trigger === 'debugger-detach'),
+      );
       this.truncated = true;
+      this.evictedIncidents++;
+      if (ordinary < 0 && trigger !== 'debugger-detach') return;
+      this.incidents.splice(ordinary < 0 ? 0 : ordinary, 1);
     }
     this.incidents.push(incident);
+    this.incidentScopes.set(incident, actionScope ?? scope);
     const before = match && this.before.get(match);
     if (before) {
       incident.pageBefore = { status: 'pending', observedAt: now };
@@ -227,8 +268,27 @@ export class IncidentCapture {
       if (this.startedAt > from) gaps.push('pre-window-not-captured');
       if (now < to) gaps.push('post-window-pending');
       if (capture.dropped || this.truncated) gaps.push('records-dropped');
+      if (this.evictedIncidents) gaps.push('incidents-evicted');
+      const correlation = this.correlations.find(
+        (item) => item.taskId === incident.taskId && item.actionId === incident.actionId,
+      );
+      const actionStartedAt = correlation?.startedAt;
+      const relation =
+        incident.pageBefore.status !== 'captured' || actionStartedAt === undefined
+          ? ('unknown' as const)
+          : incident.pageBefore.observedAt < actionStartedAt
+            ? ('before-action' as const)
+            : incident.pageBefore.observedAt === actionStartedAt
+              ? ('same-millisecond' as const)
+              : ('after-action-start' as const);
+      if (relation === 'after-action-start') gaps.push('pre-state-after-action-start');
+      if (relation === 'same-millisecond') gaps.push('pre-state-order-unresolved');
       if (incident.pageState.status !== 'captured')
         gaps.push(`page-state-${incident.pageState.status}`);
+      else if (incident.pageState.observedAt < incident.triggeredAt)
+        gaps.push('page-state-before-trigger');
+      else if (incident.pageState.observedAt === incident.triggeredAt)
+        gaps.push('page-state-order-unresolved');
       if (incident.pageBefore.status !== 'captured')
         gaps.push(`page-before-${incident.pageBefore.status}`);
       else if (incident.pageBefore.observedAt > incident.triggeredAt)
@@ -242,6 +302,7 @@ export class IncidentCapture {
         gaps.push('correlation-evicted');
       return {
         ...incident,
+        pageBeforeTiming: { actionStartedAt, relation },
         window: { from, to, through: Math.min(now, to), complete: false as const, gaps },
         recordSequences: capture.records
           .filter(
