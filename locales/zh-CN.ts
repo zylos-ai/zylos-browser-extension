@@ -1,7 +1,7 @@
 export default {
   detailedDiagnostics: '详细本地诊断',
   detailedDiagnosticsHint:
-    '默认关闭。记录插件自身 Console 文本和错误堆栈，最多 10 分钟、1 MiB / 1,000 条。普通对象省略。可能包含隐私，脱敏不能保证完整。不采集网页 Console，也不自动分享。关闭、更改连接配置、到期或后台重启会清除记录。',
+    '默认关闭。记录插件自身 Console、错误堆栈、CDP 调用状态及有限的 iframe 变化元数据，最多 10 分钟、1 MiB / 1,000 条。不记录 CDP 参数或结果值、iframe URL。iframe 观察仅覆盖受控页顶层文档，最多 2 分钟。可能包含隐私，脱敏不能保证完整。不采集网页 Console，也不自动分享。关闭、更改连接配置、到期或后台重启会清除记录。',
   detailedExpires: '记录清除时间',
   detailedPreview: '预览已采集日志',
   detailedReviewWarning:

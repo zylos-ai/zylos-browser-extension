@@ -1,4 +1,5 @@
 import { isBlockedUrl } from '../guard';
+import { diagnosticSend, recordDebuggerEvent } from './cdp-diagnostics';
 
 export type Frame = { id: string; parentId?: string; url?: string; sessionId?: string };
 export type FrameTree = { frame: Frame; childFrames?: FrameTree[] };
@@ -20,11 +21,11 @@ export function clearFrameSessions() {
   children.clear();
 }
 export async function enableFrames(target: { tabId: number; sessionId?: string }) {
-  await chrome.debugger.sendCommand(target, 'Network.enable', {
+  await diagnosticSend(target, 'Network.enable', {
     maxTotalBufferSize: 0,
     maxResourceBufferSize: 0,
   });
-  await chrome.debugger.sendCommand(target, 'Target.setAutoAttach', autoAttach);
+  await diagnosticSend(target, 'Target.setAutoAttach', autoAttach);
 }
 export function frameEvent(
   source: { tabId?: number; sessionId?: string },
@@ -33,6 +34,7 @@ export function frameEvent(
 ) {
   if (!source.tabId) return;
   if (method === 'Target.attachedToTarget' && params.targetInfo?.type === 'iframe') {
+    recordDebuggerEvent('frame-attach', { tabId: source.tabId, sessionId: params.sessionId });
     const record = {
       tabId: source.tabId,
       parent: source.sessionId,
@@ -41,7 +43,7 @@ export function frameEvent(
     children.set(params.sessionId, record);
     const target = { tabId: source.tabId, sessionId: params.sessionId };
     const work = (async () => {
-      await chrome.debugger.sendCommand(target, 'Page.enable');
+      await diagnosticSend(target, 'Page.enable');
       if (children.get(params.sessionId) !== record) return;
       await enableFrames(target);
     })()
@@ -50,6 +52,7 @@ export function frameEvent(
     pending.add(work);
   }
   if (method === 'Target.detachedFromTarget') {
+    recordDebuggerEvent('frame-detach', { tabId: source.tabId, sessionId: params.sessionId });
     const remove = (id: string) => {
       children.delete(id);
       for (const [child, value] of children) if (value.parent === id) remove(child);

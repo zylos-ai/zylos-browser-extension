@@ -3,7 +3,7 @@ import type zh from './zh-CN';
 export default {
   detailedDiagnostics: 'Detailed local diagnostics',
   detailedDiagnosticsHint:
-    'Off by default. Record extension console text and error stacks for 10 minutes, up to 1 MiB / 1,000 events. Objects are omitted. May contain private information; redaction is incomplete. No webpage console or automatic sharing. Turning off, changing connection settings, expiry or worker restart clears the capture.',
+    'Off by default. Record extension console text, error stacks, CDP call status and limited iframe mutation metadata for 10 minutes, up to 1 MiB / 1,000 events. CDP arguments/results and iframe URLs are omitted. Iframe observation covers only the controlled top document for up to 2 minutes. May contain private information; redaction is incomplete. No webpage console or automatic sharing. Turning off, changing connection settings, expiry or worker restart clears the capture.',
   detailedExpires: 'Capture clears at',
   detailedPreview: 'Preview captured logs',
   detailedReviewWarning:

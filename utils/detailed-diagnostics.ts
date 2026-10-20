@@ -257,7 +257,7 @@ export class DetailedCapture {
       partial: true,
       limits: { durationMs: DETAIL_TTL, bytes: DETAIL_BYTES, events: 1000, textChars: 16384 },
       limitations:
-        'Extension background/sidepanel only. No webpage logs. Objects omitted; Error own strings or whitelisted native stack getter with default formatting only. Proxy reflection may execute traps. Pattern redaction is incomplete. Panel closure/crash may lose unreported events.',
+        'Extension background/sidepanel and bounded controlled top-document iframe metadata only. No webpage logs, CDP arguments/results or iframe URLs. Iframe probe omits frame documents and shadow roots; at most 2 minutes, 256 iframe IDs and 512 events; polling, navigation, denial and limits may lose events. Objects omitted; Error own strings or whitelisted native stack getter with default formatting only. Proxy reflection may execute traps. Pattern redaction is incomplete. Panel closure/crash may lose unreported events.',
       records: structuredClone(this.records),
     };
   }

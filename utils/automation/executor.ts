@@ -1,4 +1,12 @@
 import { PageActions, type ElementRef, type Target } from './page-actions';
+import {
+  diagnosticSend,
+  diagnosticAttach,
+  diagnosticDetach,
+  recordDebuggerEvent,
+  setDiagnosticTarget,
+  refreshCdpDiagnostics,
+} from './cdp-diagnostics';
 import { NetworkActivity, waitForStablePage } from './page-stability';
 import { frameEvent, frameSessions, enableFrames, clearFrameSessions } from './frames';
 import { isBlockedUrl } from '../guard';
@@ -81,7 +89,10 @@ function allowed(url?: string) {
     return false;
   }
 }
-const publish = () => changed(currentGrant());
+const publish = () => {
+  refreshCdpDiagnostics();
+  changed(currentGrant());
+};
 const inScope = (tab: chrome.tabs.Tab, session: Scope | null) =>
   !!session &&
   tab.windowId === session.windowId &&
@@ -210,7 +221,7 @@ async function detachCurrent(strict = false) {
   await clearCursor();
   if (old) {
     try {
-      await chrome.debugger.detach({ tabId: old.id });
+      await diagnosticDetach({ tabId: old.id });
     } catch {
       if (strict) {
         const targets = await chrome.debugger.getTargets().catch(() => null);
@@ -228,14 +239,12 @@ async function clearCursor() {
   const previous = cursor;
   cursor = null;
   if (!previous) return;
-  await chrome.debugger
-    .sendCommand({ tabId: previous.tabId }, 'Runtime.evaluate', {
-      contextId: previous.contextId,
-      expression: cursorExpression({ action: 'remove', owner: previous.owner }),
-      returnByValue: true,
-      timeout: 500,
-    })
-    .catch(() => {});
+  await diagnosticSend({ tabId: previous.tabId }, 'Runtime.evaluate', {
+    contextId: previous.contextId,
+    expression: cursorExpression({ action: 'remove', owner: previous.owner }),
+    returnByValue: true,
+    timeout: 500,
+  }).catch(() => {});
 }
 export async function release(cleanup = true, strict = false, reason: DiagnosticReason = 'other') {
   recordDiagnostic('release', reason, { source: 'executor' });
@@ -391,10 +400,10 @@ function syncTarget() {
     }
     await detachCurrent();
     if (control !== session || parked || session.tabId !== targetId) return;
-    await chrome.debugger.attach({ tabId: tab.id }, '1.3');
+    await diagnosticAttach({ tabId: tab.id }, '1.3');
     try {
       if (control !== session || parked || session.tabId !== targetId) return;
-      await chrome.debugger.sendCommand({ tabId: tab.id }, 'Page.enable');
+      await diagnosticSend({ tabId: tab.id }, 'Page.enable');
       const fresh = await chrome.tabs.get(tab.id);
       if (
         control !== session ||
@@ -413,12 +422,12 @@ function syncTarget() {
       invalidate('target_attach');
       await enableFrames({ tabId: tab.id });
       // Keep the controlled renderer active without selecting the user's tab.
-      await chrome.debugger.sendCommand({ tabId: tab.id }, 'Emulation.setFocusEmulationEnabled', {
+      await diagnosticSend({ tabId: tab.id }, 'Emulation.setFocusEmulationEnabled', {
         enabled: true,
       });
       publish();
     } finally {
-      if (grant?.id !== tab.id) await chrome.debugger.detach({ tabId: tab.id }).catch(() => {});
+      if (grant?.id !== tab.id) await diagnosticDetach({ tabId: tab.id }).catch(() => {});
     }
   });
 }
@@ -428,7 +437,15 @@ function refreshTaskTarget() {
   });
 }
 export function initializeExecutor() {
+  setDiagnosticTarget(() => ({
+    tabId: control?.tabId,
+    controlled: !!control,
+    granted: !!grant,
+    borrowed: !!control && control.borrowedTabId === control.tabId,
+    revision: navigationRevision,
+  }));
   chrome.debugger.onDetach.addListener((source, reason) => {
+    recordDebuggerEvent('detach', source, reason);
     recordDiagnostic(
       'detach',
       reason === 'target_closed' || reason === 'canceled_by_user' ? reason : 'other',
@@ -468,6 +485,7 @@ export function initializeExecutor() {
     const frame = (params as { frame?: { parentId?: string; url: string } } | undefined)?.frame;
     if (grant && method === 'Page.frameNavigated' && frame && !frame.parentId) {
       navigationRevision++;
+      refreshCdpDiagnostics();
       cursor = null;
       invalidate('navigation');
       if (!allowed(frame.url)) refreshTaskTarget();
@@ -500,6 +518,7 @@ export function initializeExecutor() {
     }
     if (info.url) {
       navigationRevision++;
+      refreshCdpDiagnostics();
       invalidate('navigation');
       if (!allowed(info.url)) {
         refreshTaskTarget();
@@ -701,7 +720,7 @@ export async function execute(command: Command, deadline: number) {
     const current = dialog;
     if (command.action === 'get') return { dialog: current ? { ...current } : null };
     if (!current || !session.tabIds.includes(current.tabId)) fail('NO_DIALOG');
-    await chrome.debugger.sendCommand(
+    await diagnosticSend(
       { tabId: current.tabId, ...(current.sessionId ? { sessionId: current.sessionId } : {}) },
       'Page.handleJavaScriptDialog',
       {
@@ -774,7 +793,7 @@ export async function execute(command: Command, deadline: number) {
                 verify();
                 return boundedCdp(
                   () =>
-                    chrome.debugger.sendCommand(
+                    diagnosticSend(
                       { tabId: session.tabId, ...(sessionId ? { sessionId } : {}) },
                       method,
                       params,
@@ -850,15 +869,15 @@ export async function execute(command: Command, deadline: number) {
     if (!inScope(tab, session) || !inspectable(tab)) fail('TASK_TAB_UNAVAILABLE');
     if (command.op === 'reload') await chrome.tabs.reload(tab.id!);
     else {
-      const history = (await chrome.debugger.sendCommand(
-        { tabId: tab.id! },
-        'Page.getNavigationHistory',
-      )) as { currentIndex: number; entries: { id: number; url: string }[] };
+      const history = (await diagnosticSend({ tabId: tab.id! }, 'Page.getNavigationHistory')) as {
+        currentIndex: number;
+        entries: { id: number; url: string }[];
+      };
       checkSession();
       const entry = history.entries[history.currentIndex + (command.op === 'back' ? -1 : 1)];
       if (!entry) fail('NO_HISTORY_ENTRY');
       if (!allowed(entry.url) || isBlockedUrl(entry.url)) fail('BLOCKED_URL');
-      await chrome.debugger.sendCommand({ tabId: tab.id! }, 'Page.navigateToHistoryEntry', {
+      await diagnosticSend({ tabId: tab.id! }, 'Page.navigateToHistoryEntry', {
         entryId: entry.id,
       });
     }
@@ -978,7 +997,7 @@ export async function execute(command: Command, deadline: number) {
     if (dialog) fail('DIALOG_OPEN', `${dialog.type}: ${dialog.message}; use dialog`);
     const target = { tabId: lease.id, ...(sessionId ? { sessionId } : {}) };
     const result = await boundedCdp(async () => {
-      const value = await chrome.debugger.sendCommand(target, method, params);
+      const value = await diagnosticSend(target, method, params);
       if (
         (command.op === 'click' &&
           method === 'Input.dispatchMouseEvent' &&
