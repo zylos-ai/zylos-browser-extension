@@ -264,6 +264,13 @@ try {
   assert.equal((await post('/diagnostics/detail', { endpoint })).ok, false);
   await command({ type: 'remote-detailed-set-enabled', enabled: true });
   const consent = (await state()).detailedDiagnostics.consent;
+  await evaluate(
+    `globalThis.previewCounts={frames:0,acks:0};const originalSend=chrome.debugger.sendCommand.bind(chrome.debugger);chrome.debugger.sendCommand=(target,method,...args)=>{if(method==='Page.screencastFrameAck')previewCounts.acks++;return originalSend(target,method,...args)};chrome.debugger.onEvent.addListener((_source,method)=>{if(method==='Page.screencastFrame')previewCounts.frames++});true`,
+    workerSession,
+  );
+  await evaluate(
+    `globalThis.testPreviewFrames=0;globalThis.testPreviewPort=chrome.runtime.connect({name:'live-page-preview'});testPreviewPort.onMessage.addListener(message=>{if(message.type==='preview-frame'){testPreviewFrames++;testPreviewPort.postMessage({type:'ack',sequence:message.frame.sequence})}});testPreviewPort.postMessage({type:'visibility',visible:true});true`,
+  );
   evidence.actions = [];
   for (const mode of ['plain', 'foreigniframe']) {
     const tab = await evaluate(
@@ -296,6 +303,34 @@ try {
       ],
     });
     assert.ok(result.next, JSON.stringify(result));
+    if (mode === 'plain') {
+      await evaluate(
+        `chrome.scripting.executeScript({target:{tabId:${tab.id}},func:()=>{let count=0;globalThis.fixtureAnimation=setInterval(()=>{document.body.style.backgroundColor=(++count%2)?'rgb(240,245,250)':'white'},60)}})`,
+      );
+      await until(
+        async () =>
+          (await evaluate('previewCounts', workerSession)).acks >= 30 &&
+          (await evaluate('testPreviewFrames')) >= 10,
+      );
+      evidence.livePreview = {
+        ...(await evaluate('previewCounts', workerSession)),
+        panelFrames: await evaluate('testPreviewFrames'),
+      };
+      const pressure = (await command({ type: 'remote-detailed-preview', consent })).value;
+      const cdpRecords = pressure.capture.records
+        .filter((record) => record.text.startsWith('CDP '))
+        .map((record) => JSON.parse(record.text.slice(4)));
+      const ackRecords = cdpRecords.filter((record) => record.method === 'Page.screencastFrameAck');
+      assert.ok(ackRecords.every((record) => ['error', 'slow-success'].includes(record.phase)));
+      const ackSummaries = cdpRecords.filter((record) => record.event === 'screencast-ack-summary');
+      assert.ok(ackSummaries.length > 0 && ackSummaries.length <= 3);
+      assert.ok(ackSummaries.every((record) => record.partial && record.successful > 0));
+      evidence.livePreview.ackRecords = ackRecords;
+      evidence.livePreview.ackSummaries = ackSummaries;
+      await evaluate(
+        `chrome.scripting.executeScript({target:{tabId:${tab.id}},func:()=>clearInterval(globalThis.fixtureAnimation)})`,
+      );
+    }
     result = await decide(result.next, {
       kind: 'actions',
       actions: [{ method: 'find', params: { selector: '#field' } }],
@@ -309,6 +344,38 @@ try {
     evidence.actions.push({ mode, result });
     if (mode === 'plain') {
       assert.ok(result.next && !result.next.execution.failed, JSON.stringify(result));
+      const beforePreview = (await command({ type: 'remote-detail-share-prepare', consent })).value;
+      await command({ type: 'remote-detail-share-grant', id: beforePreview.id });
+      const beforeResume = await post('/diagnostics/detail', { endpoint });
+      assert.equal(beforeResume.ok, true, JSON.stringify(beforeResume));
+      const oldRecords = beforeResume.remoteEvidence.records;
+      assert.ok(oldRecords.some((record) => record.kind === 'action' && record.method === 'fill'));
+      relay.ext.conns.get(endpoint).ws.terminate();
+      await sleep(1500);
+      await until(async () => (await state()).connected);
+      const afterPreview = (
+        await command({
+          type: 'remote-detail-share-prepare',
+          consent: (await state()).detailedDiagnostics.consent,
+        })
+      ).value;
+      await command({ type: 'remote-detail-share-grant', id: afterPreview.id });
+      const afterResume = await post('/diagnostics/detail', { endpoint });
+      assert.equal(afterResume.ok, true, JSON.stringify(afterResume));
+      assert.equal(afterResume.remoteEvidence.connection.resumed, true);
+      assert.ok(
+        oldRecords.every((record) =>
+          afterResume.remoteEvidence.records.some(
+            (retained) => JSON.stringify(retained) === JSON.stringify(record),
+          ),
+        ),
+      );
+      evidence.taskResume = {
+        oldRecordCount: oldRecords.length,
+        retainedRecordCount: afterResume.remoteEvidence.records.length,
+        connection: afterResume.remoteEvidence.connection,
+        gaps: afterResume.remoteEvidence.gaps,
+      };
       await decide(result.next, { kind: 'done', text: 'Local fixture completed' });
     } else {
       assert.ok(result.finished || result.next?.execution?.failed, JSON.stringify(result));
@@ -334,11 +401,14 @@ try {
     assert.ok(incident.window.gaps.includes('partial-diagnostic-capture'));
     assert.ok(incident.runtimeAtTrigger);
     assert.ok(incident.pageBefore && incident.pageState);
-    assert.ok(
-      bundle.correlations.some(
-        (item) => item.taskId === incident.taskId && item.actionId === incident.actionId,
-      ),
-    );
+    assert.ok(incident.triggerFacts.length > 0 && incident.triggerFacts.length <= 3);
+    if (incident.actionId)
+      assert.ok(
+        bundle.correlations.some(
+          (item) => item.taskId === incident.taskId && item.actionId === incident.actionId,
+        ),
+      );
+    else assert.ok(incident.window.gaps.includes('correlation-unavailable'));
   }
   evidence.extensionBuild = bundle.capture.build;
   const unauthorized = await evaluate(
@@ -372,6 +442,36 @@ try {
   assert.ok(!JSON.stringify(companion).includes('PRIVATE_INPUT_CANARY'));
   evidence.incidentBundle = bundle;
   evidence.remoteEvidence = companion;
+  const { fetchDetail } = await import(
+    new URL(
+      '../scripts/detail-diagnostics.js',
+      new URL(
+        process.env.SHARE_REMOTE || '../../../zylos-browser-remote/src/index.js',
+        import.meta.url,
+      ),
+    )
+  );
+  let cliFetchCount = 0;
+  const degraded = await fetchDetail(
+    { endpoint },
+    {
+      detailDiagnostics: async () => {
+        cliFetchCount++;
+        return { body: { ...result, remoteEvidence: { ...companion, clockAligned: true } } };
+      },
+    },
+  );
+  assert.equal(cliFetchCount, 1);
+  assert.equal(degraded.ok, true);
+  assert.equal(degraded.text, prepared.text);
+  assert.equal(degraded.sha256, result.sha256);
+  assert.equal(degraded.remoteEvidence, undefined);
+  assert.ok(degraded.remoteEvidenceGap);
+  evidence.companionFallback = {
+    fetchCount: cliFetchCount,
+    gap: degraded.remoteEvidenceGap,
+    exactTextAndHashPreserved: true,
+  };
   assert.equal((await post('/diagnostics/detail', { endpoint })).ok, false);
   evidence.checks.push(
     'default deny; trusted panel only; exact immutable hash; one-time retrieval',
@@ -535,5 +635,17 @@ try {
   if (tls) await new Promise((resolve) => tls.close(resolve));
   if (site) await new Promise((resolve) => site.close(resolve));
   await fs.writeFile(evidenceDir + '/results.json', JSON.stringify(evidence, null, 2));
-  console.log(JSON.stringify(evidence));
+  console.log(
+    JSON.stringify({
+      success: evidence.success,
+      error: evidence.error,
+      sourceCommit: evidence.sourceCommit,
+      remoteSourceCommit: evidence.remoteSourceCommit,
+      checks: evidence.checks,
+      livePreview: evidence.livePreview,
+      taskResume: evidence.taskResume,
+      companionFallback: evidence.companionFallback,
+      evidenceDir,
+    }),
+  );
 }
