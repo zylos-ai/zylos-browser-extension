@@ -131,3 +131,71 @@ it('revocation while export validation is pending prevents the download', async 
   expect(click).not.toHaveBeenCalled();
   expect(container.querySelector('#detailed-preview-text')).toBeNull();
 });
+
+const shared = {
+  id: '22222222-2222-4222-8222-222222222222',
+  text: 'exact shared snapshot',
+  sha256: 'a'.repeat(64),
+  recipient: 'wss://remote.example',
+  expiresAt: Date.now() + 120000,
+};
+it('requires unchecked local consent and reflects consumed status without stale authorization', async () => {
+  state = { ...state, connected: true, relayUrl: 'wss://remote.example/ext' };
+  send.mockResolvedValue({ ok: true, value: shared });
+  await render();
+  await press('#detail-share-prepare');
+  expect(container.querySelector<HTMLTextAreaElement>('#detail-share-text')!.value).toBe(
+    shared.text,
+  );
+  expect(container.querySelector<HTMLInputElement>('#detail-share-consent')!.checked).toBe(false);
+  expect(container.querySelector<HTMLButtonElement>('#detail-share-grant')!.disabled).toBe(true);
+  await press('#detail-share-consent');
+  let complete!: (value: unknown) => void;
+  send.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        complete = resolve;
+      }),
+  );
+  await press('#detail-share-grant');
+  expect(send).toHaveBeenLastCalledWith({ type: 'remote-detail-share-grant', id: shared.id });
+  state = { ...state, detailedSharing: { phase: 'consumed', expiresAt: shared.expiresAt } };
+  await render();
+  await act(async () => complete({ ok: true, value: { expiresAt: shared.expiresAt } }));
+  expect(container.textContent).toContain('detailShareConsumed');
+  expect(container.textContent).not.toContain('detailShareAuthorized');
+  expect(container.querySelector('#detail-share-text')).toBeNull();
+});
+it('discards delayed shared preview after recipient changes', async () => {
+  state = { ...state, connected: true, relayUrl: 'wss://remote.example/ext' };
+  let complete!: (value: unknown) => void;
+  send.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        complete = resolve;
+      }),
+  );
+  await render();
+  await press('#detail-share-prepare');
+  state = { ...state, relayUrl: 'wss://other.example/ext' };
+  await render();
+  await act(async () => complete({ ok: true, value: shared }));
+  expect(container.querySelector('#detail-share-text')).toBeNull();
+  expect(container.querySelector('#detail-share-grant')).toBeNull();
+});
+it('a fresh panel can revoke an existing grant without preparing another snapshot', async () => {
+  state = {
+    ...state,
+    connected: true,
+    relayUrl: 'wss://remote.example/ext',
+    detailedSharing: { phase: 'authorized', expiresAt: shared.expiresAt },
+  };
+  await render();
+  expect(container.querySelector('#detail-share-text')).toBeNull();
+  await press('#detail-share-revoke');
+  expect(send).toHaveBeenLastCalledWith({ type: 'remote-detail-share-revoke' });
+  state = { ...state, detailedSharing: { phase: 'revoked', expiresAt: shared.expiresAt } };
+  await render();
+  expect(container.textContent).toContain('detailShareRevoked');
+  expect(container.querySelector('#detail-share-revoke')).toBeNull();
+});

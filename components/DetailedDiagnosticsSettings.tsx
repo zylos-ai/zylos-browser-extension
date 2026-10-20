@@ -20,10 +20,78 @@ export function DetailedDiagnosticsSettings({
   const [preview, setPreview] = useState<{ token: string; text: string; hash: string }>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(false);
+  const [share, setShare] = useState<{
+    id: string;
+    text: string;
+    sha256: string;
+    recipient: string;
+    expiresAt: number;
+  }>();
+  const [accepted, setAccepted] = useState(false);
+  const shareScope = `${token}:${state.connected}:${state.relayUrl}`;
+  const currentShareScope = useRef(shareScope);
+  currentShareScope.current = shareScope;
+  const shareRequest = useRef(0);
+  const phase = state.detailedSharing?.phase;
+  const authorized = phase === 'authorized';
+  useEffect(() => {
+    if (phase === 'consumed' || phase === 'expired' || phase === 'revoked') {
+      setShare(undefined);
+      setAccepted(false);
+    }
+  }, [phase]);
   useEffect(() => {
     setPreview(undefined);
     setError(false);
+    setShare(undefined);
+    setAccepted(false);
   }, [token]);
+  useEffect(() => {
+    shareRequest.current++;
+    setShare(undefined);
+    setAccepted(false);
+  }, [state.connected, state.relayUrl]);
+  useEffect(() => {
+    if (!share) return;
+    const timer = setTimeout(
+      () => {
+        shareRequest.current++;
+        setShare(undefined);
+        setAccepted(false);
+      },
+      Math.max(0, share.expiresAt - Date.now()),
+    );
+    return () => clearTimeout(timer);
+  }, [share]);
+  const shareAction = async (type: 'prepare' | 'grant' | 'revoke') => {
+    const request = ++shareRequest.current;
+    const stillCurrent = () =>
+      valid() && shareScope === currentShareScope.current && request === shareRequest.current;
+    setBusy(true);
+    setError(false);
+    try {
+      const reply = await chrome.runtime.sendMessage(
+        type === 'prepare'
+          ? { type: 'remote-detail-share-prepare', consent: token }
+          : type === 'grant'
+            ? { type: 'remote-detail-share-grant', id: share?.id }
+            : { type: 'remote-detail-share-revoke' },
+      );
+      if (!stillCurrent()) return;
+      if (!reply?.ok) throw new Error('Unavailable');
+      if (type === 'prepare') {
+        setShare(reply.value);
+        setAccepted(false);
+      } else if (type === 'revoke') {
+        setShare(undefined);
+        setAccepted(false);
+      }
+    } catch {
+      if (stillCurrent()) setError(true);
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  };
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -123,6 +191,15 @@ export function DetailedDiagnosticsSettings({
           >
             {t('detailedPreview')}
           </button>
+          <button
+            id="detail-share-prepare"
+            type="button"
+            className="btn"
+            disabled={busy || !state.connected || !state.relayUrl.startsWith('wss:')}
+            onClick={() => void shareAction('prepare')}
+          >
+            {t('detailSharePreview')}
+          </button>
         </>
       )}
       {preview?.token === token && !!token && (
@@ -151,6 +228,80 @@ export function DetailedDiagnosticsSettings({
       {error && (
         <p role="alert" className="settings-hint">
           {t('detailedExpired')}
+        </p>
+      )}
+      {share && !!token && (
+        <>
+          <p className="settings-hint">
+            {t('detailShareRecipient')} {share.recipient}
+          </p>
+          <p className="settings-hint">{t('detailShareDisclosure')}</p>
+          <textarea
+            id="detail-share-text"
+            className="input detailed-preview"
+            aria-label={t('detailSharePreview')}
+            readOnly
+            rows={12}
+            value={share.text}
+          />
+          <p className="settings-hint detailed-hash">SHA-256: {share.sha256}</p>
+          <p className="settings-hint">
+            {t('detailShareExpires')} {new Date(share.expiresAt).toLocaleTimeString()}
+          </p>
+          {!authorized && (
+            <label>
+              <input
+                id="detail-share-consent"
+                type="checkbox"
+                checked={accepted}
+                onChange={(e) => setAccepted(e.target.checked)}
+              />
+              {t('detailShareConsent')}
+            </label>
+          )}
+          {!authorized && (
+            <button
+              id="detail-share-grant"
+              type="button"
+              className="btn"
+              disabled={busy || !accepted || Date.now() >= share.expiresAt}
+              onClick={() => void shareAction('grant')}
+            >
+              {t('detailShareAuthorize')}
+            </button>
+          )}
+        </>
+      )}
+      {authorized && (
+        <p role="status" className="settings-hint">
+          {t('detailShareAuthorized')}{' '}
+          {new Date(state.detailedSharing!.expiresAt).toLocaleTimeString()}
+        </p>
+      )}
+      {(phase === 'prepared' || authorized) && (
+        <button
+          id="detail-share-revoke"
+          type="button"
+          className="btn"
+          disabled={busy}
+          onClick={() => void shareAction('revoke')}
+        >
+          {t('detailShareRevoke')}
+        </button>
+      )}
+      {phase === 'consumed' && (
+        <p role="status" className="settings-hint">
+          {t('detailShareConsumed')}
+        </p>
+      )}
+      {phase === 'expired' && (
+        <p role="status" className="settings-hint">
+          {t('detailShareExpired')}
+        </p>
+      )}
+      {phase === 'revoked' && !!token && (
+        <p role="status" className="settings-hint">
+          {t('detailShareRevoked')}
         </p>
       )}
     </section>

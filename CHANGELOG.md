@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add separate, explicit one-time sharing of an inspected detailed diagnostic snapshot with the configured Remote over WSS. Grants expire within two minutes and are revoked on disconnect, capture disable or configuration changes.
+
 - Add a separate, default-off detailed local capture for extension console text
   and Error stacks. Keep at most ten minutes, 1 MiB and 1,000 events in worker
   memory; clear on disable, expiry, connection changes or worker restart.

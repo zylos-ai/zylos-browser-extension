@@ -27,6 +27,7 @@ import {
 } from '../../utils/diagnostics';
 import { installRuntimeDiagnostics } from '../../utils/diagnostics-runtime';
 import { DetailedCapture, serializeDetail } from '../../utils/detailed-diagnostics';
+import { DetailedSharing } from '../../utils/detailed-sharing';
 import { installDetailedRuntime } from '../../utils/detailed-runtime';
 import { safeError } from '../../utils/diagnostics-schema';
 // Extension-owned conversations: request Agent decisions, execute locally, and
@@ -121,10 +122,20 @@ export function startRemoteBackground() {
   let pendingStop: { taskId: string; resolve: (ok: boolean) => void } | undefined;
   let chatRevision = 0;
   let loop: BrowserLoop;
+  const sharing = new DetailedSharing(() => publish());
   const detailed = new DetailedCapture(
-    () => publish(),
+    () => {
+      sharing.revoke();
+      publish();
+    },
     () => [config.key],
   );
+  const shareContext = () => ({
+    ...detailed.state(),
+    generation,
+    recipient: config.relayUrl,
+    connected: state.connected && loopReady && socket?.readyState === WebSocket.OPEN,
+  });
   installDetailedRuntime(
     (event) => detailed.append(detailed.state().consent, 'background', event, detailedContext()),
     () => detailed.state().enabled,
@@ -226,6 +237,7 @@ export function startRemoteBackground() {
   };
   function snapshot(): RemoteState {
     state.detailedDiagnostics = detailed.state();
+    state.detailedSharing = sharing.state();
     state.diagnosticsEnabled = diagnosticsEnabled();
     state.diagnosticsConsent = diagnosticsConsent();
     if (!loop?.active || state.agentActivity?.taskId !== loop.taskId)
@@ -638,6 +650,7 @@ export function startRemoteBackground() {
   }
 
   function disconnect(reason: string) {
+    sharing.revoke();
     if (socket) recordDiagnostic('socket-close', 'remote_disconnect', { closeCode: 1000 });
     if (loop.active) {
       cancelLoop('interrupted');
@@ -711,6 +724,7 @@ export function startRemoteBackground() {
         type: 'hello',
         version: REMOTE_VERSION,
         capabilities: [
+          'diagnostics-detail-share-v1',
           ...REMOTE_CAPABILITIES,
           DIAGNOSTICS_CAPABILITY,
           INSTANCE_CAPABILITY,
@@ -733,6 +747,7 @@ export function startRemoteBackground() {
       publish();
     };
     ws.onclose = (ev) => {
+      if (gen === generation) sharing.revoke();
       if (gen !== generation) return;
       state.connected = false;
       recordDiagnostic('socket-close', 'remote_disconnect', {
@@ -934,6 +949,20 @@ export function startRemoteBackground() {
         });
       if (gen === generation) send({ id: m.id, ...frame });
     };
+    if (m.method === 'diagnostics.detail.fetch') {
+      try {
+        z.object({}).strict().parse(m.params);
+        if (gen !== generation) throw new Error('DETAIL_SHARE_UNAVAILABLE');
+        reply({ type: 'resp', result: sharing.fetch(shareContext()) });
+      } catch {
+        reply({
+          type: 'error',
+          code: 'DETAIL_SHARE_UNAVAILABLE',
+          message: 'No authorized diagnostic snapshot',
+        });
+      }
+      return;
+    }
     if (m.method === 'diagnostics.get') {
       try {
         reply({ type: 'resp', result: await getDiagnostics(m.params) });
@@ -1102,6 +1131,19 @@ export function startRemoteBackground() {
           return snapshot();
         case 'remote-detailed-preview':
           return detailed.preview(m.consent);
+        case 'remote-detail-share-prepare': {
+          const result = await sharing.prepare(detailed.preview(m.consent), shareContext());
+          if (!detailed.valid(m.consent)) {
+            sharing.revoke();
+            throw new Error('ui.error.detailedExpired');
+          }
+          return result;
+        }
+        case 'remote-detail-share-grant':
+          return sharing.grant(m.id, shareContext());
+        case 'remote-detail-share-revoke':
+          sharing.revoke();
+          return { revoked: true };
         case 'remote-detailed-validate':
           return { valid: detailed.valid(m.consent) };
         case 'remote-detailed-event':
@@ -1283,6 +1325,9 @@ export function startRemoteBackground() {
       'remote-set-enabled',
       'remote-diagnostics-set-enabled',
       'remote-detailed-set-enabled',
+      'remote-detail-share-prepare',
+      'remote-detail-share-grant',
+      'remote-detail-share-revoke',
     ].includes(parsed.data.type);
     const pending = mutatesConsent ? panelMutations.catch(() => {}).then(run) : run();
     if (mutatesConsent) panelMutations = pending;
