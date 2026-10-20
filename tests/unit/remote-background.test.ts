@@ -276,6 +276,56 @@ describe('decision transport background', () => {
     await respond(third, request, { kind: 'done', text: 'Answer' });
     expect((await state()).loopActive).toBe(false);
   });
+  it('expires restored status after three seconds even without a mounted panel', async () => {
+    const ws = await bootConnected(false, false, true, true);
+    await begin(ws);
+    ws.serverClose(1006);
+    await reconnect();
+    await vi.advanceTimersByTimeAsync(2999);
+    expect((await state()).recovery).toBe('restored');
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await state()).recovery).toBeUndefined();
+    expect((await state()).connected).toBe(true);
+  });
+  it('an old restored timer cannot clear a newer disconnect or failure', async () => {
+    const ws = await bootConnected(false, false, true, true);
+    await begin(ws);
+    ws.serverClose(1006);
+    const next = await reconnect();
+    await vi.advanceTimersByTimeAsync(2000);
+    next.serverClose(1006);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(['disconnected', 'reconnecting']).toContain((await state()).recovery);
+    await vi.advanceTimersByTimeAsync(120000);
+    expect((await state()).recovery).toBe('failed');
+  });
+  it('each recovery gets its own full notice window', async () => {
+    const ws = await bootConnected(false, false, true, true);
+    await begin(ws);
+    ws.serverClose(1006);
+    const next = await reconnect();
+    await vi.advanceTimersByTimeAsync(500);
+    next.serverClose(1006);
+    await reconnect();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect((await state()).recovery).toBe('restored');
+    await vi.advanceTimersByTimeAsync(2000);
+    expect((await state()).recovery).toBeUndefined();
+  });
+  it('starting a new task clears the restored notice and its timer', async () => {
+    const ws = await bootConnected(false, false, true, true);
+    const request = await begin(ws);
+    ack(ws, request);
+    ws.serverClose(1006);
+    const next = await reconnect();
+    await respond(next, request, { kind: 'done', text: 'Finished' });
+    ack(next, next.last('agent-turn-end')!);
+    await begin(next, 'New task');
+    expect((await state()).recovery).toBeUndefined();
+    next.serverClose(1006);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(['disconnected', 'reconnecting']).toContain((await state()).recovery);
+  });
   it('retains a started operation result, queues its next request and never repeats a decision', async () => {
     const ws = await bootConnected(false, false, true, true);
     const request = await selectPage(ws);

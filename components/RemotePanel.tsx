@@ -170,7 +170,7 @@ export function RemotePanel() {
     : !state.enabled
       ? t('disabled')
       : connected
-        ? t('connected')
+        ? t(state.recovery === 'restored' ? 'taskConnectionRestored' : 'connected')
         : state.connecting
           ? t('connecting')
           : t('offline');
@@ -187,7 +187,9 @@ export function RemotePanel() {
             role="status"
           >
             <span className="status-dot" aria-hidden="true" />
-            {status}
+            <span className="connection-status-label" title={status}>
+              {status}
+            </span>
           </span>
           <div className="header-tools">
             {(chatBusy || sending) && (
@@ -270,15 +272,9 @@ export function RemotePanel() {
           </p>
         </div>
       )}
-      {state.recovery && state.recovery !== 'failed' && (
-        <div className="connection-feedback" role="status">
-          {t(
-            state.recovery === 'restored'
-              ? 'taskConnectionRestored'
-              : state.recovery === 'reconnecting'
-                ? 'taskReconnecting'
-                : 'taskDisconnected',
-          )}
+      {state.recovery && !['failed', 'restored'].includes(state.recovery) && (
+        <div className="connection-feedback connection-recovery" role="status">
+          {t(state.recovery === 'reconnecting' ? 'taskReconnecting' : 'taskDisconnected')}
         </div>
       )}
       {state.completionPending && state.connected && (
