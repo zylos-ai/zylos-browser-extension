@@ -1,4 +1,13 @@
 export default {
+  detailedDiagnostics: '详细本地诊断',
+  detailedDiagnosticsHint:
+    '默认关闭。记录插件自身 Console 文本和错误堆栈，最多 10 分钟、1 MiB / 1,000 条。普通对象省略。可能包含隐私，脱敏不能保证完整。不采集网页 Console，也不自动分享。关闭、更改连接配置、到期或后台重启会清除记录。',
+  detailedExpires: '记录清除时间',
+  detailedPreview: '预览已采集日志',
+  detailedReviewWarning:
+    '下载或分享前请检查下方完整文件。省略、截断和丢失情况会标记在文件中。这不是完整的 DevTools 录制。',
+  detailedDownload: '下载已预览的 JSON',
+  detailedExpired: '采集已过期或变更，请重新开启并预览。',
   diagnostics: '分享诊断事件',
   diagnosticsHint:
     '允许已连接的 Agent 读取最近 30 分钟的任务、控制、连接、异常类型和控制台级别事件（最多 1,000 条）。不含网页内容、网址、输入、密钥、异常原文或控制台参数。默认关闭；关闭后清除已存事件。',

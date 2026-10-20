@@ -307,6 +307,12 @@ export function RemotePanel() {
               enabled: !state.diagnosticsEnabled,
             })
           }
+          onDetailedToggle={() =>
+            void action({
+              type: 'remote-detailed-set-enabled',
+              enabled: !state.detailedDiagnostics?.enabled,
+            })
+          }
         />
       ) : (
         <main className="chat-panel">

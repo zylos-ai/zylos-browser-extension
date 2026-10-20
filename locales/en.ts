@@ -1,6 +1,15 @@
 import type zh from './zh-CN';
 
 export default {
+  detailedDiagnostics: 'Detailed local diagnostics',
+  detailedDiagnosticsHint:
+    'Off by default. Record extension console text and error stacks for 10 minutes, up to 1 MiB / 1,000 events. Objects are omitted. May contain private information; redaction is incomplete. No webpage console or automatic sharing. Turning off, changing connection settings, expiry or worker restart clears the capture.',
+  detailedExpires: 'Capture clears at',
+  detailedPreview: 'Preview captured logs',
+  detailedReviewWarning:
+    'Review the exact file before downloading or sharing. Omitted, truncated and dropped events are reported in the file. This is not a complete DevTools recording.',
+  detailedDownload: 'Download reviewed JSON',
+  detailedExpired: 'Capture expired or changed. Enable a new capture and preview again.',
   diagnostics: 'Share diagnostic events',
   diagnosticsHint:
     'Allow the connected agent to read task, control, connection, error-type and console-severity events from the last 30 minutes (up to 1,000). No page content, URLs, input, keys, error text or console arguments. Off by default. Turning off clears stored events.',

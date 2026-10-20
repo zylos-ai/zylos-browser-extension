@@ -1436,6 +1436,19 @@ html[data-theme='zylos'] > body {
     padding: 8px var(--zylos-sidebar-gutter);
     background: var(--color-error-soft);
   }
+  .settings-page textarea.detailed-preview {
+    display: block;
+    width: 100%;
+    height: 220px;
+    min-height: 220px;
+    resize: vertical;
+    white-space: pre;
+    font-family: monospace;
+    font-size: 12px;
+  }
+  .detailed-hash {
+    overflow-wrap: anywhere;
+  }
   #error {
     color: var(--color-error);
     font-size: var(--text-caption);
