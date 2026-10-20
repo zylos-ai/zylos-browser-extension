@@ -1,4 +1,16 @@
 export default {
+  detailSharePreview: '预览用于 Remote 分享的快照',
+  detailShareRecipient: '接收方 Remote：',
+  detailShareExpires: '分享授权截止时间：',
+  detailShareDisclosure:
+    '此快照可能包含敏感文本。授权后，当前 Remote、其运营者、Agent 及其配置的 AI 服务商可能接收并保留副本。仅允许通过 WSS 在最长两分钟内读取一次。撤销仅阻止后续读取，无法删除已收到的副本。响应丢失也可能消耗授权，不会自动重试或重新授权。',
+  detailShareConsent: '我已检查此快照，同意本次传输。',
+  detailShareAuthorize: '授权读取一次',
+  detailShareAuthorized: '已授权一次读取，截止时间如上。',
+  detailShareConsumed: '授权已消耗。快照已提交连接发送，无法确认对方是否收到。',
+  detailShareExpired: '分享授权已过期，快照已清除。',
+  detailShareRevoked: '分享授权已撤销，快照已清除。',
+  detailShareRevoke: '撤销并清除快照',
   detailedDiagnostics: '详细本地诊断',
   detailedDiagnosticsHint:
     '默认关闭。记录插件自身 Console 文本和错误堆栈，最多 10 分钟、1 MiB / 1,000 条。普通对象省略。可能包含隐私，脱敏不能保证完整。不采集网页 Console，也不自动分享。关闭、更改连接配置、到期或后台重启会清除记录。',

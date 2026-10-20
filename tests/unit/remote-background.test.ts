@@ -1066,6 +1066,7 @@ describe('decision transport background', () => {
     const ws = await bootConnected();
     expect(ws.protocols).toEqual([REMOTE_SUBPROTOCOL, `key.${KEY}`]);
     expect(ws.last('hello')!.capabilities).toEqual([
+      'diagnostics-detail-share-v1',
       'agent-loop-v1',
       'diagnostics-v2',
       'browser-instance-v1',

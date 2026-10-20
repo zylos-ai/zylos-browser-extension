@@ -62,6 +62,27 @@ rejects stale events; it cannot retract an already-started/downloaded file.
 Build metadata is generated during build with a unique ID, actual Git commit
 when available, dirty flag and timestamp; no manifest version bump is needed.
 
+## One-Time Detailed Sharing
+
+`utils/detailed-sharing.ts` owns one immutable preview in memory, bounded to
+2 MiB of UTF-8 JSON. Trusted sidepanel messages prepare and explicitly grant
+its ID; remote callers cannot create consent. The fixed remote request
+`diagnostics.detail.fetch` consumes an authorized snapshot before responding.
+WSS, current capture consent, exact configured endpoint and live connection
+generation must still match. The deadline is the earlier of two minutes and
+capture expiry. Local-only status reports prepared/authorized/consumed/expired/
+revoked without exposing text or grant IDs. A consumed grant is a send attempt,
+not proof of receipt. Remote services and AI providers may retain received data.
+
+The UI tests cover independent unchecked consent, late replies, recipient changes
+and revocation from a newly mounted panel. The sharing unit tests cover immutable
+bytes, single use, TLS, bounds, expiry, recipient/generation fencing and in-flight
+preview invalidation. `tests/e2e/detailed-sharing.mjs` runs actual Chrome in a
+disposable profile, a temporary self-signed local TLS listener and a source Remote.
+Its certificate bypass applies only to that disposable browser process. Set
+`SHARE_REMOTE` to the compatible Remote `src/index.js` absolute path and
+`SHARE_EVIDENCE_DIR` to retain screenshots/results. It never loads the owner profile.
+
 ## 目录
 
 | 文件                                               | 职责                                         |

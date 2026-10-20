@@ -111,6 +111,12 @@ export const chatEntrySchema = z
 export type ChatEntry = z.infer<typeof chatEntrySchema>;
 
 export const remoteStateSchema = z.object({
+  detailedSharing: z
+    .object({
+      phase: z.enum(['idle', 'prepared', 'authorized', 'consumed', 'expired', 'revoked']),
+      expiresAt: z.number(),
+    })
+    .optional(),
   detailedDiagnostics: detailStateSchema.optional(),
   diagnosticsEnabled: z.boolean().optional(),
   diagnosticsConsent: z.string().optional(),
@@ -164,6 +170,9 @@ export const initialRemoteState: RemoteState = {
 export const remoteRequestSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('remote-detailed-set-enabled'), enabled: z.boolean() }).strict(),
   z.object({ type: z.literal('remote-detailed-preview'), consent: z.string().uuid() }).strict(),
+  z.object({ type: z.literal('remote-detail-share-prepare'), consent: z.string().uuid() }).strict(),
+  z.object({ type: z.literal('remote-detail-share-grant'), id: z.string().uuid() }).strict(),
+  z.object({ type: z.literal('remote-detail-share-revoke') }).strict(),
   z.object({ type: z.literal('remote-detailed-validate'), consent: z.string().uuid() }).strict(),
   z
     .object({

@@ -1,6 +1,19 @@
 import type zh from './zh-CN';
 
 export default {
+  detailSharePreview: 'Preview a snapshot for Remote sharing',
+  detailShareRecipient: 'Recipient Remote:',
+  detailShareExpires: 'Sharing expires at',
+  detailShareDisclosure:
+    'This exact snapshot may contain sensitive text. After authorization, the configured Remote, its operator, the Agent and its configured AI provider can receive and retain a copy. One retrieval is allowed for up to two minutes over WSS. Revocation stops future retrieval only; it cannot delete received copies. A lost response may consume authorization without delivery. No automatic retry or reauthorization.',
+  detailShareConsent: 'I reviewed this snapshot and consent to this one-time transfer.',
+  detailShareAuthorize: 'Authorize one retrieval',
+  detailShareAuthorized: 'One retrieval is authorized until the expiry shown.',
+  detailShareConsumed:
+    'Authorization consumed. The snapshot was handed to the connection for sending; receipt is not confirmed.',
+  detailShareExpired: 'Sharing authorization expired. The snapshot was cleared.',
+  detailShareRevoked: 'Sharing authorization revoked. The snapshot was cleared.',
+  detailShareRevoke: 'Revoke and clear snapshot',
   detailedDiagnostics: 'Detailed local diagnostics',
   detailedDiagnosticsHint:
     'Off by default. Record extension console text and error stacks for 10 minutes, up to 1 MiB / 1,000 events. Objects are omitted. May contain private information; redaction is incomplete. No webpage console or automatic sharing. Turning off, changing connection settings, expiry or worker restart clears the capture.',
