@@ -151,6 +151,7 @@ type Turn = {
   recovery?: ControlRecovery;
   recoveryTimer?: ReturnType<typeof setTimeout>;
   recoveryResults?: ControlInterruption['results'];
+  recoveryAttempted?: boolean;
 };
 export type LoopIO = {
   send(request: AgentRequest): boolean;
@@ -186,6 +187,11 @@ export class BrowserLoop {
   }
   get recovering() {
     return !!this.turn?.recovery;
+  }
+  get controlRecoveryAllowed() {
+    return (
+      !!this.turn && !this.turn.ending && (!this.turn.recoveryAttempted || !!this.turn.recovery)
+    );
   }
   suspendRecovery(value: ControlRecovery, results: ControlInterruption['results'] = []) {
     const turn = this.turn;
@@ -314,7 +320,7 @@ export class BrowserLoop {
       );
     if (turn.recovery && Date.now() >= turn.recovery.expiresAt) {
       this.endRecovery('expired');
-      throw Object.assign(new Error('Control recovery expired'), { code: 'RECOVERY_EXPIRED' });
+      return { accepted: true, replayed: false };
     }
     const superseded = turn.requestedInputId !== turn.inputId && inputId !== turn.inputId;
     if (decision.kind === 'actions' && !superseded) {
@@ -322,6 +328,7 @@ export class BrowserLoop {
       if (
         (turn.mode === 'recovery' &&
           (!turn.recovery ||
+            turn.recoveryAttempted ||
             decision.actions.length !== 1 ||
             !recoveryAction ||
             decision.actions[0]!.params.recoveryId !== turn.recovery.recoveryId ||
@@ -355,6 +362,12 @@ export class BrowserLoop {
         ),
         { code: 'BAD_DECISION' },
       );
+    if (
+      !superseded &&
+      decision.kind === 'actions' &&
+      decision.actions[0]!.method === 'recover-control'
+    )
+      turn.recoveryAttempted = true;
     turn.pending = undefined; // Claim synchronously, before any browser work.
     turn.executingRequest = requestId;
     this.receipts.set(requestId, signature);

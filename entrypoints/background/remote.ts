@@ -668,7 +668,7 @@ export function startRemoteBackground() {
   });
 
   configureControlRecovery({
-    enabled: () => controlRecoveryReady && loop.active,
+    enabled: () => controlRecoveryReady && loop.controlRecoveryAllowed,
     onSuspended: (recovery) => loop.suspendRecovery(recovery),
     onRevoked: (outcome) => loop.endRecovery(outcome),
   });

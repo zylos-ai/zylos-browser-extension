@@ -84,6 +84,7 @@ it('successful recovery preserves old uncertain receipts and never replays the o
     kind: 'actions',
     actions: [{ method: 'recover-control', params: { recoveryId: recovery.recoveryId } }],
   });
+  expect(loop.controlRecoveryAllowed).toBe(true); // The in-flight attempt remains authorized.
   for (let i = 0; i < 10; i++) await Promise.resolve();
   expect(io.execute).toHaveBeenCalledTimes(1);
   expect(io.execute.mock.calls[0]![0][0]!.method).toBe('recover-control');
@@ -93,6 +94,22 @@ it('successful recovery preserves old uncertain receipts and never replays the o
     outcome: 'uncertain',
   });
   expect(loop.recovering).toBe(false);
+  expect(loop.controlRecoveryAllowed).toBe(false);
+  loop.accept(requests.at(-1)!.id, {
+    kind: 'actions',
+    actions: [
+      { method: 'use-current-tab', params: { contextId: '11111111-1111-4111-8111-111111111111' } },
+    ],
+  });
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(loop.controlRecoveryAllowed).toBe(false); // A new scope cannot reset this task's budget.
+  loop.cancel();
+  loop.start(
+    'new-task',
+    { role: 'user', content: [{ type: 'text', text: 'New task' }] },
+    { type: 'current-page', status: 'unavailable' },
+  );
+  expect(loop.controlRecoveryAllowed).toBe(true);
   loop.cancel();
 });
 it('idle Agent recovery judgment expires without another input or action', async () => {
@@ -120,9 +137,22 @@ it('an expired decision terminalizes even before the timer callback runs', async
   const recovery = recoveryDescriptor();
   loop.suspendRecovery(recovery);
   vi.setSystemTime(recovery.expiresAt + 1);
-  expect(() => loop.accept(requests.at(-1)!.id, { kind: 'done', text: 'late' })).toThrow('expired');
+  expect(
+    loop.accept(requests.at(-1)!.id, {
+      kind: 'actions',
+      actions: [{ method: 'recover-control', params: { recoveryId: recovery.recoveryId } }],
+    }),
+  ).toEqual({ accepted: true, replayed: false });
   await Promise.resolve();
   expect(io.finish).toHaveBeenCalledTimes(1);
+  expect(io.execute).not.toHaveBeenCalled();
+  expect(io.finish).toHaveBeenCalledWith(
+    expect.any(String),
+    'interrupted',
+    'task-1',
+    { kind: 'interrupted' },
+    expect.objectContaining({ recoveryOutcome: 'expired' }),
+  );
 });
 beforeEach(() => setWorkerLanguage('en'));
 afterEach(() => {

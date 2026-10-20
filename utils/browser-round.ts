@@ -63,9 +63,14 @@ export async function runBrowserRound(
   try {
     if (actions.length === 1 && actions[0]!.method === 'recover-control') {
       const value = await guarded('recover-control', actions[0]!.params, `${requestId}:0`);
+      const recovered = value as { observation: unknown; target: unknown };
       return {
         mode: 'operating',
-        observation: value,
+        observation: {
+          page: recovered.observation,
+          target: recovered.target,
+          recovery: { recovered: true, replayed: false },
+        },
         results: [{ method: 'recover-control', status: 'success', replayed: false }],
         failed: false,
       };
