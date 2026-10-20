@@ -41,6 +41,13 @@ const targetRule =
 // Adding a method without documentation is a TypeScript error. All browser
 // semantics stay in this extension; the transport has no copy of this table.
 export const toolHelp = {
+  'recover-control': {
+    description:
+      'Attempt one bounded reattachment to the exact suspended task tab, then return fresh observation and refs. Never repeats the interrupted action.',
+    constraints: [
+      'Only available during recovery mode. Use the exact recoveryId before its absolute expiry. Failure is terminal; no retries. Prior uncertain input may already have happened.',
+    ],
+  },
   'wait-for-page': {
     description:
       'Wait for content to settle, then return fresh viewport text and refs. Does not scroll, navigate, replay input or capture an image.',

@@ -13,6 +13,7 @@ const text = z.string().max(20000);
 
 // Shared by local commands and Remote. The relay only transports these objects.
 export const actionParams = {
+  'recover-control': z.object({ recoveryId: z.string().uuid() }).strict(),
   pause: z.object({}).strict(),
   finish: z.object({}).strict(),
   stop: z.object({}).strict(),
@@ -121,6 +122,7 @@ export const actionParams = {
 export const commandSchema = z
   .discriminatedUnion('op', [
     actionParams.pause.extend({ op: z.literal('pause') }),
+    actionParams['recover-control'].extend({ op: z.literal('recover-control') }),
     z
       .object({
         op: z.literal('finalize'),

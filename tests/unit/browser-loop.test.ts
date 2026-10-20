@@ -41,6 +41,89 @@ const action = {
   actions: [{ method: 'open', params: { url: 'https://example.com' } }],
   memory: 'Need results',
 };
+const recoveryDescriptor = () => ({
+  recoveryId: '22222222-2222-4222-8222-222222222222',
+  expiresAt: Date.now() + 120000,
+  reason: 'target_closed' as const,
+  cause: 'unknown' as const,
+});
+it('recovery exposes only one recovery tool and rejects normal or mismatched actions', () => {
+  const { loop, requests } = setup();
+  const old = requests[0]!.id;
+  const recovery = recoveryDescriptor();
+  loop.suspendRecovery(recovery, [{ method: 'fill', outcome: 'uncertain' }]);
+  const next = requests.at(-1)!;
+  expect(next.execution.mode).toBe('recovery');
+  expect(next.execution.recovery).toEqual(recovery);
+  expect(next.execution.tools).toHaveLength(1);
+  expect(JSON.stringify(next.execution.tools)).toContain('recover-control');
+  expect(() => loop.accept(old, action)).toThrow('no longer active');
+  expect(() => loop.accept(next.id, action)).toThrow('Only the current single recovery');
+  expect(() =>
+    loop.accept(next.id, {
+      kind: 'actions',
+      actions: [
+        {
+          method: 'recover-control',
+          params: { recoveryId: '33333333-3333-4333-8333-333333333333' },
+        },
+      ],
+    }),
+  ).toThrow('Only the current single recovery');
+  loop.cancel();
+});
+it('successful recovery preserves old uncertain receipts and never replays the original action', async () => {
+  const { loop, requests, io } = setup();
+  const recovery = recoveryDescriptor();
+  loop.suspendRecovery(recovery, [
+    { method: 'fill', outcome: 'uncertain' },
+    { method: 'click', outcome: 'not-executed' },
+  ]);
+  const request = requests.at(-1)!;
+  loop.accept(request.id, {
+    kind: 'actions',
+    actions: [{ method: 'recover-control', params: { recoveryId: recovery.recoveryId } }],
+  });
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(io.execute).toHaveBeenCalledTimes(1);
+  expect(io.execute.mock.calls[0]![0][0]!.method).toBe('recover-control');
+  expect(requests.at(-1)!.execution.mode).toBe('operating');
+  expect(requests.at(-1)!.execution.results).toContainEqual({
+    method: 'fill',
+    outcome: 'uncertain',
+  });
+  expect(loop.recovering).toBe(false);
+  loop.cancel();
+});
+it('idle Agent recovery judgment expires without another input or action', async () => {
+  vi.useFakeTimers();
+  const { loop, requests, io } = setup();
+  const recovery = recoveryDescriptor();
+  loop.suspendRecovery(recovery);
+  const pending = requests.at(-1)!.id;
+  await vi.advanceTimersByTimeAsync(120000);
+  expect(io.finish).toHaveBeenCalledTimes(1);
+  expect(io.finish).toHaveBeenCalledWith(
+    expect.any(String),
+    'interrupted',
+    'task-1',
+    { kind: 'interrupted' },
+    expect.objectContaining({ reason: 'CONTROL_LOST', recoveryOutcome: 'expired' }),
+  );
+  expect(loop.active).toBe(false);
+  expect(() => loop.accept(pending, { kind: 'done', text: 'late' })).toThrow('no longer active');
+  expect(io.execute).not.toHaveBeenCalled();
+});
+it('an expired decision terminalizes even before the timer callback runs', async () => {
+  vi.useFakeTimers();
+  const { loop, requests, io } = setup();
+  const recovery = recoveryDescriptor();
+  loop.suspendRecovery(recovery);
+  vi.setSystemTime(recovery.expiresAt + 1);
+  expect(() => loop.accept(requests.at(-1)!.id, { kind: 'done', text: 'late' })).toThrow('expired');
+  await Promise.resolve();
+  expect(io.finish).toHaveBeenCalledTimes(1);
+});
 beforeEach(() => setWorkerLanguage('en'));
 afterEach(() => {
   vi.useRealTimers();

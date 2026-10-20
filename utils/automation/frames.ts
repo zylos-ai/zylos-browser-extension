@@ -65,7 +65,10 @@ export function frameAllowed(frame: Frame) {
     (!frame.url || /^https?:|^about:(blank|srcdoc)$/.test(frame.url)) && !isBlockedUrl(frame.url)
   );
 }
-export async function collectFrames(send: Send): Promise<Frame[]> {
+export async function collectFrames(
+  send: Send,
+  onUnavailable?: (frame: Frame) => void,
+): Promise<Frame[]> {
   // Auto-attach is recursive. Wait for already delivered attachment callbacks.
   for (let pass = 0; pending.size && pass < 8; pass++) await Promise.all([...pending]);
   const frames = new Map<string, Frame>();
@@ -83,11 +86,28 @@ export async function collectFrames(send: Send): Promise<Frame[]> {
   if (!root.frameTree)
     throw Object.assign(new Error('Frame tree unavailable'), { code: 'FRAME_UNAVAILABLE' });
   walk(root.frameTree);
-  for (const [sessionId] of children) {
+  const unavailableFrames = new Set<string>();
+  for (const [sessionId, child] of children) {
+    if (unavailableFrames.has(child.frameId)) continue;
     try {
       const result = await send('Page.getFrameTree', {}, sessionId);
       if (result.frameTree) walk(result.frameTree, sessionId);
+      else if (onUnavailable)
+        throw Object.assign(new Error('Frame tree unavailable'), { code: 'FRAME_UNAVAILABLE' });
     } catch (error) {
+      if (onUnavailable) {
+        const frame = frames.get(child.frameId);
+        if (!frame?.parentId || (error as { code?: string })?.code !== 'FRAME_UNAVAILABLE')
+          throw error;
+        onUnavailable(frame);
+        const remove = (id: string) => {
+          unavailableFrames.add(id);
+          frames.delete(id);
+          for (const child of [...frames.values()]) if (child.parentId === id) remove(child.id);
+        };
+        remove(frame.id);
+        continue;
+      }
       if (error && typeof error === 'object' && 'code' in error) throw error;
       // A frame may disappear while a snapshot is being gathered.
     }

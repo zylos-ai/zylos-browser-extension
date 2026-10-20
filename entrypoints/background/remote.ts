@@ -5,6 +5,7 @@ import {
   workerLocale,
 } from '../../utils/i18n';
 import { formatTaskNotice, type TaskNotice } from '../../utils/task-notice';
+import { CONTROL_RECOVERY_CAPABILITY } from '../../utils/control-loss';
 import {
   DIAGNOSTICS_CAPABILITY,
   detailedContext,
@@ -41,6 +42,8 @@ import { safeError } from '../../utils/diagnostics-schema';
 import { captureCurrentPage, clearPageContexts, forgetPageContext } from '../../utils/page-context';
 import {
   completeTask,
+  abortControlRecovery,
+  configureControlRecovery,
   currentControl,
   currentGrant,
   diagnosticNavigationRevision,
@@ -121,6 +124,7 @@ export function startRemoteBackground() {
   const idem = new IdempotencyCache();
   let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
   let loopReady = false;
+  let controlRecoveryReady = false;
   let attachmentsReady = false;
   let interruptReady = false;
   let sendingChat = false;
@@ -332,6 +336,7 @@ export function startRemoteBackground() {
     if (
       hadControl &&
       !hasControl &&
+      !loop.recovering &&
       (loop?.pendingId || (recoveryDeadline && loop?.active && !loop.settling))
     ) {
       cancelLoop('interrupted');
@@ -509,6 +514,7 @@ export function startRemoteBackground() {
       });
     },
     cancel: () => idem.cancel(),
+    revokeRecovery: () => abortControlRecovery(),
     error: () => {
       endDiagnosticTask('interrupted', true);
       state.error = 'ui.error.chatSaveFailed';
@@ -611,9 +617,25 @@ export function startRemoteBackground() {
       idem.cancel();
       preview.finish(status === 'done' ? 'completed' : 'error');
       activity.end(status === 'done' ? 'completed' : 'interrupted');
-      await completeTask().catch(() => {
-        state.error = 'ui.error.taskCleanupFailed';
+      const recoveryTerminal = loop.recovering;
+      const cleanup = completeTask().catch(() => {
+        if (loop.taskId === taskId) state.error = 'ui.error.taskCleanupFailed';
       });
+      if (recoveryTerminal) {
+        // Executor revokes immediately and fences late native attachment work.
+        // A stuck native call must not withhold the terminal transport receipt.
+        let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            cleanup,
+            new Promise<void>((resolve) => {
+              cleanupTimer = setTimeout(resolve, 1000);
+            }),
+          ]);
+        } finally {
+          clearTimeout(cleanupTimer);
+        }
+      } else await cleanup;
       if (loop.taskId !== taskId) return;
       const message = state.chat.find((entry) => entry.role === 'user' && entry.id === taskId);
       if (message) {
@@ -643,6 +665,12 @@ export function startRemoteBackground() {
       // BrowserLoop releases ownership after this durable completion callback.
       setTimeout(publish, 0);
     },
+  });
+
+  configureControlRecovery({
+    enabled: () => controlRecoveryReady && loop.active,
+    onSuspended: (recovery) => loop.suspendRecovery(recovery),
+    onRevoked: (outcome) => loop.endRecovery(outcome),
   });
 
   function cancelLoop(status: 'stopped' | 'interrupted', interrupt = false) {
@@ -738,6 +766,7 @@ export function startRemoteBackground() {
     wakeTransport();
     setRecovery(undefined);
     loopReady = false;
+    controlRecoveryReady = false;
     interruptReady = false;
     clearTimeout(handshakeTimer);
     preview.finish('interrupted');
@@ -799,6 +828,7 @@ export function startRemoteBackground() {
         capabilities: [
           'diagnostics-detail-share-v1',
           'diagnostics-incident-bundle-v2',
+          CONTROL_RECOVERY_CAPABILITY,
           ...REMOTE_CAPABILITIES,
           DIAGNOSTICS_CAPABILITY,
           INSTANCE_CAPABILITY,
@@ -844,6 +874,7 @@ export function startRemoteBackground() {
         state.error = '';
       } else if (loop.active || recoveryDeadline) failRecovery();
       loopReady = false;
+      controlRecoveryReady = false;
       state.steeringSupported = false;
       interruptReady = false;
       clearTimeout(handshakeTimer);
@@ -938,6 +969,7 @@ export function startRemoteBackground() {
         state.steeringSupported = m.capabilities.includes(STEER_CAPABILITY);
         interruptReady = m.capabilities.includes(INTERRUPT_CAPABILITY);
         loopReady = true;
+        controlRecoveryReady = m.capabilities.includes(CONTROL_RECOVERY_CAPABILITY);
         freshRecoveryAttempted = false;
         state.connected = true;
         state.connecting = false;

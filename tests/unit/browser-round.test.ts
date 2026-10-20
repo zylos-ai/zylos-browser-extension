@@ -7,6 +7,7 @@ const executor = vi.hoisted(() => ({
   flushTaskPopups: vi.fn(async () => {}),
   taskPopupOpener: vi.fn(),
   controlLossRevision: vi.fn(),
+  currentControlRecovery: vi.fn(),
 }));
 vi.mock('../../utils/automation/executor', () => executor);
 import { runBrowserRound } from '../../utils/browser-round';

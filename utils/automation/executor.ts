@@ -7,6 +7,7 @@ import {
   setDiagnosticTarget,
   refreshCdpDiagnostics,
   recordControlDiagnostic,
+  recordGroupDiagnostic,
 } from './cdp-diagnostics';
 import { NetworkActivity, waitForStablePage } from './page-stability';
 import { frameEvent, frameSessions, enableFrames, clearFrameSessions } from './frames';
@@ -20,6 +21,12 @@ import { canReadPage, assertPageDocument } from '../page-reader';
 import { screenshotAttachment } from '../attachments';
 import { translate, workerLocale } from '../i18n';
 import { recordDiagnostic, type DiagnosticReason } from '../diagnostics';
+import {
+  CONTROL_RECOVERY_WINDOW_MS,
+  CONTROL_RECOVERY_ATTEMPT_MS,
+  type ControlRecovery,
+  type RecoveryOutcome,
+} from '../control-loss';
 
 let grant: GrantedTab | null = null;
 const pointerMotion = new PointerMotion();
@@ -31,6 +38,71 @@ let attachmentQueue: Promise<unknown> = Promise.resolve();
 let consentRevision = 0;
 let operationRevision = 0;
 let lossRevision = 0;
+type RecoveryLease = ControlRecovery & {
+  session: Scope;
+  url: string;
+  tabId: number;
+  consent: number;
+  attempted: boolean;
+  terminalOutcome?: RecoveryOutcome;
+  timer: ReturnType<typeof setTimeout>;
+};
+let recovery: RecoveryLease | undefined;
+const recoveredTasks = new WeakSet<Scope>();
+// An unconfirmed late detach must not let a later task inherit the old debugger.
+const blockedAttachments = new Set<number>();
+let recoveryHooks:
+  | {
+      enabled: () => boolean;
+      onSuspended: (value: ControlRecovery) => void;
+      onRevoked: (outcome: RecoveryOutcome) => void;
+    }
+  | undefined;
+export function configureControlRecovery(hooks: typeof recoveryHooks) {
+  recoveryHooks = hooks;
+}
+export const currentControlRecovery = (): ControlRecovery | undefined =>
+  recovery && {
+    recoveryId: recovery.recoveryId,
+    expiresAt: recovery.expiresAt,
+    reason: recovery.reason,
+    cause: recovery.cause,
+  };
+export function abortControlRecovery(outcome: RecoveryOutcome = 'revoked') {
+  if (recovery) {
+    recovery.terminalOutcome = outcome;
+    void release(true, false, 'target_unavailable').catch(() => {});
+  }
+}
+function suspendControl() {
+  if (!control || !grant || recoveredTasks.has(control) || !recoveryHooks?.enabled()) return false;
+  const lease: RecoveryLease = {
+    recoveryId: crypto.randomUUID(),
+    expiresAt: Date.now() + CONTROL_RECOVERY_WINDOW_MS,
+    reason: 'target_closed',
+    cause: 'unknown',
+    session: control,
+    url: grant.url,
+    tabId: grant.id,
+    consent: consentRevision,
+    attempted: false,
+    timer: undefined as unknown as ReturnType<typeof setTimeout>,
+  };
+  recovery = lease;
+  grant = null;
+  cursor = null;
+  parked = true;
+  lossRevision++;
+  operationRevision++;
+  clearFrameSessions();
+  invalidate('debugger_detach');
+  lease.timer = setTimeout(() => {
+    if (recovery === lease) abortControlRecovery('expired');
+  }, CONTROL_RECOVERY_WINDOW_MS);
+  publish();
+  recoveryHooks?.onSuspended(currentControlRecovery()!);
+  return true;
+}
 export const controlLossRevision = () => lossRevision;
 const refs = new Map<string, ElementRef>();
 const networkActivity = new NetworkActivity();
@@ -104,6 +176,19 @@ const inScope = (tab: chrome.tabs.Tab, session: Scope | null) =>
   (tab.id === session.borrowedTabId ||
     (session.groupId !== null && tab.groupId === session.groupId));
 let groupUpdates: Promise<unknown> = Promise.resolve();
+const missingGroup = (error: unknown) =>
+  error instanceof Error && /^No group with id:/.test(error.message);
+function forgetGroup(session: Scope, groupId: number) {
+  if (control !== session || session.groupId !== groupId) return;
+  recordGroupDiagnostic('removed');
+  session.groupId = null;
+  if (session.tabId !== session.borrowedTabId) {
+    void release(true, false, 'tab_scope_changed').catch(() => {});
+    return;
+  }
+  session.tabIds = session.tabIds.filter((id) => id === session.borrowedTabId);
+  publish();
+}
 function markTask(session: Scope, phase: Scope['phase']) {
   if (control === session) {
     session.phase = phase;
@@ -113,10 +198,16 @@ function markTask(session: Scope, phase: Scope['phase']) {
     .catch(() => {})
     .then(async () => {
       if (control !== session || session.groupId === null) return;
-      await chrome.tabGroups.update(session.groupId, {
-        color: phase === 'ready' ? 'green' : 'grey',
-        title: 'zylos',
-      });
+      const groupId = session.groupId;
+      try {
+        await chrome.tabGroups.update(groupId, {
+          color: phase === 'ready' ? 'green' : 'grey',
+          title: 'zylos',
+        });
+      } catch (error) {
+        recordGroupDiagnostic('presentation-failed');
+        if (missingGroup(error)) forgetGroup(session, groupId);
+      }
     });
   groupUpdates = next.catch(() => {});
   return next;
@@ -130,7 +221,19 @@ function serial<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 async function groupOwnedTab(session: Scope, tabId: number) {
+  if (recovery) fail('CONTROL_SUSPENDED');
   if (control !== session) stopped('control_changed');
+  if (session.groupId !== null && chrome.tabGroups.get) {
+    const oldGroup = session.groupId;
+    try {
+      await chrome.tabGroups.get(oldGroup);
+    } catch (error) {
+      if (!missingGroup(error)) throw error;
+      forgetGroup(session, oldGroup);
+    }
+    if (control !== session) stopped('control_changed');
+  }
+  if (recovery) fail('CONTROL_SUSPENDED');
   const groupId = await chrome.tabs.group({
     tabIds: [tabId],
     ...(session.groupId === null
@@ -147,6 +250,7 @@ export async function useExistingTab(
   expected: { tabId: number; windowId: number; url: string; documentId?: string },
   assertActive: () => void,
 ) {
+  if (recovery) fail('CONTROL_SUSPENDED');
   const tab = await chrome.tabs.get(expected.tabId).catch(() => null);
   assertActive();
   if (!tab || tab.windowId !== expected.windowId || !canReadPage(tab))
@@ -249,6 +353,9 @@ async function clearCursor() {
   }).catch(() => {});
 }
 export async function release(cleanup = true, strict = false, reason: DiagnosticReason = 'other') {
+  const suspended = recovery;
+  recovery = undefined;
+  if (suspended) clearTimeout(suspended.timer);
   recordControlDiagnostic(reason);
   recordDiagnostic('release', reason, { source: 'executor' });
   clearTimeout(pauseTimer);
@@ -279,6 +386,7 @@ export async function release(cleanup = true, strict = false, reason: Diagnostic
   operationRevision++;
   invalidate('release');
   publish();
+  if (suspended) recoveryHooks?.onRevoked(suspended.terminalOutcome ?? 'revoked');
   try {
     await serial(() => detachCurrent(strict));
     // Closing temporary tabs / ungrouping retained pages removes an empty group.
@@ -307,6 +415,7 @@ export async function createTask(initial: {
   url: string;
   taskId: string;
 }) {
+  if (recovery) fail('CONTROL_SUSPENDED');
   if (!allowed(initial.url)) fail('INVALID_URL');
   const releasing = release();
   const revision = consentRevision;
@@ -378,7 +487,7 @@ export async function createTask(initial: {
 function syncTarget() {
   const session = control;
   return serial(async () => {
-    if (!session || control !== session || parked) return;
+    if (!session || control !== session || parked || recovery) return;
     const targetId = session.tabId;
     const tab = await chrome.tabs.get(targetId).catch(() => null);
     if (control !== session || parked || session.tabId !== targetId) return;
@@ -403,6 +512,7 @@ function syncTarget() {
     }
     await detachCurrent();
     if (control !== session || parked || session.tabId !== targetId) return;
+    if (blockedAttachments.has(tab.id)) fail('DEBUGGER_DETACH_FAILED');
     await diagnosticAttach({ tabId: tab.id }, '1.3');
     try {
       if (control !== session || parked || session.tabId !== targetId) return;
@@ -440,6 +550,9 @@ function refreshTaskTarget() {
   });
 }
 export function initializeExecutor() {
+  chrome.permissions?.onRemoved?.addListener(() => {
+    if (recovery) abortControlRecovery();
+  });
   setDiagnosticTarget(() => ({
     tabId: control?.tabId,
     controlled: !!control,
@@ -455,7 +568,17 @@ export function initializeExecutor() {
       reason === 'target_closed' || reason === 'canceled_by_user' ? reason : 'other',
       { source: 'executor', level: 'warn' },
     );
+    if (recovery && source.tabId === recovery.tabId) {
+      abortControlRecovery();
+      return;
+    }
     if (grant?.id !== source.tabId) return;
+    if (
+      !(source as { sessionId?: string }).sessionId &&
+      reason === 'target_closed' &&
+      suspendControl()
+    )
+      return;
 
     cursor = null; // The visual's short TTL also cleans up after external detachment.
     grant = null;
@@ -507,6 +630,14 @@ export function initializeExecutor() {
     }
   });
   chrome.tabs.onUpdated.addListener((id, info, tab) => {
+    if (
+      recovery &&
+      id === recovery.tabId &&
+      (tab.url !== recovery.url || (tab.pendingUrl && tab.pendingUrl !== recovery.url))
+    ) {
+      abortControlRecovery();
+      return;
+    }
     if (!control || !control.tabIds.includes(id)) return;
     if (!inScope(tab, control)) {
       if (id === control.tabId) void release(true, false, 'tab_scope_changed');
@@ -535,13 +666,20 @@ export function initializeExecutor() {
   });
   function adoptPopup(id: number, opener: number, verifiedSource = false) {
     const session = control;
-    if (!session || !session.tabIds.includes(opener)) return;
+    if (!session || recovery || !session.tabIds.includes(opener)) return;
     const work = async () => {
-      if (control !== session || session.tabIds.includes(id) || session.tabIds.length >= 8) return;
+      if (
+        control !== session ||
+        recovery ||
+        session.tabIds.includes(id) ||
+        session.tabIds.length >= 8
+      )
+        return;
       const parent = await chrome.tabs.get(opener).catch(() => null);
       let fresh = await chrome.tabs.get(id).catch(() => null);
       if (
         control !== session ||
+        recovery ||
         !parent ||
         !inScope(parent, session) ||
         !fresh ||
@@ -559,14 +697,16 @@ export function initializeExecutor() {
         await chrome.tabs.move(id, { windowId: session.windowId, index: -1 });
         fresh = await chrome.tabs.get(id);
       }
-      if (control !== session) return;
+      if (control !== session || recovery) return;
       await recordTask(session.sessionId, session.windowId, session.groupId, id, true);
-      if (control !== session) {
+      if (control !== session || recovery) {
+        if (recovery) return;
         await cleanupTask(session.sessionId).catch(() => {});
         return;
       }
       await groupOwnedTab(session, id);
-      if (control !== session) {
+      if (control !== session || recovery) {
+        if (recovery) return;
         await cleanupTask(session.sessionId).catch(() => {});
         return;
       }
@@ -604,6 +744,10 @@ export function initializeExecutor() {
   };
   chrome.tabs.onDetached.addListener(lostTab);
   chrome.tabs.onRemoved.addListener(lostTab);
+  chrome.tabGroups.onRemoved?.addListener((group) => {
+    const session = control;
+    if (session) forgetGroup(session, group.id);
+  });
   chrome.windows.onRemoved.addListener((id) => {
     if (control?.windowId === id) void release(true, false, 'window_closed');
   });
@@ -651,7 +795,140 @@ async function dispatchPointer(
   });
 }
 
+export async function recoverControl(recoveryId: string, commandDeadline = Infinity) {
+  const lease = recovery;
+  if (!lease || lease.recoveryId !== recoveryId || lease.attempted) fail('RECOVERY_UNAVAILABLE');
+  lease.attempted = true;
+  recoveredTasks.add(lease.session);
+  const deadline = Math.min(
+    lease.expiresAt,
+    commandDeadline,
+    Date.now() + CONTROL_RECOVERY_ATTEMPT_MS,
+  );
+  const check = () => {
+    if (
+      !recoveryHooks?.enabled() ||
+      recovery !== lease ||
+      control !== lease.session ||
+      consentRevision !== lease.consent ||
+      control.tabId !== lease.tabId ||
+      Date.now() >= deadline
+    )
+      fail('RECOVERY_UNAVAILABLE');
+  };
+  const checkTab = async () => {
+    check();
+    const tab = await chrome.tabs.get(lease.tabId);
+    check();
+    if (
+      !inScope(tab, lease.session) ||
+      !inspectable(tab) ||
+      tab.url !== lease.url ||
+      (tab.pendingUrl && tab.pendingUrl !== lease.url) ||
+      isBlockedUrl(tab.url)
+    )
+      fail('RECOVERY_UNAVAILABLE');
+    return tab;
+  };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const attempt = serial(async () => {
+    let attached = false;
+    let committed = false;
+    try {
+      await checkTab();
+      if (blockedAttachments.has(lease.tabId)) fail('DEBUGGER_DETACH_FAILED');
+      await diagnosticAttach({ tabId: lease.tabId }, '1.3');
+      attached = true;
+      await checkTab();
+      await diagnosticSend({ tabId: lease.tabId }, 'Page.enable');
+      check();
+      await enableFrames({ tabId: lease.tabId });
+      check();
+      await diagnosticSend({ tabId: lease.tabId }, 'Emulation.setFocusEmulationEnabled', {
+        enabled: true,
+      });
+      check();
+      const document = (await diagnosticSend({ tabId: lease.tabId }, 'Page.getFrameTree')).frameTree
+        ?.frame;
+      check();
+      if (typeof document?.id !== 'string' || typeof document?.loaderId !== 'string')
+        fail('OBSERVATION_UNAVAILABLE');
+      invalidate('target_attach');
+      const recoveryGeneration = generation;
+      const actions = new PageActions({
+        send: async (method, params, sessionId) => {
+          await checkTab();
+          if (sessionId && frameSessions().get(sessionId)?.tabId !== lease.tabId)
+            fail('FRAME_UNAVAILABLE');
+          const result = await diagnosticSend(
+            { tabId: lease.tabId, ...(sessionId ? { sessionId } : {}) },
+            method,
+            params,
+          );
+          check();
+          if (generation !== recoveryGeneration) fail('PAGE_CHANGED');
+          return result;
+        },
+        check,
+        refs,
+        generation: recoveryGeneration,
+        mouse: async () => fail('RECOVERY_UNAVAILABLE'),
+        preview: async () => fail('RECOVERY_UNAVAILABLE'),
+        dragData: () => null,
+      });
+      const observation = await actions.snapshot(false, [], true);
+      if (!observation.nodeCount) fail('OBSERVATION_UNAVAILABLE');
+      const freshDocument = (await diagnosticSend({ tabId: lease.tabId }, 'Page.getFrameTree'))
+        .frameTree?.frame;
+      check();
+      if (freshDocument?.id !== document.id || freshDocument?.loaderId !== document.loaderId)
+        fail('PAGE_CHANGED');
+      const tab = await checkTab();
+      grant = {
+        id: lease.tabId,
+        windowId: tab.windowId,
+        url: lease.url,
+        title: (tab.title || '').slice(0, 500),
+      };
+      clearTimeout(lease.timer);
+      recovery = undefined;
+      parked = false;
+      committed = true;
+      publish();
+      return { recovered: true, recoveryId, observation, target: currentGrant(), replayed: false };
+    } finally {
+      // The serialized attach queue stays owned until late completion is cleaned up.
+      // A newer task cannot attach on this tab before this lease is detached.
+      if (attached && !committed)
+        await diagnosticDetach({ tabId: lease.tabId }).catch(() => {
+          blockedAttachments.add(lease.tabId);
+        });
+    }
+  });
+  try {
+    return await Promise.race([
+      attempt,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              Object.assign(new Error('Recovery attempt expired'), { code: 'RECOVERY_EXPIRED' }),
+            ),
+          Math.max(0, deadline - Date.now()),
+        );
+      }),
+    ]);
+  } catch (error) {
+    if (recovery === lease) abortControlRecovery(Date.now() >= deadline ? 'expired' : 'failed');
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function execute(command: Command, deadline: number) {
+  if (command.op === 'recover-control') return recoverControl(command.recoveryId, deadline);
+  if (recovery && !['stop', 'finalize'].includes(command.op)) fail('CONTROL_SUSPENDED');
   const startedOperationRevision = operationRevision;
   if (command.op === 'finalize') {
     if (Date.now() > deadline) fail('COMMAND_EXPIRED');

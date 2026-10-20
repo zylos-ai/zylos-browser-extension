@@ -49,7 +49,7 @@ async function setup() {
       onRemoved: event(),
     },
     windows: { onRemoved: event() },
-    tabGroups: { update: async () => ({ id: 10 }) },
+    tabGroups: { update: async () => ({ id: 10 }), onRemoved: event() },
     debugger: {
       getTargets: async () => [...attached].map((tabId) => ({ tabId, attached: true })),
       onDetach: event(),
@@ -97,6 +97,72 @@ test('control loss revision excludes ordinary cleanup but records external debug
   chrome.debugger.onDetach.emit({ tabId: fresh.tab.id }, 'canceled_by_user');
   assert.equal(fresh.executor.controlLossRevision(), before + 1);
   assert.equal(fresh.executor.currentControl(), null);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+});
+test('cosmetic group update failure does not fail a valid owned-tab observation', async () => {
+  const s = await observationSetup();
+  chrome.tabGroups.update = async () => {
+    throw new Error('Temporary group styling failure');
+  };
+  const result = await s.executor.execute({ op: 'snapshot' }, Date.now() + 10000);
+  assert.match(result.text, /Save failed/);
+  assert.equal(s.executor.currentControl().tabId, s.tab.id);
+  await s.executor.release(false);
+});
+
+async function borrowedWithPopup() {
+  const s = await observationSetup();
+  s.executor.initializeExecutor();
+  const source = await chrome.tabs.get(1);
+  await s.executor.useExistingTab({ tabId: 1, windowId: 1, url: source.url }, () => {});
+  const popup = { ...source, id: 4, groupId: -1, openerTabId: 1 };
+  chrome.tabs.get = async (id) => {
+    if (id === 1) return source;
+    if (id === 4) return popup;
+    throw new Error('No tab');
+  };
+  chrome.tabs.group = async () => {
+    popup.groupId = 10;
+    return 10;
+  };
+  chrome.tabs.onCreated.emit(popup);
+  await s.executor.flushTaskPopups();
+  assert.equal(s.executor.currentControl().groupId, 10);
+  return { ...s, source, popup };
+}
+
+test('missing popup group cannot strand the borrowed original tab', async () => {
+  const s = await borrowedWithPopup();
+  chrome.tabs.onRemoved.emit(4);
+  chrome.tabGroups.update = async () => {
+    throw new Error('No group with id: 10.');
+  };
+  const result = await s.executor.execute({ op: 'snapshot' }, Date.now() + 10000);
+  assert.match(result.text, /Save failed/);
+  assert.equal(s.executor.currentControl().borrowedTabId, 1);
+  assert.equal(s.executor.currentControl().groupId, null);
+  await s.executor.release(false);
+});
+
+test('group removal clears borrowed popup membership without regrouping it', async () => {
+  const s = await borrowedWithPopup();
+  let grouped = 0;
+  chrome.tabs.group = async () => {
+    grouped++;
+    return 11;
+  };
+  chrome.tabGroups.onRemoved.emit({ id: 10, windowId: 1 });
+  assert.deepEqual(s.executor.currentControl().tabIds, [1]);
+  assert.equal(s.executor.currentControl().groupId, null);
+  assert.equal(grouped, 0);
+  await s.executor.release(false);
+});
+
+test('removing an owned target group still revokes control', async () => {
+  const s = await observationSetup();
+  s.executor.initializeExecutor();
+  chrome.tabGroups.onRemoved.emit({ id: 10, windowId: 1 });
+  assert.equal(s.executor.currentControl(), null);
   await new Promise((resolve) => setTimeout(resolve, 0));
 });
 test('finish detaches, stays parked on tab events, resumes on a tool, and stop still revokes', async () => {
@@ -243,7 +309,8 @@ async function observationSetup() {
       return {
         nodes: [{ role: { value: 'button' }, name: { value: 'Save failed' }, backendDOMNodeId: 1 }],
       };
-    if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main' } } };
+    if (method === 'Page.getFrameTree')
+      return { frameTree: { frame: { id: 'main', loaderId: 'document-1' } } };
     if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 };
     if (method === 'DOM.getNodeForLocation') return { backendNodeId: 1, frameId: 'main' };
     if (method === 'Runtime.evaluate')
@@ -266,6 +333,182 @@ async function observationSetup() {
   await s.start();
   return { ...s, methods };
 }
+
+async function recoverySetup() {
+  const s = await observationSetup();
+  const suspended = vi.fn(),
+    revoked = vi.fn();
+  s.executor.configureControlRecovery({
+    enabled: () => true,
+    onSuspended: suspended,
+    onRevoked: revoked,
+  });
+  s.executor.initializeExecutor();
+  const detach = (reason = 'target_closed') => {
+    s.attached.delete(s.tab.id);
+    chrome.debugger.onDetach.emit({ tabId: s.tab.id }, reason);
+  };
+  return { ...s, suspended, revoked, detach };
+}
+test('recovery blocks automatic unpark, uses exact original tab once and returns fresh refs without input', async () => {
+  const s = await recoverySetup();
+  s.detach();
+  const recovery = s.executor.currentControlRecovery();
+  assert.equal(recovery.cause, 'unknown');
+  assert.equal(s.executor.currentGrant(), null);
+  await assert.rejects(
+    s.executor.execute({ op: 'snapshot' }, Infinity),
+    (e) => e.code === 'CONTROL_SUSPENDED',
+  );
+  chrome.tabs.onUpdated.emit(s.tab.id, { status: 'complete' }, s.tab);
+  await Promise.resolve();
+  assert.equal(s.attached.size, 0);
+  const result = await s.executor.execute(
+    { op: 'recover-control', recoveryId: recovery.recoveryId },
+    Infinity,
+  );
+  assert.equal(result.recovered, true);
+  assert.match(result.observation.text, /Save failed/);
+  assert.equal(result.replayed, false);
+  assert.equal(s.executor.currentGrant().id, s.tab.id);
+  assert.equal(
+    s.methods.some((method) => method.startsWith('Input.')),
+    false,
+  );
+  await assert.rejects(
+    s.executor.execute({ op: 'recover-control', recoveryId: recovery.recoveryId }, Infinity),
+    (e) => e.code === 'RECOVERY_UNAVAILABLE',
+  );
+  s.detach();
+  assert.equal(s.executor.currentControlRecovery(), undefined);
+  assert.equal(s.executor.currentControl(), null);
+});
+test('explicit Chrome cancellation never enters recovery', async () => {
+  const s = await recoverySetup();
+  s.detach('canceled_by_user');
+  assert.equal(s.suspended.mock.calls.length, 0);
+  assert.equal(s.executor.currentControlRecovery(), undefined);
+  assert.equal(s.executor.currentControl(), null);
+});
+test('a same-URL document replacement during recovery observation fails closed', async () => {
+  const s = await recoverySetup();
+  s.detach();
+  const send = chrome.debugger.sendCommand;
+  let reads = 0;
+  chrome.debugger.sendCommand = async (target, method, params) => {
+    const value = await send(target, method, params);
+    if (method === 'Page.getFrameTree' && ++reads >= 3)
+      value.frameTree.frame.loaderId = 'document-2';
+    return value;
+  };
+  await assert.rejects(
+    s.executor.recoverControl(s.executor.currentControlRecovery().recoveryId),
+    (e) => e.code === 'PAGE_CHANGED',
+  );
+  assert.equal(s.executor.currentGrant(), null);
+  assert.equal(s.attached.size, 0);
+  assert.deepEqual(s.revoked.mock.calls.at(-1), ['failed']);
+});
+test.each(['url', 'windowId', 'groupId'])(
+  'recovery refuses changed %s even without a prior event',
+  async (key) => {
+    const s = await recoverySetup();
+    s.detach();
+    const recovery = s.executor.currentControlRecovery();
+    s.tab[key] = key === 'url' ? 'https://other.test/' : 99;
+    await assert.rejects(s.executor.recoverControl(recovery.recoveryId));
+    assert.equal(s.attached.size, 0);
+    assert.equal(s.executor.currentControl(), null);
+  },
+);
+test('Stop revokes immediately during attach and late success is detached before releasing the queue', async () => {
+  const s = await recoverySetup();
+  s.detach();
+  const entered = deferred(),
+    complete = deferred();
+  chrome.debugger.attach = async ({ tabId }) => {
+    entered.resolve();
+    await complete.promise;
+    s.attached.add(tabId);
+  };
+  const attempt = s.executor.recoverControl(s.executor.currentControlRecovery().recoveryId);
+  const rejected = assert.rejects(attempt);
+  await entered.promise;
+  const stop = s.executor.execute({ op: 'stop' }, Infinity);
+  assert.equal(s.executor.currentControl(), null);
+  assert.equal(s.executor.currentControlRecovery(), undefined);
+  complete.resolve();
+  await Promise.all([rejected, stop]);
+  assert.equal(s.attached.size, 0);
+  assert.equal(s.executor.currentGrant(), null);
+});
+test('idle suspension expires at the original absolute deadline', async () => {
+  const s = await recoverySetup();
+  vi.useFakeTimers();
+  try {
+    s.detach();
+    const deadline = s.executor.currentControlRecovery().expiresAt;
+    await vi.advanceTimersByTimeAsync(119999);
+    assert.equal(s.executor.currentControlRecovery().expiresAt, deadline);
+    await vi.advanceTimersByTimeAsync(1);
+    assert.equal(s.executor.currentControlRecovery(), undefined);
+    assert.equal(s.executor.currentControl(), null);
+    assert.equal(s.revoked.mock.calls.length, 1);
+    assert.deepEqual(s.revoked.mock.calls[0], ['expired']);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+test('attach has a ten second budget; a later native completion cannot restore control', async () => {
+  const s = await recoverySetup();
+  s.detach();
+  const entered = deferred(),
+    complete = deferred();
+  chrome.debugger.attach = async ({ tabId }) => {
+    entered.resolve();
+    await complete.promise;
+    s.attached.add(tabId);
+  };
+  vi.useFakeTimers();
+  try {
+    const attempt = s.executor.recoverControl(s.executor.currentControlRecovery().recoveryId);
+    const rejected = assert.rejects(attempt, (e) => e.code === 'RECOVERY_EXPIRED');
+    await entered.promise;
+    await vi.advanceTimersByTimeAsync(10000);
+    await rejected;
+    assert.equal(s.executor.currentControl(), null);
+    complete.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    assert.equal(s.attached.size, 0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+test('an unconfirmed late detach fences the tab against future task attachment', async () => {
+  const s = await recoverySetup();
+  s.detach();
+  const entered = deferred(),
+    complete = deferred();
+  let attaches = 0;
+  chrome.debugger.attach = async ({ tabId }) => {
+    attaches++;
+    entered.resolve();
+    await complete.promise;
+    s.attached.add(tabId);
+  };
+  chrome.debugger.detach = async () => {
+    throw new Error('Native detach failed');
+  };
+  const attempt = s.executor.recoverControl(s.executor.currentControlRecovery().recoveryId);
+  const rejected = assert.rejects(attempt);
+  await entered.promise;
+  const stopping = s.executor.release();
+  complete.resolve();
+  await Promise.all([rejected, stopping]);
+  await assert.rejects(s.start(), (e) => e.code === 'DEBUGGER_DETACH_FAILED');
+  assert.equal(attaches, 1);
+  assert.equal(s.executor.currentGrant(), null);
+});
 
 test('wait distinguishes its polling deadline from the outer command deadline', async () => {
   for (const [budget, code] of [

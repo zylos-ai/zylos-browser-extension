@@ -56,6 +56,7 @@ export const diagnosticReason = z.enum([
   'remote_disconnect',
 ]);
 export const diagnosticMethod = z.enum([
+  'recover-control',
   'open',
   'new-tab',
   'switch-tab',

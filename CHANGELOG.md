@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Revalidate the original editable element after input preview and select text
+  immediately before the single fill insertion. Preserve native debugger errors
+  and fail before input when focus, editability or element identity changes.
+- Keep snapshot results from available frames when an explicitly unavailable
+  child frame or its layout disappears; mark partial output and discard that
+  frame's refs. Root/control/scope failures still propagate.
+- Treat task-group presentation updates as best effort. Clear removed group
+  references while preserving an authorized borrowed tab; never regroup tabs
+  removed from an owned task's scope.
+- Negotiate bounded Agent-directed control recovery for eligible parent
+  `target_closed` events in the same live task. Pause for at most 120 seconds,
+  allow one explicit recovery attempt with a 10-second budget, and return fresh
+  observations without replaying prior input. Stop, cancellation, scope loss,
+  expiry and unsuccessful recovery terminate; persistent browser restrictions
+  are not bypassed.
+
 - Combine detailed capture, bounded CDP/iframe diagnostics and one-time sharing
   in a schema-2 incident bundle. Record exact task/action correlations, runtime
   at the trigger, limited non-value page state and explicit capture gaps for

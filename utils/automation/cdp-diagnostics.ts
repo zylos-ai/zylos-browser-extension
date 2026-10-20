@@ -129,6 +129,14 @@ export function recordControlDiagnostic(reason: string) {
     /* Diagnostics do not affect release. */
   }
 }
+export function recordGroupDiagnostic(reason: 'presentation-failed' | 'removed') {
+  try {
+    const lease = capture();
+    if (lease) emit(lease, { event: 'task-group', reason, state: currentState() });
+  } catch {
+    /* Cosmetic group state must not affect browser actions. */
+  }
+}
 function emit(lease: Lease | undefined, metadata: object, error?: unknown) {
   if (!lease || reporting) return;
   reporting = true;

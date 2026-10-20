@@ -18,6 +18,8 @@ const executor = vi.hoisted(() => ({
   execute: vi.fn(async (c: { op: string }, _deadline: number) => ({ ran: c.op })),
   onState: vi.fn(),
   initializeExecutor: vi.fn(),
+  configureControlRecovery: vi.fn((_hooks: any) => {}),
+  abortControlRecovery: vi.fn(),
   revealTask: vi.fn(async () => {}),
 }));
 vi.mock('../../utils/automation/executor', () => executor);
@@ -165,6 +167,7 @@ async function bootConnected(
   interrupt = false,
   steering = true,
   resume = false,
+  controlRecovery = false,
 ) {
   startRemoteBackground();
   await flush();
@@ -180,6 +183,7 @@ async function bootConnected(
       ...(interrupt ? ['agent-interrupt-v1'] : []),
       ...(steering ? ['agent-input-v1'] : []),
       ...(resume ? ['task-resume-v1'] : []),
+      ...(controlRecovery ? ['recovery-judgment-v1'] : []),
     ],
     endpointId: `abababababab.${storage.remoteBrowserId}`,
     ...(resume
@@ -224,6 +228,88 @@ const respond = async (
 };
 
 describe('decision transport background', () => {
+  it('allows control recovery only for an active task with negotiated support', async () => {
+    const ws = await bootConnected(false, false, true, false, true);
+    const hooks = executor.configureControlRecovery.mock.calls[0]![0];
+    expect(hooks.enabled()).toBe(false);
+    await begin(ws);
+    expect(hooks.enabled()).toBe(true);
+    ws.serverClose(4001);
+    expect(hooks.enabled()).toBe(false);
+  });
+
+  it('keeps legacy connections ineligible for control recovery', async () => {
+    const ws = await bootConnected();
+    await begin(ws);
+    const hooks = executor.configureControlRecovery.mock.calls[0]![0];
+    expect(hooks.enabled()).toBe(false);
+  });
+
+  it('preserves the recovery terminal receipt when executor revokes its retained scope', async () => {
+    const ws = await bootConnected(false, false, true, false, true);
+    const request = await begin(ws);
+    const notify = executor.onState.mock.calls[0]![0] as () => void;
+    executor.currentControl.mockReturnValue({
+      sessionId: 'test',
+      tabId: 3,
+      tabIds: [3],
+      phase: 'ready',
+    });
+    notify();
+    const hooks = executor.configureControlRecovery.mock.calls[0]![0];
+    hooks.onSuspended({
+      recoveryId: '22222222-2222-4222-8222-222222222222',
+      expiresAt: Date.now() + 120000,
+      reason: 'target_closed',
+      cause: 'unknown',
+    });
+    executor.currentControl.mockReturnValue(null);
+    notify();
+    hooks.onRevoked('revoked');
+    await flush();
+    expect(ws.last('agent-turn-end')).toMatchObject({
+      taskId: request.taskId,
+      status: 'interrupted',
+      interruption: {
+        reason: 'CONTROL_LOST',
+        resume: 'new-user-message-required',
+        recoveryOutcome: 'revoked',
+      },
+    });
+    expect(ws.frames.filter((frame) => frame.type === 'agent-turn-end')).toHaveLength(1);
+  });
+
+  it('returns a terminal recovery receipt even when native cleanup remains pending', async () => {
+    const ws = await bootConnected(false, false, true, false, true);
+    const original = await begin(ws);
+    const hooks = executor.configureControlRecovery.mock.calls[0]![0];
+    hooks.onSuspended({
+      recoveryId: '22222222-2222-4222-8222-222222222222',
+      expiresAt: Date.now() + 120000,
+      reason: 'target_closed',
+      cause: 'unknown',
+    });
+    await flush();
+    expect((ws.last('agent-request')!.execution as any).mode).toBe('recovery');
+    let finishCleanup!: () => void;
+    executor.completeTask.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishCleanup = resolve;
+        }),
+    );
+    await vi.advanceTimersByTimeAsync(121001);
+    expect(executor.abortControlRecovery).toHaveBeenCalled();
+    expect(ws.last('agent-turn-end')).toMatchObject({
+      taskId: original.taskId,
+      status: 'interrupted',
+      interruption: { recoveryOutcome: 'expired' },
+    });
+    expect((await state()).loopActive).toBe(false);
+    finishCleanup();
+    await flush();
+    expect(ws.frames.filter((frame) => frame.type === 'agent-turn-end')).toHaveLength(1);
+  });
   it('detailed logs stay local, require separate consent and purge on recipient changes', async () => {
     const ws = await bootConnected();
     expect((await state()).detailedDiagnostics).toMatchObject({ enabled: false });
@@ -1069,6 +1155,7 @@ describe('decision transport background', () => {
     expect(ws.last('hello')!.capabilities).toEqual([
       'diagnostics-detail-share-v1',
       'diagnostics-incident-bundle-v2',
+      'recovery-judgment-v1',
       'agent-loop-v1',
       'diagnostics-v2',
       'browser-instance-v1',
