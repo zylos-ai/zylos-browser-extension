@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## [Unreleased]
+
+## [0.17.1] - 2026-10-21
+
+Pairs with Zylos Browser Remote 0.10.2. Update Remote before reloading the
+extension to enable negotiated recovery and selected iframe removal.
+
+### Changed
 
 - Download a fresh diagnostic snapshot directly. Keep raw JSON and hashes in
   optional collapsible details, show an accurate empty-log state, and preserve
@@ -40,14 +47,15 @@
   at the trigger, limited non-value page state and explicit capture gaps for
   debugger detach, control loss and operation errors. Preserve the reviewed
   snapshot and hash; Remote transport evidence remains a separate companion.
-  No automatic recovery, action replay or root-cause inference is added.
+  Diagnostics alone do not trigger recovery, replay actions or infer a root cause.
 
-- Add separate, explicit one-time sharing of an inspected detailed diagnostic snapshot with the configured Remote over WSS. Grants expire within two minutes and are revoked on disconnect, capture disable or configuration changes.
+- Add separate, explicit one-time sharing of a prepared detailed diagnostic file with the configured Remote over WSS. Grants expire within two minutes and are revoked on disconnect, capture disable or configuration changes. Viewing file details is optional; explicit sharing consent remains required.
 
 - Add a separate, default-off detailed local capture for extension console text
   and Error stacks. Keep at most ten minutes, 1 MiB and 1,000 events in worker
   memory; clear on disable, expiry, connection changes or worker restart.
-  Preview and explicitly download the reviewed JSON with a SHA-256 identifier.
+  Download a fresh JSON file directly with a SHA-256 identifier, with optional
+  collapsible file details.
   Preserve the existing safe Remote diagnostics contract: detailed logs are
   never automatically shared or exposed through diagnostics.get.
 
@@ -66,7 +74,7 @@
   browser actions. Pause new operations until reconnection and keep started
   operation results. Show localized recovery state and durable failure notices.
   Stop, control revocation, configuration changes and process restarts cannot
-  revive the old task. Requires a compatible Remote; no version bump or release.
+  revive the old task. Requires a compatible Remote.
 
 - Preserve completed research-operation receipts when a later browser action loses
   control, and include research operations in the diagnostic event stream.
@@ -90,6 +98,16 @@
   without collecting console arguments, exception messages/stacks or page data.
 - Serialize consent and recipient changes, clear on disable, reject stale
   queued events and revoke sharing before saving a different relay or key.
+
+### Limits
+
+- Selected iframe removal scans the original root document and open shadow roots,
+  not closed shadow roots or embedded documents. It may affect other extension
+  UI; detection does not establish the cause of a disconnect. Removal is not
+  rolled back when recovery fails, and Stop cannot retract an already-authorized
+  in-flight mutation. Persistent restrictions or reinjection may still end tasks.
+- Recovery does not survive a worker or Remote process restart. Diagnostic
+  capture is bounded and partial; no complete DevTools recording is claimed.
 
 ## [0.17.0] - 2026-10-09
 
