@@ -1439,6 +1439,9 @@ html[data-theme='zylos'] > body {
   .settings-page textarea.detailed-preview {
     display: block;
     width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
     height: 220px;
     min-height: 220px;
     resize: vertical;
@@ -1448,6 +1451,38 @@ html[data-theme='zylos'] > body {
   }
   .detailed-hash {
     overflow-wrap: anywhere;
+  }
+  .detailed-settings,
+  .diagnostic-details {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+  .detailed-settings > .btn {
+    min-height: 40px;
+    height: auto;
+    white-space: normal;
+    padding-block: 8px;
+  }
+  .diagnostic-details > summary {
+    cursor: pointer;
+    color: var(--color-muted);
+  }
+  .diagnostic-details[open] > summary {
+    margin-bottom: 12px;
+  }
+  .diagnostic-details > .detailed-hash {
+    margin-top: 8px;
+  }
+  .diagnostic-consent {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    min-width: 0;
+  }
+  .diagnostic-consent input {
+    flex-shrink: 0;
+    margin-top: 3px;
   }
   #error {
     color: var(--color-error);

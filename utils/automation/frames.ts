@@ -16,23 +16,34 @@ const autoAttach = {
 };
 const children = new Map<string, { tabId: number; parent?: string; frameId: string }>();
 const pending = new Set<Promise<unknown>>();
+let revision = 0;
 export const frameSessions = () => children;
 export function clearFrameSessions() {
+  revision++;
   children.clear();
+  pending.clear();
 }
-export async function enableFrames(target: { tabId: number; sessionId?: string }) {
+export async function enableFrames(
+  target: { tabId: number; sessionId?: string },
+  valid: () => boolean = () => true,
+) {
+  const started = revision;
+  if (!valid()) return;
   await diagnosticSend(target, 'Network.enable', {
     maxTotalBufferSize: 0,
     maxResourceBufferSize: 0,
   });
+  if (started !== revision || !valid()) return;
   await diagnosticSend(target, 'Target.setAutoAttach', autoAttach);
 }
 export function frameEvent(
   source: { tabId?: number; sessionId?: string },
   method: string,
   params: any,
+  valid: () => boolean = () => true,
 ) {
-  if (!source.tabId) return;
+  if (!source.tabId || !valid()) return;
+  if (source.sessionId && children.get(source.sessionId)?.tabId !== source.tabId) return;
   if (method === 'Target.attachedToTarget' && params.targetInfo?.type === 'iframe') {
     recordDebuggerEvent('frame-attach', { tabId: source.tabId, sessionId: params.sessionId });
     const record = {
@@ -44,8 +55,9 @@ export function frameEvent(
     const target = { tabId: source.tabId, sessionId: params.sessionId };
     const work = (async () => {
       await diagnosticSend(target, 'Page.enable');
-      if (children.get(params.sessionId) !== record) return;
-      await enableFrames(target);
+      const current = () => valid() && children.get(params.sessionId) === record;
+      if (!current()) return;
+      await enableFrames(target, current);
     })()
       .catch(() => {})
       .finally(() => pending.delete(work));
@@ -65,7 +77,10 @@ export function frameAllowed(frame: Frame) {
     (!frame.url || /^https?:|^about:(blank|srcdoc)$/.test(frame.url)) && !isBlockedUrl(frame.url)
   );
 }
-export async function collectFrames(send: Send): Promise<Frame[]> {
+export async function collectFrames(
+  send: Send,
+  onUnavailable?: (frame: Frame) => void,
+): Promise<Frame[]> {
   // Auto-attach is recursive. Wait for already delivered attachment callbacks.
   for (let pass = 0; pending.size && pass < 8; pass++) await Promise.all([...pending]);
   const frames = new Map<string, Frame>();
@@ -83,11 +98,28 @@ export async function collectFrames(send: Send): Promise<Frame[]> {
   if (!root.frameTree)
     throw Object.assign(new Error('Frame tree unavailable'), { code: 'FRAME_UNAVAILABLE' });
   walk(root.frameTree);
-  for (const [sessionId] of children) {
+  const unavailableFrames = new Set<string>();
+  for (const [sessionId, child] of children) {
+    if (unavailableFrames.has(child.frameId)) continue;
     try {
       const result = await send('Page.getFrameTree', {}, sessionId);
       if (result.frameTree) walk(result.frameTree, sessionId);
+      else if (onUnavailable)
+        throw Object.assign(new Error('Frame tree unavailable'), { code: 'FRAME_UNAVAILABLE' });
     } catch (error) {
+      if (onUnavailable) {
+        const frame = frames.get(child.frameId);
+        if (!frame?.parentId || (error as { code?: string })?.code !== 'FRAME_UNAVAILABLE')
+          throw error;
+        onUnavailable(frame);
+        const remove = (id: string) => {
+          unavailableFrames.add(id);
+          frames.delete(id);
+          for (const child of [...frames.values()]) if (child.parentId === id) remove(child.id);
+        };
+        remove(frame.id);
+        continue;
+      }
       if (error && typeof error === 'object' && 'code' in error) throw error;
       // A frame may disappear while a snapshot is being gathered.
     }

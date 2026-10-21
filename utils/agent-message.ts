@@ -93,7 +93,8 @@ export type AgentRequest = {
   context: { pages: PageContext[] };
   execution: {
     protocol: 'browser-decision-v1';
-    mode: 'reading' | 'operating';
+    mode: 'reading' | 'operating' | 'recovery';
+    recovery?: import('./control-loss').ControlRecovery;
     instructions?: string;
     tools?: unknown[];
     memory: string;

@@ -17,8 +17,18 @@ export function DetailedDiagnosticsSettings({
   const current = useRef(token);
   current.current = token;
   const mounted = useRef(true);
-  const [preview, setPreview] = useState<{ token: string; text: string; hash: string }>();
-  const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState<{
+    token: string;
+    text: string;
+    hash: string;
+    count: number;
+  }>();
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
+  const localRequest = useRef(0);
+  const [localBusy, setLocalBusy] = useState(false);
+  const [shareBusy, setShareBusy] = useState(false);
+  const busy = localBusy || shareBusy;
   const [error, setError] = useState(false);
   const [share, setShare] = useState<{
     id: string;
@@ -26,6 +36,7 @@ export function DetailedDiagnosticsSettings({
     sha256: string;
     recipient: string;
     expiresAt: number;
+    count?: number;
   }>();
   const [accepted, setAccepted] = useState(false);
   const shareScope = `${token}:${state.connected}:${state.relayUrl}`;
@@ -38,26 +49,37 @@ export function DetailedDiagnosticsSettings({
     if (phase === 'consumed' || phase === 'expired' || phase === 'revoked') {
       setShare(undefined);
       setAccepted(false);
+      setShareOpen(false);
     }
   }, [phase]);
   useEffect(() => {
     setPreview(undefined);
+    setPreviewOpen(false);
+    setShareOpen(false);
+    localRequest.current++;
+    shareRequest.current++;
+    setLocalBusy(false);
+    setShareBusy(false);
     setError(false);
     setShare(undefined);
     setAccepted(false);
   }, [token]);
   useEffect(() => {
     shareRequest.current++;
+    setShareBusy(false);
     setShare(undefined);
     setAccepted(false);
+    setShareOpen(false);
   }, [state.connected, state.relayUrl]);
   useEffect(() => {
     if (!share) return;
     const timer = setTimeout(
       () => {
         shareRequest.current++;
+        setShareBusy(false);
         setShare(undefined);
         setAccepted(false);
+        setShareOpen(false);
       },
       Math.max(0, share.expiresAt - Date.now()),
     );
@@ -67,8 +89,12 @@ export function DetailedDiagnosticsSettings({
     const request = ++shareRequest.current;
     const stillCurrent = () =>
       valid() && shareScope === currentShareScope.current && request === shareRequest.current;
-    setBusy(true);
+    setShareBusy(true);
     setError(false);
+    if (type === 'prepare') {
+      setAccepted(false);
+      setShareOpen(false);
+    }
     try {
       const reply = await chrome.runtime.sendMessage(
         type === 'prepare'
@@ -80,8 +106,17 @@ export function DetailedDiagnosticsSettings({
       if (!stillCurrent()) return;
       if (!reply?.ok) throw new Error('Unavailable');
       if (type === 'prepare') {
-        setShare(reply.value);
+        let count: number | undefined;
+        try {
+          const snapshot = JSON.parse(reply.value.text);
+          const records = snapshot?.capture?.records ?? snapshot?.records;
+          if (Array.isArray(records)) count = records.length;
+        } catch {
+          /* The prepared file remains immutable even when its format is unfamiliar. */
+        }
+        setShare({ ...reply.value, count });
         setAccepted(false);
+        setShareOpen(false);
       } else if (type === 'revoke') {
         setShare(undefined);
         setAccepted(false);
@@ -89,7 +124,7 @@ export function DetailedDiagnosticsSettings({
     } catch {
       if (stillCurrent()) setError(true);
     } finally {
-      if (mounted.current) setBusy(false);
+      if (mounted.current && request === shareRequest.current) setShareBusy(false);
     }
   };
   useEffect(() => {
@@ -103,54 +138,59 @@ export function DetailedDiagnosticsSettings({
     !!token &&
     current.current === token &&
     Date.now() < (details?.expiresAt ?? 0);
-  const load = async () => {
+  const load = async (exportFile = false) => {
     if (!valid()) return;
-    setBusy(true);
+    const request = ++localRequest.current;
+    const stillCurrent = () => valid() && request === localRequest.current;
+    setLocalBusy(true);
     setError(false);
     try {
-      const reply = await chrome.runtime.sendMessage({
-        type: 'remote-detailed-preview',
-        consent: token,
-      });
-      if (!reply?.ok) throw new Error('Unavailable');
-      const text = JSON.stringify(reply.value, null, 2);
-      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
-      const hash = Array.from(new Uint8Array(digest), (x) => x.toString(16).padStart(2, '0')).join(
-        '',
-      );
-      if (valid()) setPreview({ token, text, hash });
-    } catch {
-      if (valid()) setError(true);
-    } finally {
-      if (mounted.current) setBusy(false);
-    }
-  };
-  const download = async () => {
-    if (!preview || preview.token !== token || !valid()) return;
-    setBusy(true);
-    try {
+      let snapshot = !exportFile && preview?.token === token ? preview : undefined;
+      if (!snapshot) {
+        const reply = await chrome.runtime.sendMessage({
+          type: 'remote-detailed-preview',
+          consent: token,
+        });
+        if (!stillCurrent()) return;
+        if (!reply?.ok) throw new Error('Unavailable');
+        const text = JSON.stringify(reply.value, null, 2);
+        const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+        if (!stillCurrent()) return;
+        const hash = Array.from(new Uint8Array(digest), (x) =>
+          x.toString(16).padStart(2, '0'),
+        ).join('');
+        const records = reply.value?.capture?.records ?? reply.value?.records;
+        snapshot = {
+          token,
+          text,
+          hash,
+          count: Array.isArray(records) ? records.length : (details?.count ?? 0),
+        };
+        setPreview(snapshot);
+      }
+      if (!exportFile) return;
       const reply = await chrome.runtime.sendMessage({
         type: 'remote-detailed-validate',
         consent: token,
       });
-      if (!reply?.ok || !reply.value?.valid || !valid()) {
-        setPreview(undefined);
+      if (!reply?.ok || !reply.value?.valid || !stillCurrent()) {
+        if (stillCurrent()) setPreview(undefined);
         return;
       }
-      const url = URL.createObjectURL(new Blob([preview.text], { type: 'application/json' }));
+      const url = URL.createObjectURL(new Blob([snapshot.text], { type: 'application/json' }));
       const link = document.createElement('a');
       link.href = url;
-      link.download = `zylos-diagnostics-${preview.hash.slice(0, 12)}.json`;
+      link.download = `zylos-diagnostics-${snapshot.hash.slice(0, 12)}.json`;
       link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch {
-      if (valid()) setError(true);
+      if (stillCurrent()) setError(true);
     } finally {
-      if (mounted.current) setBusy(false);
+      if (mounted.current && request === localRequest.current) setLocalBusy(false);
     }
   };
   return (
-    <section className="settings-section" aria-labelledby="detailed-heading">
+    <section className="settings-section detailed-settings" aria-labelledby="detailed-heading">
       <div className="settings-row">
         <div className="settings-copy">
           <h2 id="detailed-heading">{t('detailedDiagnostics')}</h2>
@@ -168,7 +208,14 @@ export function DetailedDiagnosticsSettings({
           aria-describedby="detailed-hint"
           disabled={pending}
           onClick={() => {
+            current.current = '';
+            localRequest.current++;
+            shareRequest.current++;
+            setLocalBusy(false);
+            setShareBusy(false);
             setPreview(undefined);
+            setShare(undefined);
+            setAccepted(false);
             onToggle();
           }}
         >
@@ -183,13 +230,13 @@ export function DetailedDiagnosticsSettings({
             {t('detailedExpires')} {new Date(details!.expiresAt).toLocaleTimeString()}
           </p>
           <button
-            id="detailed-preview"
+            id="detailed-download"
             type="button"
             className="btn"
             disabled={busy}
-            onClick={() => void load()}
+            onClick={() => void load(true)}
           >
-            {t('detailedPreview')}
+            {t('detailedDownload')}
           </button>
           <button
             id="detail-share-prepare"
@@ -202,28 +249,47 @@ export function DetailedDiagnosticsSettings({
           </button>
         </>
       )}
-      {preview?.token === token && !!token && (
-        <>
-          <p className="settings-hint">{t('detailedReviewWarning')}</p>
-          <textarea
-            id="detailed-preview-text"
-            className="input detailed-preview"
-            aria-label={t('detailedPreview')}
-            readOnly
-            value={preview.text}
-            rows={12}
-          />
-          <p className="settings-hint detailed-hash">SHA-256: {preview.hash}</p>
-          <button
-            id="detailed-download"
-            type="button"
-            className="btn"
-            disabled={busy}
-            onClick={() => void download()}
+      {!!token && (preview?.count ?? details?.count ?? 0) === 0 && (
+        <p id="detailed-empty" className="settings-hint">
+          {t('detailedEmpty')}
+        </p>
+      )}
+      {!!token && (preview?.count ?? details?.count ?? 0) > 0 && (
+        <details
+          id="detailed-preview"
+          className="diagnostic-details"
+          open={previewOpen}
+          onToggle={(event) => {
+            const open = event.currentTarget.open;
+            setPreviewOpen(open);
+            if (open && !preview && !busy) void load();
+          }}
+        >
+          <summary
+            aria-disabled={busy && !preview}
+            onClick={(event) => {
+              if (busy && !preview) event.preventDefault();
+            }}
           >
-            {t('detailedDownload')}
-          </button>
-        </>
+            {t(previewOpen ? 'detailedHide' : 'detailedPreview')}
+          </summary>
+          {preview?.token === token ? (
+            <>
+              <p className="settings-hint">{t('detailedReviewWarning')}</p>
+              <textarea
+                id="detailed-preview-text"
+                className="input detailed-preview"
+                aria-label={t('detailedPreview')}
+                readOnly
+                value={preview.text}
+                rows={12}
+              />
+              <p className="settings-hint detailed-hash">SHA-256: {preview.hash}</p>
+            </>
+          ) : (
+            <p className="settings-hint">{t('loading')}</p>
+          )}
+        </details>
       )}
       {error && (
         <p role="alert" className="settings-hint">
@@ -236,20 +302,37 @@ export function DetailedDiagnosticsSettings({
             {t('detailShareRecipient')} {share.recipient}
           </p>
           <p className="settings-hint">{t('detailShareDisclosure')}</p>
-          <textarea
-            id="detail-share-text"
-            className="input detailed-preview"
-            aria-label={t('detailSharePreview')}
-            readOnly
-            rows={12}
-            value={share.text}
-          />
-          <p className="settings-hint detailed-hash">SHA-256: {share.sha256}</p>
+          {share.count !== undefined && (
+            <p className="settings-hint">
+              {share.count === 0
+                ? t('detailedEmpty')
+                : t('detailedSnapshotCount', { count: share.count })}
+            </p>
+          )}
+          {share.count !== 0 && (
+            <details
+              id="detail-share-details"
+              className="diagnostic-details"
+              open={shareOpen}
+              onToggle={(event) => setShareOpen(event.currentTarget.open)}
+            >
+              <summary>{t(shareOpen ? 'detailedHide' : 'detailedPreview')}</summary>
+              <textarea
+                id="detail-share-text"
+                className="input detailed-preview"
+                aria-label={t('detailSharePreview')}
+                readOnly
+                rows={12}
+                value={share.text}
+              />
+              <p className="settings-hint detailed-hash">SHA-256: {share.sha256}</p>
+            </details>
+          )}
           <p className="settings-hint">
             {t('detailShareExpires')} {new Date(share.expiresAt).toLocaleTimeString()}
           </p>
           {!authorized && (
-            <label>
+            <label className="diagnostic-consent">
               <input
                 id="detail-share-consent"
                 type="checkbox"

@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+- Download a fresh diagnostic snapshot directly. Keep raw JSON and hashes in
+  optional collapsible details, show an accurate empty-log state, and preserve
+  explicit consent and recipient disclosure for each prepared sharing snapshot.
+
+- Add negotiated recovery-only inspection of foreign extension iframe candidates.
+  Explicit Agent selection can remove selected saved nodes once before recovery,
+  with original-document checks, one-use authorization, bounded isolated-world
+  scans and no input replay. Report possible removal on interrupted attempts;
+  reinjected frames are not automatically removed again.
+
+- Restore nested child-frame sessions during control recovery, and fence delayed
+  initialization after consent revocation. Verify missing task groups separately
+  from styling failures and record bounded cleanup timeout/failure diagnostics.
+- Permit a later independent disconnect to request recovery after a successful
+  attempt, with a maximum of three attempts per task and two in any 30 seconds.
+  Each disconnect retains its single-use token and failure remains terminal.
+
+- Revalidate the original editable element after input preview and select text
+  immediately before the single fill insertion. Preserve native debugger errors
+  and fail before input when focus, editability or element identity changes.
+- Keep snapshot results from available frames when an explicitly unavailable
+  child frame or its layout disappears; mark partial output and discard that
+  frame's refs. Root/control/scope failures still propagate.
+- Treat task-group presentation updates as best effort. Clear removed group
+  references while preserving an authorized borrowed tab; never regroup tabs
+  removed from an owned task's scope.
+- Negotiate bounded Agent-directed control recovery for eligible parent
+  `target_closed` events in the same live task. Pause for at most 120 seconds,
+  allow one explicit recovery attempt with a 10-second budget, and return fresh
+  observations without replaying prior input. Stop, cancellation, scope loss,
+  expiry and unsuccessful recovery terminate; persistent browser restrictions
+  are not bypassed.
+
 - Combine detailed capture, bounded CDP/iframe diagnostics and one-time sharing
   in a schema-2 incident bundle. Record exact task/action correlations, runtime
   at the trigger, limited non-value page state and explicit capture gaps for

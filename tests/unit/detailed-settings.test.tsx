@@ -61,29 +61,41 @@ afterEach(async () => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
-it('requires an explicit preview before downloading exact reviewed bytes and their hash', async () => {
+it('downloads a fresh immutable snapshot directly and keeps its details collapsed', async () => {
   await render();
   expect(send).not.toHaveBeenCalled();
-  expect(container.querySelector('#detailed-download')).toBeNull();
-  await press('#detailed-preview');
+  expect(container.querySelector('#detailed-download')).not.toBeNull();
+  expect(container.querySelector<HTMLDetailsElement>('#detailed-preview')!.open).toBe(false);
+  await press('#detailed-download');
   // WebCrypto completes outside React's synchronous event callback.
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
   });
   const text = container.querySelector<HTMLTextAreaElement>('#detailed-preview-text')!.value;
-  await press('#detailed-download');
   expect(await downloaded!.text()).toBe(text);
   const hash = Buffer.from(await webcrypto.subtle.digest('SHA-256', Buffer.from(text))).toString(
     'hex',
   );
   expect(container.textContent).toContain(hash);
+  expect(container.querySelector('.detailed-hash')!.closest('details')!.open).toBe(false);
   expect(click).toHaveBeenCalledOnce();
   expect(send.mock.calls.map(([message]) => message.type)).toEqual([
     'remote-detailed-preview',
     'remote-detailed-validate',
   ]);
+  await press('#detailed-preview > summary');
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+  expect(container.querySelector<HTMLDetailsElement>('#detailed-preview')!.open).toBe(true);
+  await press('#detailed-preview > summary');
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+  expect(container.querySelector<HTMLDetailsElement>('#detailed-preview')!.open).toBe(false);
+  expect(send).toHaveBeenCalledTimes(2);
 });
-it('allows immediate opt-out during a delayed preview and discards its stale result', async () => {
+it('allows immediate opt-out during a delayed direct download and discards its stale result', async () => {
   let resolve!: (value: unknown) => void;
   send.mockImplementation(
     () =>
@@ -92,7 +104,7 @@ it('allows immediate opt-out during a delayed preview and discards its stale res
       }),
   );
   await render();
-  await press('#detailed-preview');
+  await press('#detailed-download');
   expect(container.querySelector<HTMLButtonElement>('#detailed-enabled')!.disabled).toBe(false);
   await press('#detailed-enabled');
   expect(toggle).toHaveBeenCalledOnce();
@@ -109,19 +121,19 @@ it('allows immediate opt-out during a delayed preview and discards its stale res
   expect(click).not.toHaveBeenCalled();
 });
 it('revocation while export validation is pending prevents the download', async () => {
-  await render();
-  await press('#detailed-preview');
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  });
   let resolve!: (value: unknown) => void;
-  send.mockImplementation(
-    () =>
-      new Promise((done) => {
-        resolve = done;
-      }),
+  send.mockImplementation((message) =>
+    message.type === 'remote-detailed-preview'
+      ? Promise.resolve({ ok: true, value: payload })
+      : new Promise((done) => {
+          resolve = done;
+        }),
   );
+  await render();
   await press('#detailed-download');
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 20));
+  });
   state = {
     ...state,
     detailedDiagnostics: { ...state.detailedDiagnostics!, enabled: false, consent: '' },
@@ -130,6 +142,46 @@ it('revocation while export validation is pending prevents the download', async 
   await act(async () => resolve({ ok: true, value: { valid: true } }));
   expect(click).not.toHaveBeenCalled();
   expect(container.querySelector('#detailed-preview-text')).toBeNull();
+});
+
+it('shows no detailed logs for an empty capture but still downloads useful metadata', async () => {
+  state = { ...state, detailedDiagnostics: { ...state.detailedDiagnostics!, count: 0 } };
+  send.mockImplementation(async (message) => ({
+    ok: true,
+    value:
+      message.type === 'remote-detailed-preview'
+        ? { schemaVersion: 2, capture: { records: [] }, incidents: [{ trigger: 'control-loss' }] }
+        : { valid: true },
+  }));
+  await render();
+  expect(container.textContent).toContain('detailedEmpty');
+  expect(container.querySelector('#detailed-preview')).toBeNull();
+  await press('#detailed-download');
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 20));
+  });
+  expect(JSON.parse(await downloaded!.text()).incidents).toHaveLength(1);
+  expect(container.querySelector('#detailed-preview-text')).toBeNull();
+});
+
+it('each direct download refreshes the snapshot rather than exporting a stale earlier capture', async () => {
+  await render();
+  await press('#detailed-download');
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 20));
+  });
+  const first = await downloaded!.text();
+  const newer = { ...payload, records: [{ text: 'new capture' }] };
+  send.mockImplementation(async (message) => ({
+    ok: true,
+    value: message.type === 'remote-detailed-preview' ? newer : { valid: true },
+  }));
+  await press('#detailed-download');
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 20));
+  });
+  expect(await downloaded!.text()).not.toBe(first);
+  expect(await downloaded!.text()).toBe(JSON.stringify(newer, null, 2));
 });
 
 const shared = {
@@ -144,6 +196,10 @@ it('requires unchecked local consent and reflects consumed status without stale 
   send.mockResolvedValue({ ok: true, value: shared });
   await render();
   await press('#detail-share-prepare');
+  expect(container.querySelector<HTMLDetailsElement>('#detail-share-details')!.open).toBe(false);
+  expect(send.mock.calls.some(([message]) => message.type === 'remote-detail-share-grant')).toBe(
+    false,
+  );
   expect(container.querySelector<HTMLTextAreaElement>('#detail-share-text')!.value).toBe(
     shared.text,
   );
@@ -166,6 +222,32 @@ it('requires unchecked local consent and reflects consumed status without stale 
   expect(container.textContent).not.toContain('detailShareAuthorized');
   expect(container.querySelector('#detail-share-text')).toBeNull();
 });
+
+it('preparing another sharing snapshot resets consent and collapses details', async () => {
+  state = { ...state, connected: true, relayUrl: 'wss://remote.example/ext' };
+  send.mockResolvedValue({ ok: true, value: shared });
+  await render();
+  await press('#detail-share-prepare');
+  await press('#detail-share-consent');
+  await press('#detail-share-details > summary');
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 10));
+  });
+  expect(container.querySelector<HTMLDetailsElement>('#detail-share-details')!.open).toBe(true);
+  const newer = {
+    ...shared,
+    id: '33333333-3333-4333-8333-333333333333',
+    text: 'new frozen snapshot',
+  };
+  send.mockResolvedValue({ ok: true, value: newer });
+  await press('#detail-share-prepare');
+  expect(container.querySelector<HTMLInputElement>('#detail-share-consent')!.checked).toBe(false);
+  expect(container.querySelector<HTMLButtonElement>('#detail-share-grant')!.disabled).toBe(true);
+  expect(container.querySelector<HTMLDetailsElement>('#detail-share-details')!.open).toBe(false);
+  await press('#detail-share-consent');
+  await press('#detail-share-grant');
+  expect(send).toHaveBeenLastCalledWith({ type: 'remote-detail-share-grant', id: newer.id });
+});
 it('discards delayed shared preview after recipient changes', async () => {
   state = { ...state, connected: true, relayUrl: 'wss://remote.example/ext' };
   let complete!: (value: unknown) => void;
@@ -182,6 +264,62 @@ it('discards delayed shared preview after recipient changes', async () => {
   await act(async () => complete({ ok: true, value: shared }));
   expect(container.querySelector('#detail-share-text')).toBeNull();
   expect(container.querySelector('#detail-share-grant')).toBeNull();
+  expect(container.querySelector<HTMLButtonElement>('#detail-share-prepare')!.disabled).toBe(false);
+});
+
+it('a stale sharing request cannot unlock a new pending request after the recipient changes', async () => {
+  state = { ...state, connected: true, relayUrl: 'wss://remote.example/ext' };
+  const replies: ((value: unknown) => void)[] = [];
+  send.mockImplementation(() => new Promise((resolve) => replies.push(resolve)));
+  await render();
+  await press('#detail-share-prepare');
+  state = { ...state, relayUrl: 'wss://other.example/ext' };
+  await render();
+  await press('#detail-share-prepare');
+  await act(async () => replies[0]!({ ok: true, value: shared }));
+  expect(container.querySelector<HTMLButtonElement>('#detail-share-prepare')!.disabled).toBe(true);
+  expect(container.querySelector('#detail-share-consent')).toBeNull();
+  await act(async () =>
+    replies[1]!({ ok: true, value: { ...shared, recipient: 'wss://other.example' } }),
+  );
+  expect(container.querySelector<HTMLButtonElement>('#detail-share-prepare')!.disabled).toBe(false);
+  expect(container.textContent).toContain('wss://other.example');
+});
+
+it('opt-out invalidates a delayed download even before updated props arrive', async () => {
+  let complete!: (value: unknown) => void;
+  send.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        complete = resolve;
+      }),
+  );
+  await render();
+  await press('#detailed-download');
+  await press('#detailed-enabled');
+  await render();
+  await act(async () => {
+    complete({ ok: true, value: payload });
+    await new Promise((done) => setTimeout(done, 20));
+  });
+  expect(click).not.toHaveBeenCalled();
+  expect(send).toHaveBeenCalledTimes(1);
+});
+
+it('an empty prepared snapshot still requires consent but does not display empty JSON', async () => {
+  state = { ...state, connected: true, relayUrl: 'wss://remote.example/ext' };
+  const empty = {
+    ...shared,
+    text: JSON.stringify({ schemaVersion: 2, capture: { records: [] }, incidents: [] }),
+  };
+  send.mockResolvedValue({ ok: true, value: empty });
+  await render();
+  await press('#detail-share-prepare');
+  expect(container.querySelector('#detail-share-details')).toBeNull();
+  expect(container.querySelector('#detail-share-text')).toBeNull();
+  expect(container.textContent).toContain('detailedEmpty');
+  expect(container.querySelector<HTMLInputElement>('#detail-share-consent')!.checked).toBe(false);
+  expect(container.querySelector<HTMLButtonElement>('#detail-share-grant')!.disabled).toBe(true);
 });
 it('a fresh panel can revoke an existing grant without preparing another snapshot', async () => {
   state = {

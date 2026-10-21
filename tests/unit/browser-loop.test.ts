@@ -41,6 +41,233 @@ const action = {
   actions: [{ method: 'open', params: { url: 'https://example.com' } }],
   memory: 'Need results',
 };
+const recoveryDescriptor = () => ({
+  recoveryId: '22222222-2222-4222-8222-222222222222',
+  expiresAt: Date.now() + 120000,
+  reason: 'target_closed' as const,
+  cause: 'unknown' as const,
+});
+it('recovery exposes only one recovery tool and rejects normal or mismatched actions', () => {
+  const { loop, requests } = setup();
+  const old = requests[0]!.id;
+  const recovery = recoveryDescriptor();
+  loop.suspendRecovery(recovery, [{ method: 'fill', outcome: 'uncertain' }]);
+  const next = requests.at(-1)!;
+  expect(next.execution.mode).toBe('recovery');
+  expect(next.execution.recovery).toEqual(recovery);
+  expect(JSON.stringify(next.execution.tools)).not.toContain('"selectedCandidateIds"');
+  expect(next.execution.tools).toHaveLength(1);
+  expect(JSON.stringify(next.execution.tools)).toContain('recover-control');
+  expect(() => loop.accept(old, action)).toThrow('no longer active');
+  expect(() => loop.accept(next.id, action)).toThrow('Only the current single recovery');
+  expect(() =>
+    loop.accept(next.id, {
+      kind: 'actions',
+      actions: [
+        {
+          method: 'recover-control',
+          params: { recoveryId: '33333333-3333-4333-8333-333333333333' },
+        },
+      ],
+    }),
+  ).toThrow('Only the current single recovery');
+  loop.cancel();
+});
+
+it('negotiated inspection keeps recovery suspended and preserves its deadline and attempt budget', async () => {
+  const { loop, requests, io } = setup();
+  const recovery = { ...recoveryDescriptor(), frameSelection: true as const };
+  const inspection = {
+    candidates: [
+      { id: crypto.randomUUID(), extensionOrigin: `chrome-extension://${'b'.repeat(32)}` },
+    ],
+    truncated: false,
+    coverage: 'root-document-open-shadow' as const,
+  };
+  loop.suspendRecovery(recovery);
+  expect(requests.at(-1)!.execution.tools?.map((tool) => (tool as { name: string }).name)).toEqual([
+    'inspect-recovery-frames',
+    'recover-control',
+  ]);
+  io.execute.mockResolvedValueOnce({
+    mode: 'recovery',
+    recovery: { ...recovery, inspection },
+    observation: { inspection },
+    failed: false,
+    results: [],
+  });
+  loop.accept(requests.at(-1)!.id, {
+    kind: 'actions',
+    actions: [{ method: 'inspect-recovery-frames', params: { recoveryId: recovery.recoveryId } }],
+  });
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(loop.recovering).toBe(true);
+  expect(requests.at(-1)!.execution.recovery).toEqual({ ...recovery, inspection });
+  loop.accept(requests.at(-1)!.id, {
+    kind: 'actions',
+    actions: [
+      {
+        method: 'recover-control',
+        params: {
+          recoveryId: recovery.recoveryId,
+          selectedCandidateIds: [inspection.candidates[0]!.id],
+        },
+      },
+    ],
+  });
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(loop.recovering).toBe(false);
+  expect(loop.controlRecoveryAllowed).toBe(true);
+  loop.cancel();
+});
+
+it('selected removal failure reports possible side effects and no rollback', async () => {
+  const { loop, requests, io } = setup();
+  const recovery = { ...recoveryDescriptor(), frameSelection: true as const };
+  loop.suspendRecovery(recovery);
+  io.execute.mockRejectedValueOnce(new Error('attach failed'));
+  loop.accept(requests.at(-1)!.id, {
+    kind: 'actions',
+    actions: [
+      {
+        method: 'recover-control',
+        params: { recoveryId: recovery.recoveryId, selectedCandidateIds: [crypto.randomUUID()] },
+      },
+    ],
+  });
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  expect(io.finish).toHaveBeenCalledWith(
+    expect.any(String),
+    'interrupted',
+    'task-1',
+    { kind: 'recovery-removal-interrupted' },
+    expect.objectContaining({ recoveryRemoval: { requested: 1, outcome: 'unknown' } }),
+  );
+});
+it('successful recovery preserves old uncertain receipts and never replays the original action', async () => {
+  const { loop, requests, io } = setup();
+  const recovery = recoveryDescriptor();
+  loop.suspendRecovery(recovery, [
+    { method: 'fill', outcome: 'uncertain' },
+    { method: 'click', outcome: 'not-executed' },
+  ]);
+  const request = requests.at(-1)!;
+  loop.accept(request.id, {
+    kind: 'actions',
+    actions: [{ method: 'recover-control', params: { recoveryId: recovery.recoveryId } }],
+  });
+  expect(loop.controlRecoveryAllowed).toBe(true); // The in-flight attempt remains authorized.
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(io.execute).toHaveBeenCalledTimes(1);
+  expect(io.execute.mock.calls[0]![0][0]!.method).toBe('recover-control');
+  expect(requests.at(-1)!.execution.mode).toBe('operating');
+  expect(requests.at(-1)!.execution.results).toContainEqual({
+    method: 'fill',
+    outcome: 'uncertain',
+  });
+  expect(loop.recovering).toBe(false);
+  expect(loop.controlRecoveryAllowed).toBe(true);
+  loop.accept(requests.at(-1)!.id, {
+    kind: 'actions',
+    actions: [
+      { method: 'use-current-tab', params: { contextId: '11111111-1111-4111-8111-111111111111' } },
+    ],
+  });
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(loop.controlRecoveryAllowed).toBe(true);
+  loop.cancel();
+  loop.start(
+    'new-task',
+    { role: 'user', content: [{ type: 'text', text: 'New task' }] },
+    { type: 'current-page', status: 'unavailable' },
+  );
+  expect(loop.controlRecoveryAllowed).toBe(true);
+  loop.cancel();
+});
+it('bounds independent recoveries across scope changes and transport resends', async () => {
+  const { loop, requests, io } = setup();
+  let now = Date.now();
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+  try {
+    for (let i = 0; i < 3; i++) {
+      const recovery = { ...recoveryDescriptor(), recoveryId: crypto.randomUUID() };
+      loop.suspendRecovery(recovery);
+      const request = requests.at(-1)!;
+      const decision = {
+        kind: 'actions' as const,
+        actions: [{ method: 'recover-control', params: { recoveryId: recovery.recoveryId } }],
+      };
+      loop.accept(request.id, decision);
+      expect(loop.accept(request.id, decision).replayed).toBe(true);
+      for (let j = 0; j < 10; j++) await Promise.resolve();
+      if (i === 1) {
+        expect(loop.controlRecoveryAllowed).toBe(false);
+        now += 29999;
+        expect(loop.controlRecoveryAllowed).toBe(false);
+        now += 1;
+        expect(loop.controlRecoveryAllowed).toBe(true);
+      }
+    }
+    expect(io.execute).toHaveBeenCalledTimes(3);
+    now += 30000;
+    expect(loop.controlRecoveryAllowed).toBe(false);
+    // An attempted new suspension cannot bypass the task budget at decision time.
+    const extra = { ...recoveryDescriptor(), recoveryId: crypto.randomUUID() };
+    loop.suspendRecovery(extra);
+    expect(() =>
+      loop.accept(requests.at(-1)!.id, {
+        kind: 'actions',
+        actions: [{ method: 'recover-control', params: { recoveryId: extra.recoveryId } }],
+      }),
+    ).toThrow('Only the current single recovery');
+    expect(io.execute).toHaveBeenCalledTimes(3);
+  } finally {
+    loop.cancel();
+    clock.mockRestore();
+  }
+});
+it('idle Agent recovery judgment expires without another input or action', async () => {
+  vi.useFakeTimers();
+  const { loop, requests, io } = setup();
+  const recovery = recoveryDescriptor();
+  loop.suspendRecovery(recovery);
+  const pending = requests.at(-1)!.id;
+  await vi.advanceTimersByTimeAsync(120000);
+  expect(io.finish).toHaveBeenCalledTimes(1);
+  expect(io.finish).toHaveBeenCalledWith(
+    expect.any(String),
+    'interrupted',
+    'task-1',
+    { kind: 'interrupted' },
+    expect.objectContaining({ reason: 'CONTROL_LOST', recoveryOutcome: 'expired' }),
+  );
+  expect(loop.active).toBe(false);
+  expect(() => loop.accept(pending, { kind: 'done', text: 'late' })).toThrow('no longer active');
+  expect(io.execute).not.toHaveBeenCalled();
+});
+it('an expired decision terminalizes even before the timer callback runs', async () => {
+  vi.useFakeTimers();
+  const { loop, requests, io } = setup();
+  const recovery = recoveryDescriptor();
+  loop.suspendRecovery(recovery);
+  vi.setSystemTime(recovery.expiresAt + 1);
+  expect(
+    loop.accept(requests.at(-1)!.id, {
+      kind: 'actions',
+      actions: [{ method: 'recover-control', params: { recoveryId: recovery.recoveryId } }],
+    }),
+  ).toEqual({ accepted: true, replayed: false });
+  await Promise.resolve();
+  expect(io.finish).toHaveBeenCalledTimes(1);
+  expect(io.execute).not.toHaveBeenCalled();
+  expect(io.finish).toHaveBeenCalledWith(
+    expect.any(String),
+    'interrupted',
+    'task-1',
+    { kind: 'interrupted' },
+    expect.objectContaining({ recoveryOutcome: 'expired' }),
+  );
+});
 beforeEach(() => setWorkerLanguage('en'));
 afterEach(() => {
   vi.useRealTimers();

@@ -6,6 +6,10 @@ import {
 } from '../../utils/i18n';
 import { formatTaskNotice, type TaskNotice } from '../../utils/task-notice';
 import {
+  CONTROL_RECOVERY_CAPABILITY,
+  RECOVERY_FRAME_SELECTION_CAPABILITY,
+} from '../../utils/control-loss';
+import {
   DIAGNOSTICS_CAPABILITY,
   detailedContext,
   currentDetailedTaskGeneration,
@@ -41,6 +45,8 @@ import { safeError } from '../../utils/diagnostics-schema';
 import { captureCurrentPage, clearPageContexts, forgetPageContext } from '../../utils/page-context';
 import {
   completeTask,
+  abortControlRecovery,
+  configureControlRecovery,
   currentControl,
   currentGrant,
   diagnosticNavigationRevision,
@@ -121,6 +127,8 @@ export function startRemoteBackground() {
   const idem = new IdempotencyCache();
   let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
   let loopReady = false;
+  let controlRecoveryReady = false;
+  let frameSelectionReady = false;
   let attachmentsReady = false;
   let interruptReady = false;
   let sendingChat = false;
@@ -332,6 +340,7 @@ export function startRemoteBackground() {
     if (
       hadControl &&
       !hasControl &&
+      !loop.recovering &&
       (loop?.pendingId || (recoveryDeadline && loop?.active && !loop.settling))
     ) {
       cancelLoop('interrupted');
@@ -509,6 +518,7 @@ export function startRemoteBackground() {
       });
     },
     cancel: () => idem.cancel(),
+    revokeRecovery: () => abortControlRecovery(),
     error: () => {
       endDiagnosticTask('interrupted', true);
       state.error = 'ui.error.chatSaveFailed';
@@ -611,9 +621,37 @@ export function startRemoteBackground() {
       idem.cancel();
       preview.finish(status === 'done' ? 'completed' : 'error');
       activity.end(status === 'done' ? 'completed' : 'interrupted');
-      await completeTask().catch(() => {
-        state.error = 'ui.error.taskCleanupFailed';
+      const recoveryTerminal = loop.recovering;
+      const cleanup = completeTask().catch(() => {
+        recordDiagnostic('runtime-error', 'finalize', {
+          source: 'background',
+          level: 'error',
+          code: 'EXT_ERROR',
+        });
+        if (loop.taskId === taskId) state.error = 'ui.error.taskCleanupFailed';
       });
+      if (recoveryTerminal) {
+        // Executor revokes immediately and fences late native attachment work.
+        // A stuck native call must not withhold the terminal transport receipt.
+        let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            cleanup,
+            new Promise<void>((resolve) => {
+              cleanupTimer = setTimeout(() => {
+                recordDiagnostic('runtime-error', 'finalize', {
+                  source: 'background',
+                  level: 'warn',
+                  code: 'COMMAND_EXPIRED',
+                });
+                resolve();
+              }, 1000);
+            }),
+          ]);
+        } finally {
+          clearTimeout(cleanupTimer);
+        }
+      } else await cleanup;
       if (loop.taskId !== taskId) return;
       const message = state.chat.find((entry) => entry.role === 'user' && entry.id === taskId);
       if (message) {
@@ -645,10 +683,18 @@ export function startRemoteBackground() {
     },
   });
 
+  configureControlRecovery({
+    enabled: () => controlRecoveryReady && loop.controlRecoveryAllowed,
+    frameSelectionEnabled: () => frameSelectionReady && controlRecoveryReady,
+    onSuspended: (recovery) => loop.suspendRecovery(recovery),
+    onRevoked: (outcome) => loop.endRecovery(outcome),
+  });
+
   function cancelLoop(status: 'stopped' | 'interrupted', interrupt = false) {
     state.agentActivity = undefined;
     chatRevision++; // Also invalidate a message still collecting its initial page overview.
     const taskId = loop.taskId;
+    const removalInterruption = loop.selectedRecoveryInterruption;
     if (taskId) endDiagnosticTask(status, true);
     loop.cancel();
     wakeTransport();
@@ -664,7 +710,24 @@ export function startRemoteBackground() {
           message.agentHistory.endedAt = Date.now();
         }
       }
-      send({ type: 'agent-turn-end', taskId, status, ...(interrupt ? { interrupt: true } : {}) });
+      const notice = { kind: 'recovery-removal-interrupted' } as const;
+      const text = removalInterruption ? formatTaskNotice(workerLocale(), notice) : undefined;
+      send({
+        type: 'agent-turn-end',
+        taskId,
+        status,
+        ...(interrupt ? { interrupt: true } : {}),
+        ...(removalInterruption ? { interruption: removalInterruption, text } : {}),
+      });
+      if (removalInterruption)
+        void appendChat({
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          text: text!,
+          notice,
+          final: true,
+          ts: Date.now(),
+        }).catch(() => {});
       void persistChat().catch(() => {});
     }
   }
@@ -738,6 +801,8 @@ export function startRemoteBackground() {
     wakeTransport();
     setRecovery(undefined);
     loopReady = false;
+    controlRecoveryReady = false;
+    frameSelectionReady = false;
     interruptReady = false;
     clearTimeout(handshakeTimer);
     preview.finish('interrupted');
@@ -799,6 +864,8 @@ export function startRemoteBackground() {
         capabilities: [
           'diagnostics-detail-share-v1',
           'diagnostics-incident-bundle-v2',
+          CONTROL_RECOVERY_CAPABILITY,
+          RECOVERY_FRAME_SELECTION_CAPABILITY,
           ...REMOTE_CAPABILITIES,
           DIAGNOSTICS_CAPABILITY,
           INSTANCE_CAPABILITY,
@@ -844,6 +911,8 @@ export function startRemoteBackground() {
         state.error = '';
       } else if (loop.active || recoveryDeadline) failRecovery();
       loopReady = false;
+      controlRecoveryReady = false;
+      frameSelectionReady = false;
       state.steeringSupported = false;
       interruptReady = false;
       clearTimeout(handshakeTimer);
@@ -938,6 +1007,8 @@ export function startRemoteBackground() {
         state.steeringSupported = m.capabilities.includes(STEER_CAPABILITY);
         interruptReady = m.capabilities.includes(INTERRUPT_CAPABILITY);
         loopReady = true;
+        controlRecoveryReady = m.capabilities.includes(CONTROL_RECOVERY_CAPABILITY);
+        frameSelectionReady = m.capabilities.includes(RECOVERY_FRAME_SELECTION_CAPABILITY);
         freshRecoveryAttempted = false;
         state.connected = true;
         state.connecting = false;

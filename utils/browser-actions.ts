@@ -9,6 +9,8 @@ export { BROWSER_METHODS, type BrowserMethod } from './tool-catalog';
 
 // Retried mutating calls replay their recorded answer instead of clicking twice.
 const IDEMPOTENT_METHODS = new Set<BrowserMethod>([
+  'recover-control',
+  'inspect-recovery-frames',
   'use-current-tab',
   'open',
   'new-tab',

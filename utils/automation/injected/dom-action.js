@@ -179,31 +179,44 @@ function domAction(action, option) {
     if (!active()) throw new Error('Could not focus element');
     return null;
   }
-  if (action === 'prepare-input') {
-    if (sensitive) throw new Error('Password and OTP fields are handled by the user');
-    if (
-      !(
-        this instanceof view.HTMLInputElement ||
-        this instanceof view.HTMLTextAreaElement ||
-        this.isContentEditable
-      ) ||
-      disabled() ||
-      this.readOnly ||
-      this.matches?.('input[type=file]')
-    )
-      throw new Error('Element is not editable');
-    this.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
-    this.focus({ preventScroll: true });
-    if (!active()) throw new Error('Could not focus element');
-    if (option) {
+  if (action === 'prepare-input' || action === 'commit-input') {
+    const assertEditable = () => {
+      if (!this.isConnected) throw new Error('Element is detached');
+      if (this.matches?.('input[type=password],input[autocomplete=one-time-code]'))
+        throw new Error('Password and OTP fields are handled by the user');
+      if (
+        !(
+          this instanceof view.HTMLInputElement ||
+          this instanceof view.HTMLTextAreaElement ||
+          this.isContentEditable
+        ) ||
+        disabled() ||
+        this.readOnly ||
+        this.matches?.('input[type=file]')
+      )
+        throw new Error('Element is not editable');
+    };
+    assertEditable();
+    if (action === 'prepare-input') {
+      this.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+      this.focus({ preventScroll: true });
+      assertEditable();
+      if (!active()) throw new Error('Could not focus element');
+    } else if (!active()) throw new Error('Focus changed during input preview');
+    // Selection belongs immediately before the single native insertion, after preview.
+    if (action === 'commit-input' && option) {
       if (this.isContentEditable) {
         const range = doc.createRange();
         range.selectNodeContents(this);
         const selection = view.getSelection();
+        if (!selection) throw new Error('Input selection is unavailable');
         selection.removeAllRanges();
         selection.addRange(range);
       } else this.select();
     }
+    assertEditable();
+    if (!active()) throw new Error('Focus changed during input preparation');
+    if (action === 'commit-input') return null;
     const r = this.getBoundingClientRect();
     return {
       x: r.x + Math.min(r.width / 2, 18),

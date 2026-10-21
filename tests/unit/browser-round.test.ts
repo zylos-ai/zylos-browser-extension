@@ -7,6 +7,7 @@ const executor = vi.hoisted(() => ({
   flushTaskPopups: vi.fn(async () => {}),
   taskPopupOpener: vi.fn(),
   controlLossRevision: vi.fn(),
+  currentControlRecovery: vi.fn(),
 }));
 vi.mock('../../utils/automation/executor', () => executor);
 import { runBrowserRound } from '../../utils/browser-round';
@@ -24,6 +25,28 @@ beforeEach(() => {
       get: vi.fn(async (id: number) => ({ id, url: 'https://example.com', status: 'complete' })),
     },
   });
+});
+it('recovery returns the canonical observation page without repeating snapshot or input', async () => {
+  const page = { text: '@fresh-e1 textbox', nodeCount: 1 };
+  const target = { id: 1, url: 'https://example.com' };
+  const call = vi.fn(async () => ({ observation: page, target, recovered: true, replayed: false }));
+  const result = await runBrowserRound(
+    [{ method: 'recover-control', params: { recoveryId: '11111111-1111-4111-8111-111111111111' } }],
+    call,
+    () => {},
+    'request',
+  );
+  expect(result.observation).toEqual({
+    page,
+    target,
+    recovery: { recovered: true, replayed: false },
+  });
+  expect(call).toHaveBeenCalledTimes(1);
+  expect(call.mock.calls[0]).toEqual([
+    'recover-control',
+    { recoveryId: '11111111-1111-4111-8111-111111111111' },
+    'request:0',
+  ]);
 });
 
 it.each(['snapshot', 'after-fill', 'during-fill', 'before-round'])(

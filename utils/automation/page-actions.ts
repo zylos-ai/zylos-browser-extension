@@ -31,17 +31,13 @@ function fail(code: string, message = code): never {
 }
 const mask = (values: string[] = []) =>
   values.reduce((n, v) => n | ({ Alt: 1, Control: 2, Meta: 4, Shift: 8 }[v] || 0), 0);
-const transient = (error: unknown) =>
-  error instanceof Error &&
-  /detached|not found|Could not find|Cannot find|context.*destroyed|No frame/i.test(error.message);
-
 export class PageActions {
   constructor(private io: ActionsIO) {}
-  async frames() {
-    return collectFrames(this.io.send);
+  async frames(onUnavailable?: (frame: Frame) => void) {
+    return collectFrames(this.io.send, onUnavailable);
   }
-  async safeFrames() {
-    const frames = await this.frames();
+  async safeFrames(onUnavailable?: (frame: Frame) => void) {
+    const frames = await this.frames(onUnavailable);
     const allowed = (f: Frame): boolean =>
       frameAllowed(f) && (!f.parentId || !frames.some((p) => p.id === f.parentId && !allowed(p)));
     return frames.filter(allowed);
@@ -114,7 +110,14 @@ export class PageActions {
       await this.call(element, 'validate');
       return element;
     } catch (error) {
-      if (transient(error)) fail('STALE_ELEMENT');
+      this.io.check();
+      if (
+        error instanceof Error &&
+        /^(?:Error: )?(?:Element is detached|No node with given id found|Could not find node with given id|Could not find object with given id)\.?$/.test(
+          error.message,
+        )
+      )
+        fail('STALE_ELEMENT');
       throw error;
     }
   }
@@ -263,9 +266,13 @@ export class PageActions {
   }
   async snapshot(interactiveOnly: boolean, header: string[], viewportOnly = false) {
     this.io.refs.clear();
-    const frames = await this.safeFrames();
     const lines = [...header],
       warnings: string[] = [];
+    const unavailable = () => {
+      this.io.check();
+      warnings.push('A child frame became unavailable; snapshot is partial.');
+    };
+    const frames = await this.safeFrames(unavailable);
     const serial = crypto.randomUUID().slice(0, 8);
     const interactive = new Set([
       'button',
@@ -293,8 +300,14 @@ export class PageActions {
       scope: viewportOnly ? 'viewport' : 'document',
       truncated,
       nodeCount: count,
+      partial: warnings.length > 0,
     });
     for (const frame of frames) {
+      let missingLayout = false;
+      const firstLine = lines.length,
+        firstCount = count,
+        firstChars = chars;
+      const frameRefs: string[] = [];
       try {
         let visible: ReturnType<typeof visibleLayout> | undefined;
         if (viewportOnly) {
@@ -310,8 +323,10 @@ export class PageActions {
             layouts.set(frame.sessionId, layout);
           }
           const document = layout.documents.find((d) => layout!.strings[d.frameId] === frame.id);
-          if (!document)
+          if (!document) {
+            missingLayout = true;
             fail('OBSERVATION_UNAVAILABLE', 'Frame layout changed; take a fresh observation');
+          }
           visible = visibleLayout(document, layout.strings, viewport);
         }
         await this.io.send(
@@ -369,12 +384,14 @@ export class PageActions {
             return result(true);
           }
           const ref = `@${serial}-e${count}`;
-          if (node.backendDOMNodeId)
+          if (node.backendDOMNodeId) {
             this.io.refs.set(ref, {
               backendNodeId: node.backendDOMNodeId,
               generation: this.io.generation,
               frame,
             });
+            frameRefs.push(ref);
+          }
           const props = Object.fromEntries(
             (node.properties || [])
               .filter((p: any) =>
@@ -415,8 +432,16 @@ export class PageActions {
         }
       } catch (error) {
         this.io.check();
-        if (!transient(error)) throw error;
-        warnings.push(`Frame ${frame.id} changed during snapshot`);
+        if (
+          !frame.parentId ||
+          (!missingLayout && (error as { code?: string })?.code !== 'FRAME_UNAVAILABLE')
+        )
+          throw error;
+        for (const ref of frameRefs) this.io.refs.delete(ref);
+        lines.length = firstLine;
+        count = firstCount;
+        chars = firstChars;
+        unavailable();
       }
     }
     return result();
@@ -630,12 +655,12 @@ export class PageActions {
       case 'fill':
       case 'type': {
         const element = await this.resolve(command.ref);
-        const point = await this.call(element, 'prepare-input', command.op === 'fill');
+        const point = await this.call(element, 'prepare-input');
         await this.io.preview(
           'input',
           await this.topPoint(element.frame, point, await this.safeFrames()),
         );
-        await this.call(element, 'check-focus');
+        await this.call(element, 'commit-input', command.op === 'fill');
         await this.io.send('Input.insertText', { text: command.text });
         return { done: true };
       }

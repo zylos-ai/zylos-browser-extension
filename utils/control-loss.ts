@@ -16,9 +16,43 @@ export const interruptionSchema = z
       .max(10),
     observation: z.literal('unavailable'),
     resume: z.literal('new-user-message-required'),
+    recoveryOutcome: z.enum(['expired', 'failed', 'revoked']).optional(),
+    recoveryRemoval: z
+      .object({ requested: z.number().int().min(1).max(16), outcome: z.literal('unknown') })
+      .strict()
+      .optional(),
   })
   .strict();
 export type ControlInterruption = z.infer<typeof interruptionSchema>;
+export type RecoveryOutcome = NonNullable<ControlInterruption['recoveryOutcome']>;
+export const CONTROL_RECOVERY_WINDOW_MS = 120_000;
+export const CONTROL_RECOVERY_ATTEMPT_MS = 10_000;
+export const CONTROL_RECOVERY_TASK_LIMIT = 3;
+export const CONTROL_RECOVERY_BURST_LIMIT = 2;
+export const CONTROL_RECOVERY_BURST_MS = 30_000;
+export const recoveryBudgetAvailable = (attempts: readonly number[], now = Date.now()) =>
+  attempts.length < CONTROL_RECOVERY_TASK_LIMIT &&
+  attempts.filter((at) => now - at < CONTROL_RECOVERY_BURST_MS).length <
+    CONTROL_RECOVERY_BURST_LIMIT;
+export const CONTROL_RECOVERY_CAPABILITY = 'recovery-judgment-v1';
+export const RECOVERY_FRAME_SELECTION_CAPABILITY = 'recovery-frame-selection-v1';
+export type ControlRecovery = {
+  recoveryId: string;
+  expiresAt: number;
+  reason: 'target_closed';
+  cause: 'unknown';
+  frameSelection?: true;
+  inspection?: import('./automation/recovery-frames').RecoveryFrameInspection;
+};
+export class ControlSuspended extends Error {
+  readonly code = 'CONTROL_SUSPENDED';
+  constructor(
+    readonly recovery: ControlRecovery,
+    readonly results: ControlInterruption['results'],
+  ) {
+    super('Browser control is suspended; an explicit recovery decision is required');
+  }
+}
 export class ControlLoss extends Error {
   readonly code = 'STOPPED';
   constructor(readonly interruption: ControlInterruption) {

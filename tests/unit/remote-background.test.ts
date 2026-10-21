@@ -18,6 +18,8 @@ const executor = vi.hoisted(() => ({
   execute: vi.fn(async (c: { op: string }, _deadline: number) => ({ ran: c.op })),
   onState: vi.fn(),
   initializeExecutor: vi.fn(),
+  configureControlRecovery: vi.fn((_hooks: any) => {}),
+  abortControlRecovery: vi.fn(),
   revealTask: vi.fn(async () => {}),
 }));
 vi.mock('../../utils/automation/executor', () => executor);
@@ -165,6 +167,8 @@ async function bootConnected(
   interrupt = false,
   steering = true,
   resume = false,
+  controlRecovery = false,
+  frameSelection = false,
 ) {
   startRemoteBackground();
   await flush();
@@ -180,6 +184,8 @@ async function bootConnected(
       ...(interrupt ? ['agent-interrupt-v1'] : []),
       ...(steering ? ['agent-input-v1'] : []),
       ...(resume ? ['task-resume-v1'] : []),
+      ...(controlRecovery ? ['recovery-judgment-v1'] : []),
+      ...(frameSelection ? ['recovery-frame-selection-v1'] : []),
     ],
     endpointId: `abababababab.${storage.remoteBrowserId}`,
     ...(resume
@@ -224,6 +230,144 @@ const respond = async (
 };
 
 describe('decision transport background', () => {
+  it('explicit Stop preserves possible selected-removal effects', async () => {
+    const ws = await bootConnected(false, false, true, false, true, true);
+    const request = await begin(ws);
+    const hooks = executor.configureControlRecovery.mock.calls[0]![0];
+    expect(hooks.frameSelectionEnabled()).toBe(true);
+    const recoveryId = '22222222-2222-4222-8222-222222222222';
+    hooks.onSuspended({
+      recoveryId,
+      expiresAt: Date.now() + 120000,
+      reason: 'target_closed',
+      cause: 'unknown',
+      frameSelection: true,
+    });
+    await flush();
+    let finish!: (value: any) => void;
+    executor.execute.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await respond(ws, ws.last('agent-request')!, {
+      kind: 'actions',
+      actions: [
+        {
+          method: 'recover-control',
+          params: { recoveryId, selectedCandidateIds: ['33333333-3333-4333-8333-333333333333'] },
+        },
+      ],
+    });
+    await ask({ type: 'remote-stop' });
+    expect(ws.last('agent-turn-end')).toMatchObject({
+      taskId: request.taskId,
+      status: 'stopped',
+      interruption: { recoveryRemoval: { requested: 1, outcome: 'unknown' } },
+      text: expect.any(String),
+    });
+    finish({ recovered: true });
+    await flush();
+    expect(ws.frames.filter((frame) => frame.type === 'agent-turn-end')).toHaveLength(1);
+  });
+  it('allows control recovery only for an active task with negotiated support', async () => {
+    const ws = await bootConnected(false, false, true, false, true);
+    const hooks = executor.configureControlRecovery.mock.calls[0]![0];
+    expect(hooks.enabled()).toBe(false);
+    await begin(ws);
+    expect(hooks.enabled()).toBe(true);
+    ws.serverClose(4001);
+    expect(hooks.enabled()).toBe(false);
+  });
+
+  it('keeps legacy connections ineligible for control recovery', async () => {
+    const ws = await bootConnected();
+    await begin(ws);
+    const hooks = executor.configureControlRecovery.mock.calls[0]![0];
+    expect(hooks.enabled()).toBe(false);
+  });
+
+  it('preserves the recovery terminal receipt when executor revokes its retained scope', async () => {
+    const ws = await bootConnected(false, false, true, false, true);
+    const request = await begin(ws);
+    const notify = executor.onState.mock.calls[0]![0] as () => void;
+    executor.currentControl.mockReturnValue({
+      sessionId: 'test',
+      tabId: 3,
+      tabIds: [3],
+      phase: 'ready',
+    });
+    notify();
+    const hooks = executor.configureControlRecovery.mock.calls[0]![0];
+    hooks.onSuspended({
+      recoveryId: '22222222-2222-4222-8222-222222222222',
+      expiresAt: Date.now() + 120000,
+      reason: 'target_closed',
+      cause: 'unknown',
+    });
+    executor.currentControl.mockReturnValue(null);
+    notify();
+    hooks.onRevoked('revoked');
+    await flush();
+    expect(ws.last('agent-turn-end')).toMatchObject({
+      taskId: request.taskId,
+      status: 'interrupted',
+      interruption: {
+        reason: 'CONTROL_LOST',
+        resume: 'new-user-message-required',
+        recoveryOutcome: 'revoked',
+      },
+    });
+    expect(ws.frames.filter((frame) => frame.type === 'agent-turn-end')).toHaveLength(1);
+  });
+
+  it('returns a terminal recovery receipt even when native cleanup remains pending', async () => {
+    const ws = await bootConnected(false, false, true, false, true);
+    await ask({ type: 'remote-diagnostics-set-enabled', enabled: true });
+    const original = await begin(ws);
+    const hooks = executor.configureControlRecovery.mock.calls[0]![0];
+    hooks.onSuspended({
+      recoveryId: '22222222-2222-4222-8222-222222222222',
+      expiresAt: Date.now() + 120000,
+      reason: 'target_closed',
+      cause: 'unknown',
+    });
+    await flush();
+    expect((ws.last('agent-request')!.execution as any).mode).toBe('recovery');
+    let finishCleanup!: () => void;
+    executor.completeTask.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishCleanup = resolve;
+        }),
+    );
+    await vi.advanceTimersByTimeAsync(121001);
+    expect(executor.abortControlRecovery).toHaveBeenCalled();
+    expect(ws.last('agent-turn-end')).toMatchObject({
+      taskId: original.taskId,
+      status: 'interrupted',
+      interruption: { recoveryOutcome: 'expired' },
+    });
+    expect((await state()).loopActive).toBe(false);
+    ws.receive({ type: 'req', id: 891, method: 'diagnostics.get', params: {} });
+    await flush();
+    expect(ws.last('resp')).toMatchObject({
+      id: 891,
+      result: {
+        events: expect.arrayContaining([
+          expect.objectContaining({
+            event: 'runtime-error',
+            reason: 'finalize',
+            code: 'COMMAND_EXPIRED',
+          }),
+        ]),
+      },
+    });
+    finishCleanup();
+    await flush();
+    expect(ws.frames.filter((frame) => frame.type === 'agent-turn-end')).toHaveLength(1);
+  });
   it('detailed logs stay local, require separate consent and purge on recipient changes', async () => {
     const ws = await bootConnected();
     expect((await state()).detailedDiagnostics).toMatchObject({ enabled: false });
@@ -1069,6 +1213,8 @@ describe('decision transport background', () => {
     expect(ws.last('hello')!.capabilities).toEqual([
       'diagnostics-detail-share-v1',
       'diagnostics-incident-bundle-v2',
+      'recovery-judgment-v1',
+      'recovery-frame-selection-v1',
       'agent-loop-v1',
       'diagnostics-v2',
       'browser-instance-v1',
@@ -1246,11 +1392,27 @@ describe('decision transport background', () => {
 
   it('persists the final answer even when task cleanup fails', async () => {
     const ws = await bootConnected();
+    await ask({ type: 'remote-diagnostics-set-enabled', enabled: true });
     const request = await begin(ws);
     executor.completeTask.mockRejectedValueOnce(new Error('detach failed'));
     await respond(ws, request, { kind: 'done', text: 'Result' });
     expect((await state()).error).toBe('ui.error.taskCleanupFailed');
     expect((storage.remoteChatLog as ChatEntry[]).at(-1)!.text).toBe('Result');
+    ws.receive({ type: 'req', id: 892, method: 'diagnostics.get', params: {} });
+    await flush();
+    expect(ws.last('resp')).toMatchObject({
+      id: 892,
+      result: {
+        events: expect.arrayContaining([
+          expect.objectContaining({
+            event: 'runtime-error',
+            reason: 'finalize',
+            code: 'EXT_ERROR',
+          }),
+        ]),
+      },
+    });
+    expect(JSON.stringify(ws.last('resp'))).not.toContain('detach failed');
   });
 
   it('persists localizable notices but sends readable text to the relay', async () => {
