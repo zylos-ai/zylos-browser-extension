@@ -163,3 +163,11 @@ action. Preserve completed/uncertain/not-executed receipts and inspect the new
 state before any further action. Never replay an uncertain submit or other
 non-idempotent input. A failed recovery, timeout or Stop ends this opportunity;
 do not reopen the tab, fabricate a token, or retry attachment.
+
+If inspect-recovery-frames is advertised, it can inspect a fixed list of foreign
+extension iframe candidates in the original document. Their presence does not
+prove causation. Inspection does not remove anything or extend the deadline.
+You may explicitly choose candidate IDs in recover-control; only those saved
+nodes are removed once before reattachment. Removal can disrupt another
+extension UI. Omit selection to attach without removal. Failed recovery can
+leave selected nodes removed; no rollback or repeat removal is performed.

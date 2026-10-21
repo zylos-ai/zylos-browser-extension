@@ -55,6 +55,7 @@ it('recovery exposes only one recovery tool and rejects normal or mismatched act
   const next = requests.at(-1)!;
   expect(next.execution.mode).toBe('recovery');
   expect(next.execution.recovery).toEqual(recovery);
+  expect(JSON.stringify(next.execution.tools)).not.toContain('"selectedCandidateIds"');
   expect(next.execution.tools).toHaveLength(1);
   expect(JSON.stringify(next.execution.tools)).toContain('recover-control');
   expect(() => loop.accept(old, action)).toThrow('no longer active');
@@ -71,6 +72,77 @@ it('recovery exposes only one recovery tool and rejects normal or mismatched act
     }),
   ).toThrow('Only the current single recovery');
   loop.cancel();
+});
+
+it('negotiated inspection keeps recovery suspended and preserves its deadline and attempt budget', async () => {
+  const { loop, requests, io } = setup();
+  const recovery = { ...recoveryDescriptor(), frameSelection: true as const };
+  const inspection = {
+    candidates: [
+      { id: crypto.randomUUID(), extensionOrigin: `chrome-extension://${'b'.repeat(32)}` },
+    ],
+    truncated: false,
+    coverage: 'root-document-open-shadow' as const,
+  };
+  loop.suspendRecovery(recovery);
+  expect(requests.at(-1)!.execution.tools?.map((tool) => (tool as { name: string }).name)).toEqual([
+    'inspect-recovery-frames',
+    'recover-control',
+  ]);
+  io.execute.mockResolvedValueOnce({
+    mode: 'recovery',
+    recovery: { ...recovery, inspection },
+    observation: { inspection },
+    failed: false,
+    results: [],
+  });
+  loop.accept(requests.at(-1)!.id, {
+    kind: 'actions',
+    actions: [{ method: 'inspect-recovery-frames', params: { recoveryId: recovery.recoveryId } }],
+  });
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(loop.recovering).toBe(true);
+  expect(requests.at(-1)!.execution.recovery).toEqual({ ...recovery, inspection });
+  loop.accept(requests.at(-1)!.id, {
+    kind: 'actions',
+    actions: [
+      {
+        method: 'recover-control',
+        params: {
+          recoveryId: recovery.recoveryId,
+          selectedCandidateIds: [inspection.candidates[0]!.id],
+        },
+      },
+    ],
+  });
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(loop.recovering).toBe(false);
+  expect(loop.controlRecoveryAllowed).toBe(true);
+  loop.cancel();
+});
+
+it('selected removal failure reports possible side effects and no rollback', async () => {
+  const { loop, requests, io } = setup();
+  const recovery = { ...recoveryDescriptor(), frameSelection: true as const };
+  loop.suspendRecovery(recovery);
+  io.execute.mockRejectedValueOnce(new Error('attach failed'));
+  loop.accept(requests.at(-1)!.id, {
+    kind: 'actions',
+    actions: [
+      {
+        method: 'recover-control',
+        params: { recoveryId: recovery.recoveryId, selectedCandidateIds: [crypto.randomUUID()] },
+      },
+    ],
+  });
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  expect(io.finish).toHaveBeenCalledWith(
+    expect.any(String),
+    'interrupted',
+    'task-1',
+    { kind: 'recovery-removal-interrupted' },
+    expect.objectContaining({ recoveryRemoval: { requested: 1, outcome: 'unknown' } }),
+  );
 });
 it('successful recovery preserves old uncertain receipts and never replays the original action', async () => {
   const { loop, requests, io } = setup();

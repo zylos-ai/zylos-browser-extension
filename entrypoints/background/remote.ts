@@ -5,7 +5,10 @@ import {
   workerLocale,
 } from '../../utils/i18n';
 import { formatTaskNotice, type TaskNotice } from '../../utils/task-notice';
-import { CONTROL_RECOVERY_CAPABILITY } from '../../utils/control-loss';
+import {
+  CONTROL_RECOVERY_CAPABILITY,
+  RECOVERY_FRAME_SELECTION_CAPABILITY,
+} from '../../utils/control-loss';
 import {
   DIAGNOSTICS_CAPABILITY,
   detailedContext,
@@ -125,6 +128,7 @@ export function startRemoteBackground() {
   let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
   let loopReady = false;
   let controlRecoveryReady = false;
+  let frameSelectionReady = false;
   let attachmentsReady = false;
   let interruptReady = false;
   let sendingChat = false;
@@ -681,6 +685,7 @@ export function startRemoteBackground() {
 
   configureControlRecovery({
     enabled: () => controlRecoveryReady && loop.controlRecoveryAllowed,
+    frameSelectionEnabled: () => frameSelectionReady && controlRecoveryReady,
     onSuspended: (recovery) => loop.suspendRecovery(recovery),
     onRevoked: (outcome) => loop.endRecovery(outcome),
   });
@@ -689,6 +694,7 @@ export function startRemoteBackground() {
     state.agentActivity = undefined;
     chatRevision++; // Also invalidate a message still collecting its initial page overview.
     const taskId = loop.taskId;
+    const removalInterruption = loop.selectedRecoveryInterruption;
     if (taskId) endDiagnosticTask(status, true);
     loop.cancel();
     wakeTransport();
@@ -704,7 +710,24 @@ export function startRemoteBackground() {
           message.agentHistory.endedAt = Date.now();
         }
       }
-      send({ type: 'agent-turn-end', taskId, status, ...(interrupt ? { interrupt: true } : {}) });
+      const notice = { kind: 'recovery-removal-interrupted' } as const;
+      const text = removalInterruption ? formatTaskNotice(workerLocale(), notice) : undefined;
+      send({
+        type: 'agent-turn-end',
+        taskId,
+        status,
+        ...(interrupt ? { interrupt: true } : {}),
+        ...(removalInterruption ? { interruption: removalInterruption, text } : {}),
+      });
+      if (removalInterruption)
+        void appendChat({
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          text: text!,
+          notice,
+          final: true,
+          ts: Date.now(),
+        }).catch(() => {});
       void persistChat().catch(() => {});
     }
   }
@@ -779,6 +802,7 @@ export function startRemoteBackground() {
     setRecovery(undefined);
     loopReady = false;
     controlRecoveryReady = false;
+    frameSelectionReady = false;
     interruptReady = false;
     clearTimeout(handshakeTimer);
     preview.finish('interrupted');
@@ -841,6 +865,7 @@ export function startRemoteBackground() {
           'diagnostics-detail-share-v1',
           'diagnostics-incident-bundle-v2',
           CONTROL_RECOVERY_CAPABILITY,
+          RECOVERY_FRAME_SELECTION_CAPABILITY,
           ...REMOTE_CAPABILITIES,
           DIAGNOSTICS_CAPABILITY,
           INSTANCE_CAPABILITY,
@@ -887,6 +912,7 @@ export function startRemoteBackground() {
       } else if (loop.active || recoveryDeadline) failRecovery();
       loopReady = false;
       controlRecoveryReady = false;
+      frameSelectionReady = false;
       state.steeringSupported = false;
       interruptReady = false;
       clearTimeout(handshakeTimer);
@@ -982,6 +1008,7 @@ export function startRemoteBackground() {
         interruptReady = m.capabilities.includes(INTERRUPT_CAPABILITY);
         loopReady = true;
         controlRecoveryReady = m.capabilities.includes(CONTROL_RECOVERY_CAPABILITY);
+        frameSelectionReady = m.capabilities.includes(RECOVERY_FRAME_SELECTION_CAPABILITY);
         freshRecoveryAttempted = false;
         state.connected = true;
         state.connecting = false;

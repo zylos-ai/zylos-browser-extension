@@ -61,15 +61,33 @@ export async function runBrowserRound(
     return value;
   };
   try {
+    if (actions.length === 1 && actions[0]!.method === 'inspect-recovery-frames') {
+      const recovery = (await guarded(
+        'inspect-recovery-frames',
+        actions[0]!.params,
+        `${requestId}:0`,
+      )) as import('./control-loss').ControlRecovery;
+      return {
+        mode: 'recovery',
+        recovery,
+        observation: { inspection: recovery.inspection },
+        results: [{ method: 'inspect-recovery-frames', status: 'success' }],
+        failed: false,
+      };
+    }
     if (actions.length === 1 && actions[0]!.method === 'recover-control') {
       const value = await guarded('recover-control', actions[0]!.params, `${requestId}:0`);
-      const recovered = value as { observation: unknown; target: unknown };
+      const recovered = value as { observation: unknown; target: unknown; removal?: unknown };
       return {
         mode: 'operating',
         observation: {
           page: recovered.observation,
           target: recovered.target,
-          recovery: { recovered: true, replayed: false },
+          recovery: {
+            recovered: true,
+            replayed: false,
+            ...(recovered.removal ? { removal: recovered.removal } : {}),
+          },
         },
         results: [{ method: 'recover-control', status: 'success', replayed: false }],
         failed: false,

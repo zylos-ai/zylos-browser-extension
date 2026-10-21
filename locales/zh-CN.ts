@@ -196,6 +196,8 @@ export default {
   taskTimeLimit: '任务已达到本次执行时间上限，已保留当前页面。请检查已完成的部分后再继续。',
   taskExecutionLimit: '任务尚未确认完成，已达到本次执行上限。已保留当前页面，请补充说明后继续。',
   taskInterrupted: '浏览器任务中断，请检查连接后重新发起；已执行的动作不会自动重放。',
+  taskRecoveryRemovalInterrupted:
+    '恢复已结束。选中的扩展框架可能已经被移除，此改动未回滚。请先检查页面，不要直接重复移除或之前的输入。',
   taskCannotContinue: '无法继续本次任务：{reason}\n已执行的操作不会自动重放。',
   taskDecisionTimeout: '等待 Agent 决策超时。',
   taskAgentStopping: 'Agent 正在停止上一项任务，请稍后重试。',

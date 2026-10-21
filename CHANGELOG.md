@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add negotiated recovery-only inspection of foreign extension iframe candidates.
+  Explicit Agent selection can remove selected saved nodes once before recovery,
+  with original-document checks, one-use authorization, bounded isolated-world
+  scans and no input replay. Report possible removal on interrupted attempts;
+  reinjected frames are not automatically removed again.
+
 - Restore nested child-frame sessions during control recovery, and fence delayed
   initialization after consent revocation. Verify missing task groups separately
   from styling failures and record bounded cleanup timeout/failure diagnostics.

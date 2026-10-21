@@ -168,6 +168,7 @@ async function bootConnected(
   steering = true,
   resume = false,
   controlRecovery = false,
+  frameSelection = false,
 ) {
   startRemoteBackground();
   await flush();
@@ -184,6 +185,7 @@ async function bootConnected(
       ...(steering ? ['agent-input-v1'] : []),
       ...(resume ? ['task-resume-v1'] : []),
       ...(controlRecovery ? ['recovery-judgment-v1'] : []),
+      ...(frameSelection ? ['recovery-frame-selection-v1'] : []),
     ],
     endpointId: `abababababab.${storage.remoteBrowserId}`,
     ...(resume
@@ -228,6 +230,47 @@ const respond = async (
 };
 
 describe('decision transport background', () => {
+  it('explicit Stop preserves possible selected-removal effects', async () => {
+    const ws = await bootConnected(false, false, true, false, true, true);
+    const request = await begin(ws);
+    const hooks = executor.configureControlRecovery.mock.calls[0]![0];
+    expect(hooks.frameSelectionEnabled()).toBe(true);
+    const recoveryId = '22222222-2222-4222-8222-222222222222';
+    hooks.onSuspended({
+      recoveryId,
+      expiresAt: Date.now() + 120000,
+      reason: 'target_closed',
+      cause: 'unknown',
+      frameSelection: true,
+    });
+    await flush();
+    let finish!: (value: any) => void;
+    executor.execute.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await respond(ws, ws.last('agent-request')!, {
+      kind: 'actions',
+      actions: [
+        {
+          method: 'recover-control',
+          params: { recoveryId, selectedCandidateIds: ['33333333-3333-4333-8333-333333333333'] },
+        },
+      ],
+    });
+    await ask({ type: 'remote-stop' });
+    expect(ws.last('agent-turn-end')).toMatchObject({
+      taskId: request.taskId,
+      status: 'stopped',
+      interruption: { recoveryRemoval: { requested: 1, outcome: 'unknown' } },
+      text: expect.any(String),
+    });
+    finish({ recovered: true });
+    await flush();
+    expect(ws.frames.filter((frame) => frame.type === 'agent-turn-end')).toHaveLength(1);
+  });
   it('allows control recovery only for an active task with negotiated support', async () => {
     const ws = await bootConnected(false, false, true, false, true);
     const hooks = executor.configureControlRecovery.mock.calls[0]![0];
@@ -1171,6 +1214,7 @@ describe('decision transport background', () => {
       'diagnostics-detail-share-v1',
       'diagnostics-incident-bundle-v2',
       'recovery-judgment-v1',
+      'recovery-frame-selection-v1',
       'agent-loop-v1',
       'diagnostics-v2',
       'browser-instance-v1',

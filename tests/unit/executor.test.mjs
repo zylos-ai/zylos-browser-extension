@@ -14,6 +14,7 @@ async function setup() {
   const event = () => {
     const handlers = [];
     return {
+      handlers,
       addListener(fn) {
         handlers.push(fn);
       },
@@ -36,6 +37,7 @@ async function setup() {
   };
   const source = { ...tab, id: 1, index: 0, groupId: -1, url: 'https://example.com/personal' };
   globalThis.chrome = {
+    runtime: { id: 'a'.repeat(32), onMessage: event() },
     action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {} },
     tabs: {
       get: async (id) => (id === source.id ? source : tab),
@@ -368,6 +370,146 @@ async function recoverySetup() {
   };
   return { ...s, suspended, revoked, detach };
 }
+
+async function frameSelectionSetup() {
+  const s = await recoverySetup();
+  chrome.webNavigation = { getFrame: async () => ({ documentId: 'document-1', url: s.tab.url }) };
+  s.executor.configureControlRecovery({
+    enabled: () => true,
+    frameSelectionEnabled: () => true,
+    onSuspended: s.suspended,
+    onRevoked: s.revoked,
+  });
+  await s.executor.execute({ op: 'frames' }, Date.now() + 10000);
+  s.detach();
+  const candidate = {
+    id: crypto.randomUUID(),
+    extensionOrigin: `chrome-extension://${'b'.repeat(32)}`,
+  };
+  const inspection = {
+    candidates: [candidate],
+    truncated: false,
+    coverage: 'root-document-open-shadow',
+  };
+  const scripts = [];
+  const sender = {
+    id: chrome.runtime.id,
+    tab: { id: s.tab.id, windowId: 1 },
+    frameId: 0,
+    documentId: 'document-1',
+    url: s.tab.url,
+  };
+  const authorize = (args, overrides = {}) =>
+    new Promise((resolve) =>
+      chrome.runtime.onMessage.handlers[0](
+        { type: 'recovery-frame-authorize', recoveryId: args.recoveryId, nonce: args.nonce },
+        { ...sender, ...overrides },
+        resolve,
+      ),
+    );
+  chrome.scripting = {
+    executeScript: async (request) => {
+      const args = request.args[0];
+      scripts.push(args.action);
+      assert.deepEqual(request.target, { tabId: s.tab.id, documentIds: ['document-1'] });
+      assert.equal(request.world, 'ISOLATED');
+      if (args.action === 'revoke') return [];
+      const result =
+        args.action === 'inspect'
+          ? { inspection }
+          : (await authorize(args)).allowed
+            ? { removed: 1 }
+            : { error: 'RECOVERY_UNAVAILABLE' };
+      return [{ frameId: 0, documentId: 'document-1', result }];
+    },
+  };
+  return { ...s, candidate, inspection, scripts, authorize };
+}
+
+test('inspection is immutable, does not attach and selected removal requires authenticated one-use authorization', async () => {
+  const s = await frameSelectionSetup();
+  const descriptor = s.executor.currentControlRecovery();
+  assert.equal(descriptor.frameSelection, true);
+  const initial = await s.executor.inspectRecoveryFrames(descriptor.recoveryId);
+  assert.deepEqual(initial.inspection, s.inspection);
+  assert.deepEqual(await s.executor.inspectRecoveryFrames(descriptor.recoveryId), initial);
+  assert.deepEqual(s.scripts, ['inspect']);
+  assert.equal(s.executor.currentGrant(), null);
+  assert.equal(s.attached.size, 0);
+  const script = chrome.scripting.executeScript;
+  chrome.scripting.executeScript = async (request) => {
+    const args = request.args[0];
+    if (args.action === 'remove') {
+      for (const forged of [
+        { id: 'wrong' },
+        { documentId: 'other' },
+        { frameId: 1 },
+        { tab: { id: 99 } },
+      ])
+        assert.deepEqual(await s.authorize(args, forged), { allowed: false });
+      assert.deepEqual(await s.authorize({ ...args, nonce: 'wrong' }), { allowed: false });
+      assert.deepEqual(await s.authorize(args), { allowed: true });
+      assert.deepEqual(await s.authorize(args), { allowed: false });
+      return [{ frameId: 0, documentId: 'document-1', result: { removed: 1 } }];
+    }
+    return script(request);
+  };
+  const result = await s.executor.recoverControl(descriptor.recoveryId, Infinity, [s.candidate.id]);
+  assert.equal(result.recovered, true);
+  assert.equal(result.replayed, false);
+  await s.executor.release(false);
+});
+
+test.each(['unknown', 'duplicate', 'document'])(
+  'selected recovery fails terminal before removal for %s',
+  async (invalid) => {
+    const s = await frameSelectionSetup();
+    const id = s.executor.currentControlRecovery().recoveryId;
+    await s.executor.inspectRecoveryFrames(id);
+    if (invalid === 'document')
+      chrome.webNavigation.getFrame = async () => ({ documentId: 'new-document', url: s.tab.url });
+    const selected =
+      invalid === 'unknown'
+        ? [crypto.randomUUID()]
+        : invalid === 'duplicate'
+          ? [s.candidate.id, s.candidate.id]
+          : [s.candidate.id];
+    await assert.rejects(s.executor.recoverControl(id, Infinity, selected));
+    assert.ok(!s.scripts.includes('remove'));
+    assert.equal(s.attached.size, 0);
+    assert.equal(s.executor.currentControl(), null);
+    await s.executor.release(false);
+  },
+);
+
+test('Stop while removal authorization awaits tab validation prevents authorization and attachment', async () => {
+  const s = await frameSelectionSetup();
+  const id = s.executor.currentControlRecovery().recoveryId;
+  await s.executor.inspectRecoveryFrames(id);
+  const entered = deferred(),
+    resume = deferred();
+  const script = chrome.scripting.executeScript;
+  chrome.scripting.executeScript = async (request) => {
+    if (request.args[0].action === 'remove') {
+      const get = chrome.tabs.get;
+      chrome.tabs.get = async (...args) => {
+        entered.resolve();
+        await resume.promise;
+        return get(...args);
+      };
+    }
+    return script(request);
+  };
+  const attempt = s.executor.recoverControl(id, Infinity, [s.candidate.id]);
+  const rejected = assert.rejects(attempt);
+  await entered.promise;
+  const stop = s.executor.release(false);
+  resume.resolve();
+  await rejected;
+  await stop;
+  assert.equal(s.attached.size, 0);
+  assert.equal(s.executor.currentGrant(), null);
+});
 test('recovery blocks automatic unpark, uses exact original tab once and returns fresh refs without input', async () => {
   const s = await recoverySetup();
   s.detach();

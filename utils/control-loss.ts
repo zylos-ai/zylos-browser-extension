@@ -17,6 +17,10 @@ export const interruptionSchema = z
     observation: z.literal('unavailable'),
     resume: z.literal('new-user-message-required'),
     recoveryOutcome: z.enum(['expired', 'failed', 'revoked']).optional(),
+    recoveryRemoval: z
+      .object({ requested: z.number().int().min(1).max(16), outcome: z.literal('unknown') })
+      .strict()
+      .optional(),
   })
   .strict();
 export type ControlInterruption = z.infer<typeof interruptionSchema>;
@@ -31,11 +35,14 @@ export const recoveryBudgetAvailable = (attempts: readonly number[], now = Date.
   attempts.filter((at) => now - at < CONTROL_RECOVERY_BURST_MS).length <
     CONTROL_RECOVERY_BURST_LIMIT;
 export const CONTROL_RECOVERY_CAPABILITY = 'recovery-judgment-v1';
+export const RECOVERY_FRAME_SELECTION_CAPABILITY = 'recovery-frame-selection-v1';
 export type ControlRecovery = {
   recoveryId: string;
   expiresAt: number;
   reason: 'target_closed';
   cause: 'unknown';
+  frameSelection?: true;
+  inspection?: import('./automation/recovery-frames').RecoveryFrameInspection;
 };
 export class ControlSuspended extends Error {
   readonly code = 'CONTROL_SUSPENDED';

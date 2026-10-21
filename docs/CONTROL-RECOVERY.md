@@ -26,8 +26,9 @@ execution has no new overall deadline.
 
 Recovery requires the same live task, original tab and window, exact URL and
 valid task scope. It checks the parent document before and after observation.
-It never selects another active tab, creates a replacement, reloads, deletes
-an iframe or replays input. Successful recovery returns fresh observations and
+It never selects another active tab, creates a replacement, reloads or replays
+input. Without explicit candidate selection it does not remove frames.
+Successful recovery returns fresh observations and
 refs; Agent must evaluate prior side effects before deciding further actions.
 
 Stop, debugger cancellation, scope loss, configuration change or task replacement
@@ -39,6 +40,34 @@ During initialization, events from the original tab and its registered child
 sessions rebuild nested frame connections before observation. This does not
 restore the normal action grant. Stop, expiry and task changes invalidate frame
 initialization, including delayed child setup after an awaited native call.
+
+## Explicit Extension Frame Selection
+
+The optional `recovery-frame-selection-v1` capability enables a recovery-only
+`inspect-recovery-frames` action when the original document ID was captured
+before control loss. Inspection uses an isolated-world script, not CDP. It
+returns opaque candidate IDs and extension origins, never iframe contents or
+URL paths. The snapshot covers the top document and open shadow roots only;
+it does not inspect closed shadow roots or child documents. A candidate is not
+proof of the failure's cause. Scans are bounded to 10,000 elements, 16 candidates,
+32 levels and 100 ms; repeats return the same snapshot without resetting expiry.
+
+Agent may pass explicitly chosen `selectedCandidateIds` to `recover-control`.
+Only those saved node identities are removed, once, before the single attachment
+attempt. Each node must still be connected to the original document with the
+same src and a foreign `chrome-extension:` origin. Own-extension, HTTP, about and
+srcdoc frames are excluded. The original tab, window, URL, document ID and task
+consent are checked again. Removal can disrupt another extension's UI; automatic
+reinjection is not removed again. A failed attachment remains terminal.
+
+The removal script requests a one-use background authorization bound to its
+nonce, recovery token and authenticated sender tab/document. Stop or expiry
+before authorization rejects it. After authorization, synchronous removal is an
+in-flight effect and cannot be retracted by Stop. A queued revocation and local
+deadline checks narrow that boundary but are not a browser cancellation API.
+An interrupted selected attempt reports that removal may already have occurred
+and was not rolled back. Successful recovery reports the confirmed removal count.
+Inspection and selected removal have no automatic retry and do not replay input.
 
 ## Asynchronous cleanup
 

@@ -4,7 +4,16 @@ import { translate, type Locale, type TranslationKey } from './i18n';
 // Local history metadata, never inferred from Agent or owner text. Keep a plain
 // text fallback for the relay, while the panel can render the current language.
 export const taskNoticeSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.enum(['time-limit', 'execution-limit', 'interrupted']) }).strict(),
+  z
+    .object({
+      kind: z.enum([
+        'time-limit',
+        'execution-limit',
+        'interrupted',
+        'recovery-removal-interrupted',
+      ]),
+    })
+    .strict(),
   z.object({ kind: z.literal('request-failed'), code: z.string().max(128) }).strict(),
 ]);
 export type TaskNotice = z.infer<typeof taskNoticeSchema>;
@@ -36,6 +45,8 @@ export function formatTaskNotice(locale: Locale, notice: TaskNotice): string {
       return translate(locale, 'taskExecutionLimit');
     case 'interrupted':
       return translate(locale, 'taskInterrupted');
+    case 'recovery-removal-interrupted':
+      return translate(locale, 'taskRecoveryRemovalInterrupted');
     case 'request-failed': {
       const key = Object.hasOwn(reasonKeys, notice.code) ? reasonKeys[notice.code] : undefined;
       const reason = key

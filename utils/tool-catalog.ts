@@ -41,11 +41,19 @@ const targetRule =
 // Adding a method without documentation is a TypeScript error. All browser
 // semantics stay in this extension; the transport has no copy of this table.
 export const toolHelp = {
+  'inspect-recovery-frames': {
+    description:
+      'Inspect foreign extension iframe candidates in the original suspended document without reading iframe contents. Returns stable opaque IDs; does not remove anything.',
+    constraints: [
+      'Recovery mode only. Repeated calls return the same snapshot. Coverage is the top document and open shadow roots only. An extension iframe may be unrelated to the control failure.',
+    ],
+  },
   'recover-control': {
     description:
       'Attempt one bounded reattachment to the exact suspended task tab, then return fresh observation and refs. Never repeats the interrupted action.',
     constraints: [
       'Only available during recovery mode. Use the exact recoveryId before its absolute expiry. Failure is terminal; no retries. Prior uncertain input may already have happened.',
+      'With negotiated frame selection, selectedCandidateIds explicitly removes only those inspected foreign extension iframe nodes once before attachment. This can disrupt another extension UI. Omit selection to attach without removal. Never guess IDs or automatically replay input.',
     ],
   },
   'wait-for-page': {
@@ -228,14 +236,18 @@ type ToolCatalog = {
   tools: (ToolHelp & { name: BrowserMethod; parameters?: JsonSchema })[];
 };
 
-export function describeTools(names: BrowserMethod[]): ToolCatalog {
+export function describeTools(names: BrowserMethod[], frameSelection = true): ToolCatalog {
   return {
     schemaVersion: 1,
     extensionVersion: REMOTE_VERSION,
     tools: names.map((name) => ({
       name,
       ...toolHelp[name],
-      parameters: parameterSchema(browserParams[name]),
+      parameters: parameterSchema(
+        name === 'recover-control' && !frameSelection
+          ? actionParams['recover-control'].omit({ selectedCandidateIds: true })
+          : browserParams[name],
+      ),
     })),
   };
 }
