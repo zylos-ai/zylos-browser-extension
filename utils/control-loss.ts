@@ -23,6 +23,13 @@ export type ControlInterruption = z.infer<typeof interruptionSchema>;
 export type RecoveryOutcome = NonNullable<ControlInterruption['recoveryOutcome']>;
 export const CONTROL_RECOVERY_WINDOW_MS = 120_000;
 export const CONTROL_RECOVERY_ATTEMPT_MS = 10_000;
+export const CONTROL_RECOVERY_TASK_LIMIT = 3;
+export const CONTROL_RECOVERY_BURST_LIMIT = 2;
+export const CONTROL_RECOVERY_BURST_MS = 30_000;
+export const recoveryBudgetAvailable = (attempts: readonly number[], now = Date.now()) =>
+  attempts.length < CONTROL_RECOVERY_TASK_LIMIT &&
+  attempts.filter((at) => now - at < CONTROL_RECOVERY_BURST_MS).length <
+    CONTROL_RECOVERY_BURST_LIMIT;
 export const CONTROL_RECOVERY_CAPABILITY = 'recovery-judgment-v1';
 export type ControlRecovery = {
   recoveryId: string;

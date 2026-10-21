@@ -16,8 +16,12 @@ Only one `recover-control` action, or a terminal done/blocked response, is
 accepted. Ordinary actions and mixed recovery/action batches are rejected.
 
 The suspension expires after 120 seconds and cannot be extended by another
-decision or WebSocket resume. One recovery attempt per task is allowed, with
-at most 10 seconds including attachment and observation. Normal Agent task
+decision or WebSocket resume. Each disconnect permits one attempt, with at most
+three attempts per task and two attempts in any rolling 30 seconds. A later
+independent disconnect may receive a new judgment only after successful recovery;
+failure, Stop or expiry remains terminal. Exhausting either budget ends control
+without offering another attempt. Each attempt has at most 10 seconds including
+attachment and observation. Normal Agent task
 execution has no new overall deadline.
 
 Recovery requires the same live task, original tab and window, exact URL and
@@ -30,6 +34,11 @@ Stop, debugger cancellation, scope loss, configuration change or task replacemen
 revoke recovery. Timeout/failure/revocation terminate with a control-loss receipt
 and optional `recoveryOutcome: expired | failed | revoked`. A worker restart
 does not restore the token or task. Real browser restrictions can prevent recovery.
+
+During initialization, events from the original tab and its registered child
+sessions rebuild nested frame connections before observation. This does not
+restore the normal action grant. Stop, expiry and task changes invalidate frame
+initialization, including delayed child setup after an awaited native call.
 
 ## Asynchronous cleanup
 

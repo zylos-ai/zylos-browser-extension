@@ -16,23 +16,34 @@ const autoAttach = {
 };
 const children = new Map<string, { tabId: number; parent?: string; frameId: string }>();
 const pending = new Set<Promise<unknown>>();
+let revision = 0;
 export const frameSessions = () => children;
 export function clearFrameSessions() {
+  revision++;
   children.clear();
+  pending.clear();
 }
-export async function enableFrames(target: { tabId: number; sessionId?: string }) {
+export async function enableFrames(
+  target: { tabId: number; sessionId?: string },
+  valid: () => boolean = () => true,
+) {
+  const started = revision;
+  if (!valid()) return;
   await diagnosticSend(target, 'Network.enable', {
     maxTotalBufferSize: 0,
     maxResourceBufferSize: 0,
   });
+  if (started !== revision || !valid()) return;
   await diagnosticSend(target, 'Target.setAutoAttach', autoAttach);
 }
 export function frameEvent(
   source: { tabId?: number; sessionId?: string },
   method: string,
   params: any,
+  valid: () => boolean = () => true,
 ) {
-  if (!source.tabId) return;
+  if (!source.tabId || !valid()) return;
+  if (source.sessionId && children.get(source.sessionId)?.tabId !== source.tabId) return;
   if (method === 'Target.attachedToTarget' && params.targetInfo?.type === 'iframe') {
     recordDebuggerEvent('frame-attach', { tabId: source.tabId, sessionId: params.sessionId });
     const record = {
@@ -44,8 +55,9 @@ export function frameEvent(
     const target = { tabId: source.tabId, sessionId: params.sessionId };
     const work = (async () => {
       await diagnosticSend(target, 'Page.enable');
-      if (children.get(params.sessionId) !== record) return;
-      await enableFrames(target);
+      const current = () => valid() && children.get(params.sessionId) === record;
+      if (!current()) return;
+      await enableFrames(target, current);
     })()
       .catch(() => {})
       .finally(() => pending.delete(work));

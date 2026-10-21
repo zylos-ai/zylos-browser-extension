@@ -619,6 +619,11 @@ export function startRemoteBackground() {
       activity.end(status === 'done' ? 'completed' : 'interrupted');
       const recoveryTerminal = loop.recovering;
       const cleanup = completeTask().catch(() => {
+        recordDiagnostic('runtime-error', 'finalize', {
+          source: 'background',
+          level: 'error',
+          code: 'EXT_ERROR',
+        });
         if (loop.taskId === taskId) state.error = 'ui.error.taskCleanupFailed';
       });
       if (recoveryTerminal) {
@@ -629,7 +634,14 @@ export function startRemoteBackground() {
           await Promise.race([
             cleanup,
             new Promise<void>((resolve) => {
-              cleanupTimer = setTimeout(resolve, 1000);
+              cleanupTimer = setTimeout(() => {
+                recordDiagnostic('runtime-error', 'finalize', {
+                  source: 'background',
+                  level: 'warn',
+                  code: 'COMMAND_EXPIRED',
+                });
+                resolve();
+              }, 1000);
             }),
           ]);
         } finally {

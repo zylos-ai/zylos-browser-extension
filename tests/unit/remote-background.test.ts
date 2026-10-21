@@ -281,6 +281,7 @@ describe('decision transport background', () => {
 
   it('returns a terminal recovery receipt even when native cleanup remains pending', async () => {
     const ws = await bootConnected(false, false, true, false, true);
+    await ask({ type: 'remote-diagnostics-set-enabled', enabled: true });
     const original = await begin(ws);
     const hooks = executor.configureControlRecovery.mock.calls[0]![0];
     hooks.onSuspended({
@@ -306,6 +307,20 @@ describe('decision transport background', () => {
       interruption: { recoveryOutcome: 'expired' },
     });
     expect((await state()).loopActive).toBe(false);
+    ws.receive({ type: 'req', id: 891, method: 'diagnostics.get', params: {} });
+    await flush();
+    expect(ws.last('resp')).toMatchObject({
+      id: 891,
+      result: {
+        events: expect.arrayContaining([
+          expect.objectContaining({
+            event: 'runtime-error',
+            reason: 'finalize',
+            code: 'COMMAND_EXPIRED',
+          }),
+        ]),
+      },
+    });
     finishCleanup();
     await flush();
     expect(ws.frames.filter((frame) => frame.type === 'agent-turn-end')).toHaveLength(1);
@@ -1333,11 +1348,27 @@ describe('decision transport background', () => {
 
   it('persists the final answer even when task cleanup fails', async () => {
     const ws = await bootConnected();
+    await ask({ type: 'remote-diagnostics-set-enabled', enabled: true });
     const request = await begin(ws);
     executor.completeTask.mockRejectedValueOnce(new Error('detach failed'));
     await respond(ws, request, { kind: 'done', text: 'Result' });
     expect((await state()).error).toBe('ui.error.taskCleanupFailed');
     expect((storage.remoteChatLog as ChatEntry[]).at(-1)!.text).toBe('Result');
+    ws.receive({ type: 'req', id: 892, method: 'diagnostics.get', params: {} });
+    await flush();
+    expect(ws.last('resp')).toMatchObject({
+      id: 892,
+      result: {
+        events: expect.arrayContaining([
+          expect.objectContaining({
+            event: 'runtime-error',
+            reason: 'finalize',
+            code: 'EXT_ERROR',
+          }),
+        ]),
+      },
+    });
+    expect(JSON.stringify(ws.last('resp'))).not.toContain('detach failed');
   });
 
   it('persists localizable notices but sends readable text to the relay', async () => {

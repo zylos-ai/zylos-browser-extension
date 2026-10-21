@@ -144,6 +144,24 @@ test('missing popup group cannot strand the borrowed original tab', async () => 
   await s.executor.release(false);
 });
 
+test.each(['missing', 'temporary', 'exists'])(
+  'group lookup distinguishes %s after cosmetic failure',
+  async (state) => {
+    const s = await borrowedWithPopup();
+    chrome.tabGroups.update = async () => {
+      throw new Error('Styling failed');
+    };
+    chrome.tabGroups.get = async () => {
+      if (state === 'missing') throw new Error('No group with id: 10.');
+      if (state === 'temporary') throw new Error('Service unavailable');
+      return { id: 10 };
+    };
+    await s.executor.execute({ op: 'snapshot' }, Date.now() + 10000);
+    assert.equal(s.executor.currentControl().groupId, state === 'missing' ? null : 10);
+    await s.executor.release(false);
+  },
+);
+
 test('group removal clears borrowed popup membership without regrouping it', async () => {
   const s = await borrowedWithPopup();
   let grouped = 0;
@@ -380,6 +398,10 @@ test('recovery blocks automatic unpark, uses exact original tab once and returns
     (e) => e.code === 'RECOVERY_UNAVAILABLE',
   );
   s.detach();
+  const second = s.executor.currentControlRecovery();
+  assert.notEqual(second.recoveryId, recovery.recoveryId);
+  await s.executor.recoverControl(second.recoveryId);
+  s.detach();
   assert.equal(s.executor.currentControlRecovery(), undefined);
   assert.equal(s.executor.currentControl(), null);
 });
@@ -390,6 +412,132 @@ test('explicit Chrome cancellation never enters recovery', async () => {
   assert.equal(s.executor.currentControlRecovery(), undefined);
   assert.equal(s.executor.currentControl(), null);
 });
+
+test('rolling recovery budget reopens at exactly 30 seconds but task stops after three attempts', async () => {
+  const s = await recoverySetup();
+  let now = Date.now();
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+  try {
+    for (let i = 0; i < 2; i++) {
+      s.detach();
+      await s.executor.recoverControl(s.executor.currentControlRecovery().recoveryId);
+    }
+    now += 30000;
+    s.detach();
+    await s.executor.recoverControl(s.executor.currentControlRecovery().recoveryId);
+    now += 30000;
+    s.detach();
+    assert.equal(s.executor.currentControlRecovery(), undefined);
+    assert.equal(s.executor.currentControl(), null);
+  } finally {
+    clock.mockRestore();
+    await s.executor.release(false);
+  }
+});
+
+test('recovery initializes nested OOPIF sessions while the normal grant is suspended', async () => {
+  const s = await recoverySetup();
+  s.detach();
+  const send = chrome.debugger.sendCommand;
+  const calls = [];
+  chrome.debugger.sendCommand = async (target, method, params) => {
+    calls.push([target.sessionId, method]);
+    if (method === 'Target.setAutoAttach') {
+      assert.equal(s.executor.currentGrant(), null);
+      const child = !target.sessionId ? 'child' : target.sessionId === 'child' ? 'nested' : null;
+      if (child)
+        chrome.debugger.onEvent.emit(target, 'Target.attachedToTarget', {
+          sessionId: child,
+          targetInfo: { type: 'iframe', targetId: child },
+        });
+      // Events from another tab and an unknown parent session are not in scope.
+      chrome.debugger.onEvent.emit({ tabId: 99 }, 'Target.attachedToTarget', {
+        sessionId: 'foreign',
+        targetInfo: { type: 'iframe', targetId: 'foreign' },
+      });
+      chrome.debugger.onEvent.emit(
+        { tabId: s.tab.id, sessionId: 'unknown' },
+        'Target.attachedToTarget',
+        {
+          sessionId: 'orphan',
+          targetInfo: { type: 'iframe', targetId: 'orphan' },
+        },
+      );
+    }
+    return send(target, method, params);
+  };
+  await s.executor.recoverControl(s.executor.currentControlRecovery().recoveryId);
+  for (const id of ['child', 'nested']) {
+    assert.ok(
+      calls.some(([session, method]) => session === id && method === 'Target.setAutoAttach'),
+    );
+    assert.ok(calls.some(([session, method]) => session === id && method === 'Page.getFrameTree'));
+  }
+  assert.ok(!calls.some(([session]) => ['foreign', 'orphan'].includes(session)));
+  await s.executor.release(false);
+});
+
+test.each([
+  ['Page.enable', 'Stop'],
+  ['Network.enable', 'Stop'],
+  ['Page.enable', 'deadline'],
+  ['Network.enable', 'deadline'],
+  ['Page.enable', 'task-replacement'],
+  ['Network.enable', 'task-replacement'],
+])(
+  '%s delayed child initialization is fenced by %s during recovery',
+  async (blockedMethod, revoke) => {
+    const s = await recoverySetup();
+    s.detach();
+    const send = chrome.debugger.sendCommand;
+    const entered = deferred(),
+      resume = deferred();
+    const calls = [];
+    let roots = 0;
+    chrome.debugger.sendCommand = async (target, method, params) => {
+      calls.push([target.sessionId, method]);
+      if (!target.sessionId && method === 'Target.setAutoAttach') {
+        const child = ++roots === 1 ? 'child' : 'next-child';
+        chrome.debugger.onEvent.emit(target, 'Target.attachedToTarget', {
+          sessionId: child,
+          targetInfo: { type: 'iframe', targetId: child },
+        });
+      }
+      if (target.sessionId === 'child' && method === blockedMethod) {
+        entered.resolve();
+        await resume.promise;
+      }
+      return send(target, method, params);
+    };
+    const attempt = s.executor.recoverControl(s.executor.currentControlRecovery().recoveryId);
+    const rejected = assert.rejects(attempt);
+    await entered.promise;
+    const previous = s.executor.currentControl().sessionId;
+    const expiredAt = Date.now() + 10001;
+    const clock =
+      revoke === 'deadline' ? vi.spyOn(Date, 'now').mockReturnValue(expiredAt) : undefined;
+    const stopping =
+      revoke === 'task-replacement'
+        ? s.executor.release(false).then(() => s.start())
+        : revoke === 'Stop'
+          ? s.executor.release(false)
+          : Promise.resolve();
+    const frames = await import('../../utils/automation/frames');
+    if (revoke !== 'deadline') assert.equal(frames.frameSessions().size, 0);
+    resume.resolve();
+    await rejected;
+    await stopping;
+    clock?.mockRestore();
+    assert.ok(
+      !calls.some(([session, method]) => session === 'child' && method === 'Target.setAutoAttach'),
+    );
+    if (revoke === 'task-replacement') {
+      assert.notEqual(s.executor.currentControl().sessionId, previous);
+      assert.equal(s.executor.currentGrant().id, s.tab.id);
+      await s.executor.release(false);
+    } else assert.equal(s.executor.currentGrant(), null);
+  },
+);
 test('a same-URL document replacement during recovery observation fails closed', async () => {
   const s = await recoverySetup();
   s.detach();

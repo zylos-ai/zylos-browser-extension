@@ -24,6 +24,7 @@ import { recordDiagnostic, type DiagnosticReason } from '../diagnostics';
 import {
   CONTROL_RECOVERY_WINDOW_MS,
   CONTROL_RECOVERY_ATTEMPT_MS,
+  recoveryBudgetAvailable,
   type ControlRecovery,
   type RecoveryOutcome,
 } from '../control-loss';
@@ -48,7 +49,8 @@ type RecoveryLease = ControlRecovery & {
   timer: ReturnType<typeof setTimeout>;
 };
 let recovery: RecoveryLease | undefined;
-const recoveredTasks = new WeakSet<Scope>();
+let initializingFrames: { tabId: number; valid: () => boolean } | undefined;
+const recoveryAttempts = new WeakMap<Scope, number[]>();
 // An unconfirmed late detach must not let a later task inherit the old debugger.
 const blockedAttachments = new Set<number>();
 let recoveryHooks:
@@ -75,7 +77,13 @@ export function abortControlRecovery(outcome: RecoveryOutcome = 'revoked') {
   }
 }
 function suspendControl() {
-  if (!control || !grant || recoveredTasks.has(control) || !recoveryHooks?.enabled()) return false;
+  if (
+    !control ||
+    !grant ||
+    !recoveryBudgetAvailable(recoveryAttempts.get(control) ?? []) ||
+    !recoveryHooks?.enabled()
+  )
+    return false;
   const lease: RecoveryLease = {
     recoveryId: crypto.randomUUID(),
     expiresAt: Date.now() + CONTROL_RECOVERY_WINDOW_MS,
@@ -177,7 +185,7 @@ const inScope = (tab: chrome.tabs.Tab, session: Scope | null) =>
     (session.groupId !== null && tab.groupId === session.groupId));
 let groupUpdates: Promise<unknown> = Promise.resolve();
 const missingGroup = (error: unknown) =>
-  error instanceof Error && /^No group with id:/.test(error.message);
+  error instanceof Error && /^No (?:tab )?group with id:/.test(error.message);
 function forgetGroup(session: Scope, groupId: number) {
   if (control !== session || session.groupId !== groupId) return;
   recordGroupDiagnostic('removed');
@@ -206,7 +214,13 @@ function markTask(session: Scope, phase: Scope['phase']) {
         });
       } catch (error) {
         recordGroupDiagnostic('presentation-failed');
-        if (missingGroup(error)) forgetGroup(session, groupId);
+        if (chrome.tabGroups.get) {
+          try {
+            await chrome.tabGroups.get(groupId);
+          } catch (lookupError) {
+            if (missingGroup(lookupError)) forgetGroup(session, groupId);
+          }
+        } else if (missingGroup(error)) forgetGroup(session, groupId);
       }
     });
   groupUpdates = next.catch(() => {});
@@ -379,6 +393,8 @@ export async function release(cleanup = true, strict = false, reason: Diagnostic
     lossRevision++;
   // Revoke synchronously: queued or in-flight attachments cannot revive consent.
   control = null;
+  initializingFrames = undefined;
+  clearFrameSessions();
   newPopups.length = 0;
   popupSources.clear();
   parked = true;
@@ -588,10 +604,23 @@ export function initializeExecutor() {
     void release(true, false, 'debugger_detach'); // Closing the task tab / Chrome Cancel / DevTools ends control.
   });
   chrome.debugger.onEvent.addListener((source, method, params) => {
-    if (source.tabId !== grant?.id) return;
+    const initialization = initializingFrames;
+    const duringRecovery =
+      !!initialization && source.tabId === initialization.tabId && initialization.valid();
+    if (source.tabId !== grant?.id && !duringRecovery) return;
     const childSource = source as { tabId: number; sessionId?: string };
+    const session = control;
+    const consent = consentRevision;
+    const valid = () =>
+      !!session &&
+      control === session &&
+      session.tabId === source.tabId &&
+      consentRevision === consent &&
+      (grant?.id === source.tabId ||
+        (initializingFrames === initialization && !!initialization?.valid()));
     networkActivity.event(childSource.sessionId || '', method, params);
-    frameEvent(childSource, method, params);
+    frameEvent(childSource, method, params, valid);
+    if (duringRecovery) return;
     if (method === 'Input.dragIntercepted') dragData = (params as { data: unknown }).data;
     if (method === 'Page.javascriptDialogOpening') {
       const p = params as { type: string; message: string; defaultPrompt?: string };
@@ -798,8 +827,13 @@ async function dispatchPointer(
 export async function recoverControl(recoveryId: string, commandDeadline = Infinity) {
   const lease = recovery;
   if (!lease || lease.recoveryId !== recoveryId || lease.attempted) fail('RECOVERY_UNAVAILABLE');
+  const attempts = recoveryAttempts.get(lease.session) ?? [];
+  if (!recoveryBudgetAvailable(attempts)) {
+    abortControlRecovery('failed');
+    fail('RECOVERY_UNAVAILABLE');
+  }
   lease.attempted = true;
-  recoveredTasks.add(lease.session);
+  recoveryAttempts.set(lease.session, [...attempts, Date.now()]);
   const deadline = Math.min(
     lease.expiresAt,
     commandDeadline,
@@ -840,9 +874,21 @@ export async function recoverControl(recoveryId: string, commandDeadline = Infin
       await diagnosticAttach({ tabId: lease.tabId }, '1.3');
       attached = true;
       await checkTab();
+      const initialization = {
+        tabId: lease.tabId,
+        valid: () => {
+          try {
+            check();
+            return true;
+          } catch {
+            return false;
+          }
+        },
+      };
+      initializingFrames = initialization;
       await diagnosticSend({ tabId: lease.tabId }, 'Page.enable');
       check();
-      await enableFrames({ tabId: lease.tabId });
+      await enableFrames({ tabId: lease.tabId }, initialization.valid);
       check();
       await diagnosticSend({ tabId: lease.tabId }, 'Emulation.setFocusEmulationEnabled', {
         enabled: true,
@@ -892,11 +938,13 @@ export async function recoverControl(recoveryId: string, commandDeadline = Infin
       };
       clearTimeout(lease.timer);
       recovery = undefined;
+      initializingFrames = undefined;
       parked = false;
       committed = true;
       publish();
       return { recovered: true, recoveryId, observation, target: currentGrant(), replayed: false };
     } finally {
+      if (initializingFrames?.tabId === lease.tabId) initializingFrames = undefined;
       // The serialized attach queue stays owned until late completion is cleaned up.
       // A newer task cannot attach on this tab before this lease is detached.
       if (attached && !committed)

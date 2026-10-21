@@ -94,7 +94,7 @@ it('successful recovery preserves old uncertain receipts and never replays the o
     outcome: 'uncertain',
   });
   expect(loop.recovering).toBe(false);
-  expect(loop.controlRecoveryAllowed).toBe(false);
+  expect(loop.controlRecoveryAllowed).toBe(true);
   loop.accept(requests.at(-1)!.id, {
     kind: 'actions',
     actions: [
@@ -102,7 +102,7 @@ it('successful recovery preserves old uncertain receipts and never replays the o
     ],
   });
   for (let i = 0; i < 10; i++) await Promise.resolve();
-  expect(loop.controlRecoveryAllowed).toBe(false); // A new scope cannot reset this task's budget.
+  expect(loop.controlRecoveryAllowed).toBe(true);
   loop.cancel();
   loop.start(
     'new-task',
@@ -111,6 +111,48 @@ it('successful recovery preserves old uncertain receipts and never replays the o
   );
   expect(loop.controlRecoveryAllowed).toBe(true);
   loop.cancel();
+});
+it('bounds independent recoveries across scope changes and transport resends', async () => {
+  const { loop, requests, io } = setup();
+  let now = Date.now();
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+  try {
+    for (let i = 0; i < 3; i++) {
+      const recovery = { ...recoveryDescriptor(), recoveryId: crypto.randomUUID() };
+      loop.suspendRecovery(recovery);
+      const request = requests.at(-1)!;
+      const decision = {
+        kind: 'actions' as const,
+        actions: [{ method: 'recover-control', params: { recoveryId: recovery.recoveryId } }],
+      };
+      loop.accept(request.id, decision);
+      expect(loop.accept(request.id, decision).replayed).toBe(true);
+      for (let j = 0; j < 10; j++) await Promise.resolve();
+      if (i === 1) {
+        expect(loop.controlRecoveryAllowed).toBe(false);
+        now += 29999;
+        expect(loop.controlRecoveryAllowed).toBe(false);
+        now += 1;
+        expect(loop.controlRecoveryAllowed).toBe(true);
+      }
+    }
+    expect(io.execute).toHaveBeenCalledTimes(3);
+    now += 30000;
+    expect(loop.controlRecoveryAllowed).toBe(false);
+    // An attempted new suspension cannot bypass the task budget at decision time.
+    const extra = { ...recoveryDescriptor(), recoveryId: crypto.randomUUID() };
+    loop.suspendRecovery(extra);
+    expect(() =>
+      loop.accept(requests.at(-1)!.id, {
+        kind: 'actions',
+        actions: [{ method: 'recover-control', params: { recoveryId: extra.recoveryId } }],
+      }),
+    ).toThrow('Only the current single recovery');
+    expect(io.execute).toHaveBeenCalledTimes(3);
+  } finally {
+    loop.cancel();
+    clock.mockRestore();
+  }
 });
 it('idle Agent recovery judgment expires without another input or action', async () => {
   vi.useFakeTimers();

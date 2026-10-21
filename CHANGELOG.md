@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Restore nested child-frame sessions during control recovery, and fence delayed
+  initialization after consent revocation. Verify missing task groups separately
+  from styling failures and record bounded cleanup timeout/failure diagnostics.
+- Permit a later independent disconnect to request recovery after a successful
+  attempt, with a maximum of three attempts per task and two in any 30 seconds.
+  Each disconnect retains its single-use token and failure remains terminal.
+
 - Revalidate the original editable element after input preview and select text
   immediately before the single fill insertion. Preserve native debugger errors
   and fail before input when focus, editability or element identity changes.
