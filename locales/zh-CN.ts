@@ -1,10 +1,10 @@
 export default {
-  detailSharePreview: '预览用于 Remote 分享的快照',
+  detailSharePreview: '准备分享快照',
   detailShareRecipient: '接收方 Remote：',
   detailShareExpires: '分享授权截止时间：',
   detailShareDisclosure:
     '此快照可能包含敏感文本。授权后，当前 Remote、其运营者、Agent 及其配置的 AI 服务商可能接收并保留副本。仅允许通过 WSS 在最长两分钟内读取一次。撤销仅阻止后续读取，无法删除已收到的副本。响应丢失也可能消耗授权，不会自动重试或重新授权。',
-  detailShareConsent: '我已检查此快照，同意本次传输。',
+  detailShareConsent: '我同意将已准备的快照向上述接收方传输一次。',
   detailShareAuthorize: '授权读取一次',
   detailShareAuthorized: '已授权一次读取，截止时间如上。',
   detailShareConsumed: '授权已消耗。快照已提交连接发送，无法确认对方是否收到。',
@@ -15,11 +15,14 @@ export default {
   detailedDiagnosticsHint:
     '临时记录插件日志、错误及任务、连接和有限页面状态，用于排查故障。默认关闭，不自动分享；最多保存 10 分钟、1 MiB / 1,000 条。不采集页面文字、输入值或截图，但错误日志仍可能含敏感信息，请在分享前检查。关闭、到期、修改连接配置或后台重启后清除。',
   detailedExpires: '记录清除时间',
-  detailedPreview: '预览已采集日志',
+  detailedPreview: '查看文件详情',
+  detailedHide: '收起文件详情',
+  detailedSnapshotCount: '此快照包含 {count} 条详细日志',
+  detailedEmpty: '暂无详细日志。诊断文件仍可能包含事件元数据。',
   detailedReviewWarning:
-    '下载或分享前请检查下方完整文件。省略、截断和丢失情况会标记在文件中。这不是完整的 DevTools 录制。',
-  detailedDownload: '下载已预览的 JSON',
-  detailedExpired: '采集已过期或变更，请重新开启并预览。',
+    '此快照可能含敏感信息。省略、截断和丢失情况会标记在文件中。这不是完整的 DevTools 录制。',
+  detailedDownload: '下载诊断文件',
+  detailedExpired: '采集已过期或变更，请重新开启后重试。',
   diagnostics: '分享诊断事件',
   diagnosticsHint:
     '允许已连接的 Agent 读取最近 30 分钟的任务、控制、连接、异常类型和控制台级别事件（最多 1,000 条）。不含网页内容、网址、输入、密钥、异常原文或控制台参数。默认关闭；关闭后清除已存事件。',

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Download a fresh diagnostic snapshot directly. Keep raw JSON and hashes in
+  optional collapsible details, show an accurate empty-log state, and preserve
+  explicit consent and recipient disclosure for each prepared sharing snapshot.
+
 - Add negotiated recovery-only inspection of foreign extension iframe candidates.
   Explicit Agent selection can remove selected saved nodes once before recovery,
   with original-document checks, one-use authorization, bounded isolated-world
