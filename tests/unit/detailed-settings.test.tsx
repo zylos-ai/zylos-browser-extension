@@ -95,6 +95,34 @@ it('downloads a fresh immutable snapshot directly and keeps its details collapse
   expect(container.querySelector<HTMLDetailsElement>('#detailed-preview')!.open).toBe(false);
   expect(send).toHaveBeenCalledTimes(2);
 });
+
+it('offers retained fault export and explicit clear while live capture is off', async () => {
+  state.detailedDiagnostics = {
+    ...state.detailedDiagnostics!,
+    enabled: false,
+    consent: '',
+    expiresAt: 0,
+    count: 0,
+    exportConsent: 'frozen-export',
+    exportExpiresAt: Date.now() + 86400000,
+    frozenAt: Date.now(),
+    frozenCount: 1,
+  };
+  await render();
+  expect(container.querySelector('#detailed-enabled')?.getAttribute('aria-checked')).toBe('false');
+  expect(container.querySelector('#detailed-frozen')?.textContent).toContain(
+    'detailedFrozenExpires',
+  );
+  await press('#detailed-download');
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  expect(send).toHaveBeenCalledWith({ type: 'remote-detailed-preview', consent: 'frozen-export' });
+  expect(click).toHaveBeenCalledOnce();
+  await press('#detailed-clear');
+  expect(send).toHaveBeenCalledWith({ type: 'remote-detailed-set-enabled', enabled: false });
+  expect(toggle).not.toHaveBeenCalled();
+});
 it('allows immediate opt-out during a delayed direct download and discards its stale result', async () => {
   let resolve!: (value: unknown) => void;
   send.mockImplementation(

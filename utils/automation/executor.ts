@@ -27,6 +27,9 @@ import { recoveryFrameScript, type RecoveryFrameInspection } from './recovery-fr
 import { screenshotAttachment } from '../attachments';
 import { translate, workerLocale } from '../i18n';
 import { recordDiagnostic, type DiagnosticReason } from '../diagnostics';
+import { safeError, type DiagnosticEvent } from '../diagnostics-schema';
+import { markInputRecovery } from './input-checkpoint';
+type DiagnosticCode = NonNullable<DiagnosticEvent['code']>;
 import {
   CONTROL_RECOVERY_WINDOW_MS,
   CONTROL_RECOVERY_ATTEMPT_MS,
@@ -56,8 +59,30 @@ type RecoveryLease = ControlRecovery & {
   timer: ReturnType<typeof setTimeout>;
   document?: PageDocument;
   inspectionWork?: Promise<RecoveryFrameInspection>;
-  removal?: { nonce: string; deadline: number; authorized: boolean };
+  // Candidate ID -> inspected document. Child documents descend from `document`.
+  candidateDocuments?: Map<string, RecoveryDocument>;
+  // Refs from before the detach; only an automatic recovery may rebind them.
+  refs?: Map<string, ElementRef>;
+  automaticTried?: boolean;
+  removal?: {
+    automatic: boolean;
+    nonce: string;
+    deadline: number;
+    expected: Map<string, RecoveryDocument>;
+    authorized: Set<string>;
+  };
 };
+type RecoveryDocument = { documentId: string; frameId: number; url: string };
+// Bounds the child documents injected during one inspection.
+const RECOVERY_CHILD_DOCUMENTS = 24;
+// Automatic reattachment waits for transient foreign UI to leave, then tries once.
+const AUTO_RECOVERY_SETTLE_MS = 150;
+const AUTO_RECOVERY_WAIT_MS = 5_000;
+const AUTO_RECOVERY_TASK_LIMIT = 6;
+const AUTO_RECOVERY_BURST_LIMIT = 3;
+const AUTO_RECOVERY_BURST_MS = 30_000;
+const autoRecoveryAttempts = new WeakMap<Scope, number[]>();
+let recoveredRefs: Map<string, ElementRef> | undefined;
 let recovery: RecoveryLease | undefined;
 let initializingFrames: { tabId: number; valid: () => boolean } | undefined;
 const recoveryAttempts = new WeakMap<Scope, number[]>();
@@ -67,6 +92,10 @@ let recoveryHooks:
   | {
       enabled: () => boolean;
       frameSelectionEnabled?: () => boolean;
+      closedShadowEnabled?: () => boolean;
+      childFramesEnabled?: () => boolean;
+      automaticEnabled?: () => boolean;
+      automaticRemovalEnabled?: () => boolean;
       onSuspended: (value: ControlRecovery) => void;
       onRevoked: (outcome: RecoveryOutcome) => void;
     }
@@ -82,7 +111,11 @@ export const currentControlRecovery = (): ControlRecovery | undefined =>
     cause: recovery.cause,
     ...(recovery.frameSelection ? { frameSelection: true as const } : {}),
     ...(recovery.inspection ? { inspection: recovery.inspection } : {}),
+    ...(recovery.removalReceipt ? { removalReceipt: recovery.removalReceipt } : {}),
   };
+export function revokeAutomaticRemoval() {
+  if (recovery?.removal?.automatic) abortControlRecovery('revoked');
+}
 export function abortControlRecovery(outcome: RecoveryOutcome = 'revoked') {
   if (recovery) {
     recovery.terminalOutcome = outcome;
@@ -114,6 +147,7 @@ function suspendControl() {
       ? { document: grantedDocument, frameSelection: true as const }
       : {}),
   };
+  lease.refs = new Map(refs);
   recovery = lease;
   grant = null;
   cursor = null;
@@ -163,6 +197,8 @@ function stopped(reason: DiagnosticReason): never {
 }
 export const currentGrant = () => (control && grant ? { ...grant } : null);
 export const currentControl = () => (control ? { ...control, tabIds: [...control.tabIds] } : null);
+export const matchesCurrentControlScope = (scope: object) =>
+  control === scope && !!grant && !recovery;
 export const browserPageVersion = () =>
   `${control?.sessionId}:${control?.tabId}:${navigationRevision}`;
 export const flushTaskPopups = () => popupQueue;
@@ -173,6 +209,7 @@ function invalidate(reason: DiagnosticReason = 'other') {
   recordDiagnostic('invalidate', reason, { source: 'executor', level: 'debug' });
   generation++;
   refs.clear();
+  recoveredRefs = undefined;
   pendingScroll = undefined;
   pointerMotion.reset();
 }
@@ -389,22 +426,27 @@ export async function release(cleanup = true, strict = false, reason: Diagnostic
   const suspended = recovery;
   recovery = undefined;
   if (suspended?.document && suspended.frameSelection) {
-    void chrome.scripting
-      .executeScript({
-        target: { tabId: suspended.tabId, documentIds: [suspended.document.documentId] },
-        world: 'ISOLATED',
-        func: recoveryFrameScript,
-        args: [
-          {
-            action: 'revoke',
-            recoveryId: suspended.recoveryId,
-            expiresAt: 0,
-            ownId: chrome.runtime.id,
-            url: suspended.url,
-          },
-        ],
-      })
-      .catch(() => {});
+    const documentIds = new Set([
+      suspended.document.documentId,
+      ...[...(suspended.candidateDocuments?.values() ?? [])].map((item) => item.documentId),
+    ]);
+    for (const documentId of documentIds)
+      void chrome.scripting
+        .executeScript({
+          target: { tabId: suspended.tabId, documentIds: [documentId] },
+          world: 'ISOLATED',
+          func: recoveryFrameScript,
+          args: [
+            {
+              action: 'revoke',
+              recoveryId: suspended.recoveryId,
+              expiresAt: 0,
+              ownId: chrome.runtime.id,
+              url: suspended.url,
+            },
+          ],
+        })
+        .catch(() => {});
   }
   if (suspended) clearTimeout(suspended.timer);
   recordControlDiagnostic(reason);
@@ -622,9 +664,13 @@ export function initializeExecutor() {
       recovery === lease &&
       !!removal &&
       lease.removal === removal &&
-      !removal.authorized &&
+      typeof sender.documentId === 'string' &&
+      removal.expected.get(sender.documentId)?.frameId === sender.frameId &&
+      removal.expected.get(sender.documentId)?.url === sender.url &&
+      !removal.authorized.has(sender.documentId) &&
       recoveryHooks?.frameSelectionEnabled?.() === true &&
       recoveryHooks.enabled() &&
+      (!removal.automatic || recoveryHooks.automaticRemovalEnabled?.() === true) &&
       control === lease.session &&
       consentRevision === lease.consent &&
       lease.attempted &&
@@ -632,9 +678,6 @@ export function initializeExecutor() {
       message.nonce === removal.nonce &&
       sender.id === chrome.runtime.id &&
       sender.tab?.id === lease.tabId &&
-      sender.frameId === 0 &&
-      sender.documentId === lease.document?.documentId &&
-      sender.url === lease.url &&
       Date.now() < Math.min(removal.deadline, lease.expiresAt);
     if (!valid()) {
       respond({ allowed: false });
@@ -646,7 +689,7 @@ export function initializeExecutor() {
         if (!valid() || !inScope(tab, lease!.session)) return false;
         await assertPageDocument(lease!.document!);
         if (!valid()) return false;
-        removal!.authorized = true;
+        removal!.authorized.add(sender.documentId!);
         return true;
       } catch {
         return false;
@@ -914,6 +957,40 @@ async function dispatchPointer(
   });
 }
 
+/** Same-tab descendants of one document, located through recorded parent document IDs. */
+async function recoveryChildDocuments(tabId: number, rootDocumentId: string) {
+  type Frame = chrome.webNavigation.GetAllFrameResultDetails & {
+    documentId?: string;
+    parentDocumentId?: string;
+  };
+  const frames = ((await chrome.webNavigation.getAllFrames({ tabId })) ?? []) as Frame[];
+  const documents: RecoveryDocument[] = [];
+  const parents = new Set([rootDocumentId]);
+  let truncated = false;
+  for (let added = true; added;) {
+    added = false;
+    for (const frame of frames) {
+      if (
+        !frame.documentId ||
+        !frame.parentDocumentId ||
+        !parents.has(frame.parentDocumentId) ||
+        parents.has(frame.documentId)
+      )
+        continue;
+      parents.add(frame.documentId);
+      added = true;
+      // Other extensions' pages cannot be scripted; their own iframe elements are found in the parent.
+      if (!/^https?:/.test(frame.url)) continue;
+      if (documents.length >= RECOVERY_CHILD_DOCUMENTS) {
+        truncated = true;
+        continue;
+      }
+      documents.push({ documentId: frame.documentId, frameId: frame.frameId, url: frame.url });
+    }
+  }
+  return { documents, truncated };
+}
+
 export async function inspectRecoveryFrames(recoveryId: string, commandDeadline = Infinity) {
   const lease = recovery;
   if (
@@ -945,31 +1022,78 @@ export async function inspectRecoveryFrames(recoveryId: string, commandDeadline 
   lease.inspectionWork ??= boundedCdp(async () => {
     await assertPageDocument(lease.document!);
     check();
-    const [result] = await chrome.scripting.executeScript({
-      target: { tabId: lease.tabId, documentIds: [lease.document!.documentId] },
-      world: 'ISOLATED',
-      func: recoveryFrameScript,
-      args: [
-        {
-          action: 'inspect',
-          recoveryId,
-          expiresAt: lease.expiresAt,
-          ownId: chrome.runtime.id,
-          url: lease.url,
-        },
-      ],
-    });
+    const allowClosedShadow = recoveryHooks?.closedShadowEnabled?.() === true;
+    const childFrames = allowClosedShadow && recoveryHooks?.childFramesEnabled?.() === true;
+    const root: RecoveryDocument = {
+      documentId: lease.document!.documentId,
+      frameId: 0,
+      url: lease.url,
+    };
+    let truncated = false;
+    let documents = [root];
+    if (childFrames) {
+      const children = await recoveryChildDocuments(lease.tabId, root.documentId);
+      check();
+      truncated = children.truncated;
+      documents = [root, ...children.documents];
+    }
+    const inspect = (target: RecoveryDocument) =>
+      chrome.scripting.executeScript({
+        target: { tabId: lease.tabId, documentIds: [target.documentId] },
+        world: 'ISOLATED',
+        func: recoveryFrameScript,
+        args: [
+          {
+            action: 'inspect',
+            recoveryId,
+            expiresAt: lease.expiresAt,
+            ownId: chrome.runtime.id,
+            url: target.url,
+            allowClosedShadow,
+          },
+        ],
+      });
+    const settled = await Promise.allSettled(documents.map(inspect));
     check();
     await assertPageDocument(lease.document!);
     check();
-    if (
-      result?.documentId !== lease.document!.documentId ||
-      result.frameId !== 0 ||
-      result.result?.error ||
-      !result.result?.inspection
-    )
-      fail('RECOVERY_UNAVAILABLE');
-    lease.inspection = result.result.inspection;
+    const candidates: RecoveryFrameInspection['candidates'] = [];
+    const owners = new Map<string, RecoveryDocument>();
+    settled.forEach((outcome, index) => {
+      const target = documents[index]!;
+      const result = outcome.status === 'fulfilled' ? outcome.value[0] : undefined;
+      const inspection =
+        result?.documentId === target.documentId &&
+        result.frameId === target.frameId &&
+        !result.result?.error
+          ? result.result?.inspection
+          : undefined;
+      // The root document is required; an unreadable child only narrows coverage.
+      if (!inspection) {
+        if (index === 0) fail('RECOVERY_UNAVAILABLE');
+        truncated = true;
+        return;
+      }
+      if (inspection.truncated) truncated = true;
+      for (const candidate of inspection.candidates) {
+        if (candidates.length >= 16) {
+          truncated = true;
+          break;
+        }
+        candidates.push(candidate);
+        owners.set(candidate.id, target);
+      }
+    });
+    lease.candidateDocuments = owners;
+    lease.inspection = {
+      candidates,
+      truncated,
+      coverage: childFrames
+        ? 'documents-open-and-closed-shadow'
+        : allowClosedShadow
+          ? 'root-document-open-and-closed-shadow'
+          : 'root-document-open-shadow',
+    };
     return lease.inspection;
   }, check);
   try {
@@ -987,16 +1111,19 @@ export async function recoverControl(
   recoveryId: string,
   commandDeadline = Infinity,
   selectedCandidateIds?: string[],
+  automatic = false,
 ) {
   const lease = recovery;
   if (!lease || lease.recoveryId !== recoveryId || lease.attempted) fail('RECOVERY_UNAVAILABLE');
-  const attempts = recoveryAttempts.get(lease.session) ?? [];
-  if (!recoveryBudgetAvailable(attempts)) {
-    abortControlRecovery('failed');
-    fail('RECOVERY_UNAVAILABLE');
+  if (!automatic) {
+    const attempts = recoveryAttempts.get(lease.session) ?? [];
+    if (!recoveryBudgetAvailable(attempts)) {
+      abortControlRecovery('failed');
+      fail('RECOVERY_UNAVAILABLE');
+    }
+    recoveryAttempts.set(lease.session, [...attempts, Date.now()]);
   }
   lease.attempted = true;
-  recoveryAttempts.set(lease.session, [...attempts, Date.now()]);
   const deadline = Math.min(
     lease.expiresAt,
     commandDeadline,
@@ -1009,6 +1136,7 @@ export async function recoverControl(
       control !== lease.session ||
       consentRevision !== lease.consent ||
       control.tabId !== lease.tabId ||
+      (automatic && selectedCandidateIds && !recoveryHooks?.automaticRemovalEnabled?.()) ||
       Date.now() >= deadline
     )
       fail('RECOVERY_UNAVAILABLE');
@@ -1049,31 +1177,61 @@ export async function recoverControl(
           fail('RECOVERY_UNAVAILABLE');
         await assertPageDocument(lease.document);
         check();
-        const removal = { nonce: crypto.randomUUID(), deadline, authorized: false };
+        // Each candidate is removed only by the document that reported it.
+        const groups = new Map<string, { target: RecoveryDocument; ids: string[] }>();
+        for (const id of selectedCandidateIds) {
+          const target = lease.candidateDocuments?.get(id) ?? {
+            documentId: lease.document.documentId,
+            frameId: 0,
+            url: lease.url,
+          };
+          const group = groups.get(target.documentId) ?? { target, ids: [] };
+          group.ids.push(id);
+          groups.set(target.documentId, group);
+        }
+        const removal = {
+          automatic,
+          nonce: crypto.randomUUID(),
+          deadline,
+          expected: new Map([...groups].map(([id, group]) => [id, group.target])),
+          authorized: new Set<string>(),
+        };
         lease.removal = removal;
-        const [result] = await chrome.scripting.executeScript({
-          target: { tabId: lease.tabId, documentIds: [lease.document.documentId] },
-          world: 'ISOLATED',
-          func: recoveryFrameScript,
-          args: [
-            {
-              action: 'remove',
-              recoveryId,
-              expiresAt: deadline,
-              ownId: chrome.runtime.id,
-              url: lease.url,
-              selected: selectedCandidateIds,
-              nonce: removal.nonce,
-            },
-          ],
-        });
+        // Persist uncertainty before dispatch: a late script may remove nodes even if attach fails.
+        lease.removalReceipt = { requested: selectedCandidateIds.length, outcome: 'unknown' };
+        recoveryHooks?.onSuspended(currentControlRecovery()!);
+        const results = await Promise.all(
+          [...groups.values()].map(({ target, ids }) =>
+            chrome.scripting
+              .executeScript({
+                target: { tabId: lease.tabId, documentIds: [target.documentId] },
+                world: 'ISOLATED',
+                func: recoveryFrameScript,
+                args: [
+                  {
+                    action: 'remove',
+                    recoveryId,
+                    expiresAt: deadline,
+                    ownId: chrome.runtime.id,
+                    url: target.url,
+                    selected: ids,
+                    nonce: removal.nonce,
+                  },
+                ],
+              })
+              .then(([result]) => ({ result, target, ids })),
+          ),
+        );
         check();
         if (
-          result?.documentId !== lease.document.documentId ||
-          result.frameId !== 0 ||
-          result.result?.error ||
-          result.result?.removed !== selectedCandidateIds.length ||
-          !removal.authorized
+          results.some(
+            ({ result, target, ids }) =>
+              result?.documentId !== target.documentId ||
+              result.frameId !== target.frameId ||
+              result.result?.error ||
+              result.result?.removed !== ids.length ||
+              !removal.authorized.has(target.documentId),
+          )
         )
           fail('RECOVERY_UNAVAILABLE');
         await assertPageDocument(lease.document);
@@ -1146,6 +1304,7 @@ export async function recoverControl(
         title: (tab.title || '').slice(0, 500),
       };
       grantedDocument = lease.document;
+      recoveredRefs = automatic ? lease.refs : undefined;
       clearTimeout(lease.timer);
       recovery = undefined;
       initializingFrames = undefined;
@@ -1192,14 +1351,281 @@ export async function recoverControl(
       }),
     ]);
   } catch (error) {
-    if (recovery === lease) abortControlRecovery(Date.now() >= deadline ? 'expired' : 'failed');
+    // A failed automatic attempt leaves the unexpired lease for the Agent's own decision.
+    if (automatic && recovery === lease && Date.now() < lease.expiresAt) lease.attempted = false;
+    else if (recovery === lease)
+      abortControlRecovery(Date.now() >= deadline ? 'expired' : 'failed');
     throw error;
   } finally {
     clearTimeout(timer);
   }
 }
 
-export async function execute(command: Command, deadline: number) {
+/** Foreign extension frames still present, and whether any document could not be checked. */
+async function foreignFramesPresent(
+  lease: RecoveryLease,
+  closedShadow: boolean,
+  childFrames: boolean,
+) {
+  if (!lease.document) return { present: 0, failed: false };
+  const root: RecoveryDocument = {
+    documentId: lease.document.documentId,
+    frameId: 0,
+    url: lease.url,
+  };
+  const children =
+    closedShadow && childFrames
+      ? await recoveryChildDocuments(lease.tabId, root.documentId)
+      : { documents: [], truncated: false };
+  const documents = [root, ...children.documents];
+  const settled = await Promise.allSettled(
+    documents.map((target) =>
+      chrome.scripting.executeScript({
+        target: { tabId: lease.tabId, documentIds: [target.documentId] },
+        world: 'ISOLATED',
+        func: recoveryFrameScript,
+        args: [
+          {
+            action: 'probe',
+            recoveryId: lease.recoveryId,
+            expiresAt: lease.expiresAt,
+            ownId: chrome.runtime.id,
+            url: target.url,
+            allowClosedShadow: closedShadow,
+          },
+        ],
+      }),
+    ),
+  );
+  let present = 0;
+  let failed = children.truncated;
+  settled.forEach((outcome) => {
+    const inspection =
+      outcome.status === 'fulfilled' ? outcome.value[0]?.result?.inspection : undefined;
+    if (inspection) {
+      present += inspection.candidates.length;
+      if (inspection.truncated) failed = true;
+    } else failed = true;
+  });
+  return { present, failed };
+}
+
+/**
+ * One extension-side reattachment, with inspected removal only under a current UI grant.
+ * Returns the fresh recovery evidence, or undefined after leaving the lease untouched.
+ */
+export async function autoRecoverControl() {
+  const lease = recovery;
+  if (!lease || lease.attempted || lease.automaticTried || !recoveryHooks?.automaticEnabled?.())
+    return undefined;
+  lease.automaticTried = true;
+  const now = Date.now();
+  const attempts = autoRecoveryAttempts.get(lease.session) ?? [];
+  if (
+    attempts.length >= AUTO_RECOVERY_TASK_LIMIT ||
+    attempts.filter((at) => now - at < AUTO_RECOVERY_BURST_MS).length >= AUTO_RECOVERY_BURST_LIMIT
+  )
+    return undefined;
+  autoRecoveryAttempts.set(lease.session, [...attempts, now]);
+  const record = (status: 'success' | 'error', code?: DiagnosticCode, count?: number) =>
+    recordDiagnostic('operation-result', undefined, {
+      source: 'executor',
+      method: 'recover-control',
+      status,
+      ...(code ? { code } : {}),
+      ...(count ? { count } : {}),
+    });
+  recordDiagnostic('operation-start', undefined, { source: 'executor', method: 'recover-control' });
+  const closedShadow = recoveryHooks?.closedShadowEnabled?.() === true;
+  const childFrames = recoveryHooks?.childFramesEnabled?.() === true;
+  // Reconnect must restore the original scan scope before another probe or attach.
+  const ready = () =>
+    recoveryHooks?.enabled() &&
+    recoveryHooks?.automaticEnabled?.() &&
+    (!closedShadow || recoveryHooks?.closedShadowEnabled?.()) &&
+    (!childFrames || recoveryHooks?.childFramesEnabled?.());
+  const until = Math.min(lease.expiresAt, now + AUTO_RECOVERY_WAIT_MS);
+  let selectedCandidateIds: string[] | undefined;
+  await new Promise((resolve) => setTimeout(resolve, AUTO_RECOVERY_SETTLE_MS));
+  // At most one probe per 100ms within the original recovery window.
+  for (;;) {
+    if (recovery !== lease || lease.attempted || Date.now() >= until) {
+      record('error', 'RECOVERY_DECLINED');
+      return undefined;
+    }
+    if (!ready()) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      continue;
+    }
+    recordDiagnostic('operation-start', undefined, {
+      source: 'executor',
+      method: 'inspect-recovery-frames',
+    });
+    const probe = await foreignFramesPresent(lease, closedShadow, childFrames).catch(() => ({
+      present: 0,
+      failed: true,
+    }));
+    const code = probe.failed
+      ? 'RECOVERY_PROBE_FAILED'
+      : probe.present
+        ? 'FOREIGN_FRAME_PRESENT'
+        : undefined;
+    recordDiagnostic('operation-result', undefined, {
+      source: 'executor',
+      method: 'inspect-recovery-frames',
+      status: code ? 'error' : 'success',
+      ...(code ? { code } : {}),
+      ...(probe.present ? { count: probe.present } : {}),
+    });
+    if (!ready()) continue;
+    if (!code) break;
+    if (!probe.failed && probe.present && recoveryHooks?.automaticRemovalEnabled?.()) {
+      try {
+        const inspected = await inspectRecoveryFrames(lease.recoveryId, until);
+        if (
+          !ready() ||
+          !recoveryHooks?.automaticRemovalEnabled?.() ||
+          !inspected?.inspection ||
+          inspected.inspection.truncated ||
+          !inspected.inspection.candidates.length
+        ) {
+          record('error', 'RECOVERY_DECLINED');
+          return undefined;
+        }
+        selectedCandidateIds = inspected.inspection.candidates.map((candidate) => candidate.id);
+        break;
+      } catch {
+        record('error', 'RECOVERY_PROBE_FAILED');
+        return undefined;
+      }
+    }
+    if (Date.now() + 100 >= until) {
+      record('error', 'RECOVERY_DECLINED');
+      return undefined;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (recovery !== lease || lease.attempted || !ready() || Date.now() >= until) return undefined;
+  try {
+    const result = await recoverControl(lease.recoveryId, Infinity, selectedCandidateIds, true);
+    record('success');
+    return result;
+  } catch (error) {
+    recordDiagnostic('operation-result', undefined, {
+      source: 'executor',
+      method: 'recover-control',
+      status: 'error',
+      code: 'RECOVERY_ATTACH_FAILED',
+      errorKind: safeError(error).errorKind,
+    });
+    return undefined;
+  }
+}
+
+/** Rebind pre-detach refs after an automatic recovery; old nodes are revalidated on use. */
+export function restoreRecoveredRefs(list: string[]) {
+  const saved = recoveredRefs;
+  if (!saved) return 0;
+  let restored = 0;
+  for (const ref of list) {
+    const entry = saved.get(ref);
+    if (!entry || refs.has(ref)) continue;
+    refs.set(ref, { ...entry, generation, rebound: true });
+    restored++;
+  }
+  return restored;
+}
+
+type InputExecution = {
+  stage: 'prepare' | 'commit';
+  consumed: boolean;
+  inputState?: unknown;
+  inputFocused?: boolean;
+  validate: () => void;
+};
+export type ExecutionOptions = { beforeInput?: () => void };
+
+export async function execute(
+  command: Command,
+  deadline: number,
+  options?: ExecutionOptions,
+): Promise<any> {
+  if (
+    !['fill', 'type'].includes(command.op) ||
+    !('ref' in command) ||
+    !command.ref ||
+    !recoveryHooks?.automaticRemovalEnabled?.() ||
+    !control ||
+    !grant ||
+    !grantedDocument ||
+    recovery
+  )
+    return executeInternal(command, deadline, options);
+  const session = control;
+  const consent = consentRevision;
+  const document = grantedDocument;
+  const ref = command.ref;
+  const savedRef = refs.get(ref);
+  if (!savedRef) return executeInternal(command, deadline, options);
+  const beforeLoss = lossRevision;
+  const validate = () => {
+    if (
+      control !== session ||
+      session.tabId !== document.tabId ||
+      consentRevision !== consent ||
+      !recoveryHooks?.automaticRemovalEnabled?.()
+    )
+      fail('STOPPED');
+    if (Date.now() >= deadline) fail('COMMAND_EXPIRED');
+    options?.beforeInput?.();
+  };
+  const checkpoint: InputExecution = { stage: 'prepare', consumed: false, validate };
+  validate();
+  let preparationError: unknown;
+  try {
+    await executeInternal(command, deadline, options, checkpoint);
+  } catch (error) {
+    validate();
+    // Chrome may reject the CDP call before delivering its onDetach event.
+    preparationError = error;
+  }
+  // Focus can detach asynchronously after its CDP acknowledgement. No text was sent yet.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  validate();
+  const suspended = recovery as RecoveryLease | undefined;
+  if (preparationError && !suspended) throw preparationError;
+  if (suspended) {
+    if (suspended.session !== session || suspended.document?.documentId !== document.documentId)
+      fail('CONTROL_SUSPENDED');
+    const recovered = await autoRecoverControl();
+    validate();
+    if (!recovered?.recovered) fail('CONTROL_SUSPENDED');
+    restoreRecoveredRefs([ref]);
+  }
+  await assertPageDocument(document);
+  validate();
+  if (checkpoint.inputState === undefined) fail('INPUT_NOT_PREPARED');
+  if (command.op === 'type' && !checkpoint.inputFocused) fail('INPUT_NOT_PREPARED');
+  const freshRef = refs.get(ref);
+  if (
+    !freshRef ||
+    freshRef.backendNodeId !== savedRef.backendNodeId ||
+    freshRef.frame.id !== savedRef.frame.id
+  )
+    fail('PAGE_CHANGED');
+  checkpoint.stage = 'commit';
+  const result = await executeInternal(command, deadline, options, checkpoint);
+  return lossRevision > beforeLoss
+    ? markInputRecovery(result, { scope: session, beforeLoss, afterLoss: lossRevision })
+    : result;
+}
+
+async function executeInternal(
+  command: Command,
+  deadline: number,
+  options?: ExecutionOptions,
+  checkpoint?: InputExecution,
+): Promise<any> {
   if (command.op === 'inspect-recovery-frames')
     return inspectRecoveryFrames(command.recoveryId, deadline);
   if (command.op === 'recover-control')
@@ -1554,6 +1980,14 @@ export async function execute(command: Command, deadline: number) {
     if (dialog) fail('DIALOG_OPEN', `${dialog.type}: ${dialog.message}; use dialog`);
     const target = { tabId: lease.id, ...(sessionId ? { sessionId } : {}) };
     const result = await boundedCdp(async () => {
+      if (method === 'Input.insertText') {
+        options?.beforeInput?.();
+        if (checkpoint) {
+          checkpoint.validate();
+          if (checkpoint.stage !== 'commit' || checkpoint.consumed) fail('STOPPED');
+          checkpoint.consumed = true;
+        }
+      }
       const value = await diagnosticSend(target, method, params);
       if (
         (command.op === 'click' &&
@@ -1628,6 +2062,21 @@ export async function execute(command: Command, deadline: number) {
     refs,
     generation: startGeneration,
     dragData: () => dragData,
+    ...(checkpoint
+      ? {
+          onInputPrepared: (state: unknown, focused = false) => {
+            checkpoint.validate();
+            if (
+              checkpoint.stage !== 'prepare' ||
+              checkpoint.inputFocused ||
+              (checkpoint.inputState !== undefined && !focused)
+            )
+              fail('INPUT_NOT_PREPARED');
+            checkpoint.inputState = state;
+            checkpoint.inputFocused = focused;
+          },
+        }
+      : {}),
   });
   let readiness:
     Awaited<ReturnType<typeof waitForStablePage>> | { status: string; note: string } | undefined;
@@ -1788,7 +2237,12 @@ export async function execute(command: Command, deadline: number) {
   dragData = null;
 
   try {
-    const result = await actions.run(command);
+    const result =
+      checkpoint && (command.op === 'fill' || command.op === 'type')
+        ? checkpoint.stage === 'prepare'
+          ? await actions.prepareInput(command)
+          : await actions.commitInput(command, undefined, checkpoint.inputState)
+        : await actions.run(command);
     if (command.op === 'scroll') pendingScroll = { ref: command.ref, x: command.x, y: command.y };
     else if (!['find', 'inspect', 'frames'].includes(command.op)) pendingScroll = undefined;
     return readiness ? { ...result, readiness } : result;

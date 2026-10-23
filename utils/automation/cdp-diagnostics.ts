@@ -173,7 +173,6 @@ export function recordDebuggerEvent(
     if (!lease) return;
     const before = state();
     if (!before.controlled || target.tabId !== before.tabId) return;
-    if (event === 'detach') hooks?.incident?.(lease.context, reason);
     const knownType = target.tabId === undefined ? undefined : targetTypes.get(target.tabId);
     emit(lease, {
       event,
@@ -190,7 +189,10 @@ export function recordDebuggerEvent(
           }
         : {}),
     });
-    if (event === 'detach') inspectTarget(lease, target, 'detach-target-state');
+    if (event === 'detach') {
+      hooks?.incident?.(lease.context, reason);
+      inspectTarget(lease, target, 'detach-target-state');
+    }
   } catch {
     /* Event listeners must not be affected by unavailable diagnostics. */
   }

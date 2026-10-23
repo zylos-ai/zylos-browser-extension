@@ -77,6 +77,8 @@ export const chatEntrySchema = z
   .object({
     id: z.string().max(128).optional(),
     role: z.enum(['user', 'assistant', 'system']),
+    // Set when a connected Agent supplied this prompt through task.start.
+    origin: z.literal('agent').optional(),
     text: z.string().max(MAX_CHAT_TEXT),
     notice: taskNoticeSchema.optional(),
     ts: z.number().int(),
@@ -119,6 +121,8 @@ export const remoteStateSchema = z.object({
     .optional(),
   detailedDiagnostics: detailStateSchema.optional(),
   diagnosticsEnabled: z.boolean().optional(),
+  agentStartEnabled: z.boolean().optional(),
+  compatibilityTaskId: z.string().optional(),
   diagnosticsConsent: z.string().optional(),
   configured: z.boolean(),
   enabled: z.boolean(),
@@ -168,6 +172,14 @@ export const initialRemoteState: RemoteState = {
 
 // Panel -> background. Only the bundled sidepanel may send these.
 export const remoteRequestSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('remote-agent-start-set-enabled'), enabled: z.boolean() }).strict(),
+  z
+    .object({
+      type: z.literal('remote-task-compatibility'),
+      taskId: z.string().min(1),
+      enabled: z.boolean(),
+    })
+    .strict(),
   z.object({ type: z.literal('remote-detailed-set-enabled'), enabled: z.boolean() }).strict(),
   z.object({ type: z.literal('remote-detailed-preview'), consent: z.string().uuid() }).strict(),
   z.object({ type: z.literal('remote-detail-share-prepare'), consent: z.string().uuid() }).strict(),

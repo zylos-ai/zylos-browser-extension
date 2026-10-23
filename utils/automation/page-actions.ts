@@ -14,9 +14,16 @@ import {
   type Rect,
 } from './viewport';
 
-export type ElementRef = { backendNodeId: number; generation: number; frame: Frame };
+export type ElementRef = {
+  backendNodeId: number;
+  generation: number;
+  frame: Frame;
+  // Restored after an automatic reattachment: frame sessions were recreated.
+  rebound?: boolean;
+};
 export type Target = { ref?: string; x?: number; y?: number };
 export type Element = { objectId: string; frame: Frame };
+export type InputCommand = Extract<Command, { op: 'fill' | 'type' }>;
 export type ActionsIO = {
   send: Send;
   mouse: (params: Record<string, unknown>) => Promise<unknown>;
@@ -25,6 +32,8 @@ export type ActionsIO = {
   refs: Map<string, ElementRef>;
   generation: number;
   dragData: () => any;
+  beforeInput?: () => void;
+  onInputPrepared?: (state: unknown, focused?: boolean) => void;
 };
 function fail(code: string, message = code): never {
   throw Object.assign(new Error(message), { code });
@@ -33,6 +42,41 @@ const mask = (values: string[] = []) =>
   values.reduce((n, v) => n | ({ Alt: 1, Control: 2, Meta: 4, Shift: 8 }[v] || 0), 0);
 export class PageActions {
   constructor(private io: ActionsIO) {}
+  async prepareInput(command: InputCommand): Promise<Element> {
+    const element = await this.resolve(command.ref);
+    let initialState: { value: unknown } | undefined;
+    if (this.io.onInputPrepared) {
+      const state = await this.call(element, 'read-input-state');
+      initialState = state;
+      this.io.onInputPrepared(state, false);
+    }
+    const point = await this.call(element, 'prepare-input');
+    await this.io.preview(
+      'input',
+      await this.topPoint(element.frame, point, await this.safeFrames()),
+    );
+    if (this.io.onInputPrepared && command.op === 'type') {
+      const state = await this.call(element, 'read-input-state');
+      if (!initialState || state.value !== initialState.value)
+        fail('ELEMENT_ERROR', 'Input value changed during preparation');
+      this.io.onInputPrepared(state, true);
+    }
+    return element;
+  }
+  async commitInput(command: InputCommand, prepared?: Element, expectedState?: unknown) {
+    const element = prepared ?? (await this.resolve(command.ref));
+    // Commit deliberately does not focus again after a recovery checkpoint.
+    await this.call(
+      element,
+      'commit-input',
+      expectedState === undefined
+        ? command.op === 'fill'
+        : { replace: command.op === 'fill', expected: expectedState },
+    );
+    this.io.beforeInput?.();
+    await this.io.send('Input.insertText', { text: command.text });
+    return { done: true };
+  }
   async frames(onUnavailable?: (frame: Frame) => void) {
     return collectFrames(this.io.send, onUnavailable);
   }
@@ -96,7 +140,7 @@ export class PageActions {
     const frame = frames.find(
       (f) =>
         f.id === entry.frame.id &&
-        f.sessionId === entry.frame.sessionId &&
+        (entry.rebound || f.sessionId === entry.frame.sessionId) &&
         f.url === entry.frame.url,
     );
     if (!frame) fail('STALE_ELEMENT', 'Element frame navigated or is no longer available');
@@ -654,15 +698,8 @@ export class PageActions {
         return this.keypress(command);
       case 'fill':
       case 'type': {
-        const element = await this.resolve(command.ref);
-        const point = await this.call(element, 'prepare-input');
-        await this.io.preview(
-          'input',
-          await this.topPoint(element.frame, point, await this.safeFrames()),
-        );
-        await this.call(element, 'commit-input', command.op === 'fill');
-        await this.io.send('Input.insertText', { text: command.text });
-        return { done: true };
+        const element = await this.prepareInput(command);
+        return this.commitInput(command, element);
       }
       case 'select':
         return this.call(await this.resolve(command.ref), 'select', command.values);

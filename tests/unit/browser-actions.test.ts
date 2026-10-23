@@ -50,6 +50,46 @@ beforeEach(() => {
 });
 
 describe('local browser dispatch', () => {
+  it('checks owner input and cancellation at the private text dispatch boundary', async () => {
+    const beforeInput = vi.fn(() => {
+      throw new Error('new owner input');
+    });
+    executor.execute.mockImplementationOnce(async (_command, _deadline, options) => {
+      options.beforeInput();
+      throw new Error('must not dispatch text');
+    });
+    await expect(
+      dispatch(
+        {
+          method: 'fill',
+          params: { ref: '@12345678-e1', text: 'dummy' },
+          keyId: 'endpoint',
+          requestId: 'input-guard',
+        },
+        idem,
+        undefined,
+        undefined,
+        beforeInput,
+      ),
+    ).rejects.toThrow('new owner input');
+    expect(beforeInput).toHaveBeenCalledTimes(1);
+    executor.execute.mockImplementationOnce(async (_command, _deadline, options) => {
+      idem.cancel();
+      options.beforeInput();
+      throw new Error('must not dispatch text');
+    });
+    await expect(
+      dispatch(
+        {
+          method: 'type',
+          params: { ref: '@12345678-e1', text: 'dummy' },
+          keyId: 'endpoint',
+          requestId: 'cancel-guard',
+        },
+        idem,
+      ),
+    ).rejects.toMatchObject({ code: 'STOPPED' });
+  });
   it('dispatches a DOM read without control or preview activation', async () => {
     context.readPageContext.mockResolvedValue({ text: 'article' });
     const onExecute = vi.fn();

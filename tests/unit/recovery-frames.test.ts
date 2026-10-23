@@ -9,6 +9,7 @@ const options = () => ({
   expiresAt: Date.now() + 120000,
   ownId,
   url: location.href,
+  allowClosedShadow: true,
 });
 const iframe = (src: string, parent: ParentNode = document.body) => {
   const node = document.createElement('iframe');
@@ -113,4 +114,141 @@ it('bounds candidate storage and reports truncation without deleting anything', 
   expect(result.inspection?.candidates).toHaveLength(16);
   expect(result.inspection?.truncated).toBe(true);
   expect(document.querySelectorAll('iframe')).toHaveLength(25);
+});
+
+it('discovers nested closed roots and preserves exclusions and selected identity checks', async () => {
+  const roots = new Map<Element, ShadowRoot>();
+  (chrome as any).dom = {
+    openOrClosedShadowRoot: (node: Element) => roots.get(node) ?? node.shadowRoot,
+  };
+  const outer = document.createElement('div');
+  document.body.append(outer);
+  const root = outer.attachShadow({ mode: 'closed' });
+  roots.set(outer, root);
+  const nested = document.createElement('div');
+  root.append(nested);
+  const inner = nested.attachShadow({ mode: 'closed' });
+  roots.set(nested, inner);
+  const foreign = iframe(`chrome-extension://${extensionId}/private`, inner);
+  const own = iframe(`chrome-extension://${ownId}/private`, inner);
+  const http = iframe('https://example.test/', inner);
+  const inline = iframe(`chrome-extension://${extensionId}/inline`, inner);
+  inline.srcdoc = '<p>control</p>';
+  const input = options();
+  const result = await recoveryFrameScript(input);
+  expect(result.inspection?.coverage).toBe('root-document-open-and-closed-shadow');
+  expect(result.inspection?.candidates).toHaveLength(1);
+  expect(foreign.isConnected).toBe(true);
+  expect(
+    await recoveryFrameScript({
+      ...input,
+      action: 'remove',
+      selected: [result.inspection!.candidates[0]!.id],
+      nonce: 'nonce',
+    }),
+  ).toEqual({ removed: 1 });
+  expect(foreign.isConnected).toBe(false);
+  expect(own.isConnected && http.isConnected && inline.isConnected).toBe(true);
+});
+
+it('reports incomplete broad coverage when privileged shadow inspection throws', async () => {
+  (chrome as any).dom = {
+    openOrClosedShadowRoot: () => {
+      throw new Error('unavailable');
+    },
+  };
+  const host = document.createElement('div');
+  document.body.append(host);
+  iframe(`chrome-extension://${extensionId}/open`, host.attachShadow({ mode: 'open' }));
+  const result = await recoveryFrameScript(options());
+  expect(result.inspection?.coverage).toBe('root-document-open-and-closed-shadow');
+  expect(result.inspection?.truncated).toBe(true);
+  expect(result.inspection?.candidates).toHaveLength(1);
+});
+
+it.each([false, undefined])(
+  'uses only open roots when closed-root support is %s',
+  async (allowClosedShadow) => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = host.attachShadow({ mode: 'closed' });
+    const access = vi.fn((node: Element) => (node === host ? root : node.shadowRoot));
+    (chrome as any).dom = { openOrClosedShadowRoot: access };
+    iframe(`chrome-extension://${extensionId}/closed`, root);
+    iframe(`chrome-extension://${extensionId}/light`);
+    const result = await recoveryFrameScript({ ...options(), allowClosedShadow });
+    expect(result.inspection?.coverage).toBe('root-document-open-shadow');
+    expect(result.inspection?.candidates).toHaveLength(1);
+    expect(result.inspection?.truncated).toBe(false);
+    expect(access).not.toHaveBeenCalled();
+  },
+);
+
+it('retains broad coverage if privileged inspection fails after finding a closed-root candidate', async () => {
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = host.attachShadow({ mode: 'closed' });
+  const frame = iframe(`chrome-extension://${extensionId}/closed`, root);
+  (chrome as any).dom = {
+    openOrClosedShadowRoot: (node: Element) => {
+      if (node === frame) throw new Error('access lost');
+      return node === host ? root : node.shadowRoot;
+    },
+  };
+  const result = await recoveryFrameScript(options());
+  expect(result.inspection?.coverage).toBe('root-document-open-and-closed-shadow');
+  expect(result.inspection?.candidates).toHaveLength(1);
+  expect(result.inspection?.truncated).toBe(true);
+});
+
+it('rejects replaced closed-root candidates without removing their replacements', async () => {
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = host.attachShadow({ mode: 'closed' });
+  (chrome as any).dom = {
+    openOrClosedShadowRoot: (node: Element) => (node === host ? root : node.shadowRoot),
+  };
+  const original = iframe(`chrome-extension://${extensionId}/frame`, root);
+  const input = options();
+  const inspected = await recoveryFrameScript(input);
+  const replacement = original.cloneNode();
+  original.replaceWith(replacement);
+  expect(
+    await recoveryFrameScript({
+      ...input,
+      action: 'remove',
+      selected: [inspected.inspection!.candidates[0]!.id],
+      nonce: 'nonce',
+    }),
+  ).toEqual({ error: 'RECOVERY_CANDIDATE_CHANGED' });
+  expect(replacement.isConnected).toBe(true);
+});
+it('finds a closed-root extension frame after SVG content, as Chrome rejects non-HTML elements', async () => {
+  const closedRoots = new WeakMap<Element, ShadowRoot>();
+  vi.stubGlobal('chrome', {
+    runtime: { sendMessage: vi.fn(async () => ({ allowed: true })) },
+    dom: {
+      openOrClosedShadowRoot: (element: Element) => {
+        if (!(element instanceof HTMLElement))
+          throw new Error('Error in invocation of dom.openOrClosedShadowRoot(HTMLElement element)');
+        return closedRoots.get(element) ?? element.shadowRoot;
+      },
+    },
+  });
+  document.body.innerHTML = '<svg><g><path></path></g></svg><svg></svg>';
+  // 1Password-style: a custom host at the end of body, closed root, extension iframe.
+  const host = document.createElement('com-1password-menu');
+  const root = host.attachShadow({ mode: 'closed' });
+  closedRoots.set(host, root);
+  document.body.append(host);
+  iframe(`chrome-extension://${extensionId}/inline/menu/menu.html`, root);
+  const result = await recoveryFrameScript(options());
+  expect(result.inspection).toMatchObject({
+    truncated: false,
+    coverage: 'root-document-open-and-closed-shadow',
+  });
+  expect(result.inspection?.candidates).toHaveLength(1);
+  const probe = await recoveryFrameScript({ ...options(), action: 'probe' });
+  expect(probe.inspection?.candidates).toHaveLength(1);
+  expect((globalThis as any).__zylosRecoveryFrames.size).toBe(1);
 });

@@ -36,6 +36,13 @@ import { DetailedSharing } from '../../utils/detailed-sharing';
 import { installDetailedRuntime } from '../../utils/detailed-runtime';
 import { IncidentCapture } from '../../utils/incident-bundle';
 import {
+  AGENT_TASK_START_CAPABILITY,
+  TaskStartLedger,
+  taskStartSchema,
+  taskStartError,
+  waitForTaskPage,
+} from '../../utils/agent-task-start';
+import {
   configureCdpDiagnostics,
   refreshCdpDiagnostics,
 } from '../../utils/automation/cdp-diagnostics';
@@ -45,8 +52,10 @@ import { safeError } from '../../utils/diagnostics-schema';
 import { captureCurrentPage, clearPageContexts, forgetPageContext } from '../../utils/page-context';
 import {
   completeTask,
+  createTask,
   abortControlRecovery,
   configureControlRecovery,
+  revokeAutomaticRemoval,
   currentControl,
   currentGrant,
   diagnosticNavigationRevision,
@@ -111,6 +120,10 @@ const BACKOFF_MIN_MS = 1000;
 const BACKOFF_MAX_MS = 60_000;
 const KEEPALIVE_ALARM = 'remote-keepalive';
 const HANDSHAKE_TIMEOUT_MS = 10000;
+// Three missed 17s relay heartbeats plus scheduling/network jitter.
+const TRANSPORT_STALE_MS = 60_000;
+// An edge that accepts TCP but never answers the upgrade must not pin CONNECTING.
+const TRANSPORT_CONNECT_MS = 15_000;
 
 export function startRemoteBackground() {
   installRuntimeDiagnostics(({ event, ...metadata }) =>
@@ -126,12 +139,39 @@ export function startRemoteBackground() {
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   const idem = new IdempotencyCache();
   let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
+  let freshnessTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastInboundAt = 0;
+  let connectStartedAt = 0;
+  let expireTransport: ((code: 'HEARTBEAT_TIMEOUT' | 'CONNECT_TIMEOUT') => void) | undefined;
   let loopReady = false;
   let controlRecoveryReady = false;
   let frameSelectionReady = false;
+  let closedShadowReady = false;
+  let childFramesReady = false;
   let attachmentsReady = false;
   let interruptReady = false;
   let sendingChat = false;
+  let agentStartEnabled = false;
+  let compatibilityTaskId: string | undefined;
+  let compatibilityLoopId: string | undefined;
+  function compatibilityEnabled() {
+    const control = currentControl();
+    if (
+      !state.connected ||
+      !loop?.active ||
+      !control ||
+      control.phase === 'finished' ||
+      compatibilityTaskId !== control.sessionId ||
+      loop.taskId !== compatibilityLoopId
+    )
+      compatibilityTaskId = undefined;
+    return !!compatibilityTaskId;
+  }
+  let agentStartRevision = 0;
+  let agentStartedTask: string | undefined;
+  let agentStartPending = false;
+  let agentStartReady = false;
+  const taskStarts = new TaskStartLedger();
   let panelMutations: Promise<unknown> = Promise.resolve();
   let stopTaskPromise: Promise<void> | undefined;
   let pendingStop: { taskId: string; resolve: (ok: boolean) => void } | undefined;
@@ -140,16 +180,16 @@ export function startRemoteBackground() {
   let incidents: IncidentCapture | undefined;
   const sharing = new DetailedSharing(() => publish());
   const detailed = new DetailedCapture(
-    () => {
+    (reason) => {
       sharing.revoke();
-      incidents?.clear();
+      if (reason === 'changed' || reason === 'capture-expired') incidents?.clear();
       refreshCdpDiagnostics();
       publish();
     },
     () => [config.key],
   );
   const shareContext = () => ({
-    ...detailed.state(),
+    ...detailed.exportContext(),
     generation,
     recipient: config.relayUrl,
     connected: state.connected && loopReady && socket?.readyState === WebSocket.OPEN,
@@ -169,18 +209,27 @@ export function startRemoteBackground() {
         control && control.groupId !== null ? ('assigned' as const) : ('none' as const),
     };
   };
-  incidents = new IncidentCapture(() => {
-    const consent = detailed.state().consent;
-    return consent
-      ? {
-          consent,
-          generation: currentDetailedTaskGeneration(),
-          navigation: diagnosticNavigationRevision(),
-          tabId: currentControl()?.tabId,
-        }
-      : { consent: '', generation: 0, navigation: 0 };
-  }, incidentRuntime);
+  incidents = new IncidentCapture(
+    () => {
+      const consent = detailed.state().consent;
+      return consent
+        ? {
+            consent,
+            generation: currentDetailedTaskGeneration(),
+            navigation: diagnosticNavigationRevision(),
+            tabId: currentControl()?.tabId,
+          }
+        : { consent: '', generation: 0, navigation: 0 };
+    },
+    incidentRuntime,
+    () => {
+      const token = detailed.state().consent;
+      if (token)
+        detailed.freeze(token, incidents!.bundle(detailed.preview(token), incidentRuntime()));
+    },
+  );
   const incidentPreview = (consent: string) =>
+    detailed.frozenPreview(consent) ??
     incidents!.bundle(detailed.preview(consent), incidentRuntime());
   configureCdpDiagnostics({
     capture: () => {
@@ -299,6 +348,8 @@ export function startRemoteBackground() {
     void chrome.runtime.sendMessage({ type: 'remote-updated', state: snapshot() }).catch(() => {});
   };
   function snapshot(): RemoteState {
+    state.agentStartEnabled = agentStartEnabled;
+    state.compatibilityTaskId = compatibilityEnabled() ? compatibilityTaskId : undefined;
     state.detailedDiagnostics = detailed.state();
     state.detailedSharing = sharing.state();
     state.diagnosticsEnabled = diagnosticsEnabled();
@@ -432,6 +483,7 @@ export function startRemoteBackground() {
 
   // ---------------------------------------------------------------- socket
   const sendRaw = (frame: Record<string, unknown>) => {
+    checkTransportFreshness();
     if (socket?.readyState !== WebSocket.OPEN) return false;
     try {
       socket.send(JSON.stringify(frame));
@@ -548,6 +600,11 @@ export function startRemoteBackground() {
                 preview.resume(method);
                 publish();
               },
+              () => {
+                assertActive();
+                if (hasUpdates()) throw taskStartError('OWNER_INPUT_REQUIRED');
+                if (!state.connected) throw taskStartError('EXT_OFFLINE');
+              },
             );
             assertActive();
             incidents?.end(incidentOperation, 'completed');
@@ -570,15 +627,6 @@ export function startRemoteBackground() {
           } catch (error) {
             incidents?.end(incidentOperation, 'error');
             if (
-              operationConsent &&
-              detailed.valid(operationConsent) &&
-              operationGeneration === currentDetailedTaskGeneration()
-            )
-              incidents?.trigger(
-                { task: diagnosticOperation.task, operation: diagnosticOperation.op },
-                'operation-error',
-              );
-            if (
               detailed.valid(operationConsent) &&
               operationGeneration === currentDetailedTaskGeneration()
             )
@@ -592,6 +640,15 @@ export function startRemoteBackground() {
                   ...serializeDetail([error], [config.key]),
                 },
                 { task: diagnosticOperation.task, operation: diagnosticOperation.op },
+              );
+            if (
+              operationConsent &&
+              detailed.valid(operationConsent) &&
+              operationGeneration === currentDetailedTaskGeneration()
+            )
+              incidents?.trigger(
+                { task: diagnosticOperation.task, operation: diagnosticOperation.op },
+                'operation-error',
               );
             endDiagnosticOperation(diagnosticOperation, error, true);
             const e = error as { code?: string; message?: string };
@@ -684,13 +741,18 @@ export function startRemoteBackground() {
   });
 
   configureControlRecovery({
+    automaticRemovalEnabled: compatibilityEnabled,
     enabled: () => controlRecoveryReady && loop.controlRecoveryAllowed,
     frameSelectionEnabled: () => frameSelectionReady && controlRecoveryReady,
+    closedShadowEnabled: () => closedShadowReady && frameSelectionReady && controlRecoveryReady,
+    childFramesEnabled: () => childFramesReady,
+    automaticEnabled: () => controlRecoveryReady && loop.controlRecoveryAllowed,
     onSuspended: (recovery) => loop.suspendRecovery(recovery),
     onRevoked: (outcome) => loop.endRecovery(outcome),
   });
 
   function cancelLoop(status: 'stopped' | 'interrupted', interrupt = false) {
+    compatibilityTaskId = undefined;
     state.agentActivity = undefined;
     chatRevision++; // Also invalidate a message still collecting its initial page overview.
     const taskId = loop.taskId;
@@ -777,6 +839,15 @@ export function startRemoteBackground() {
     return stopTaskPromise;
   }
 
+  function revokeAgentStarts() {
+    agentStartEnabled = false;
+    agentStartRevision++;
+    if (agentStartPending || (loop.active && loop.taskId === agentStartedTask))
+      return stopCurrentTask();
+    publish();
+    return Promise.resolve();
+  }
+
   function scheduleReconnect() {
     clearTimeout(reconnectTimer);
     if (!config.enabled || !state.configured || reconnectBlocked) return;
@@ -785,7 +856,25 @@ export function startRemoteBackground() {
     backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
   }
 
+  function checkTransportFreshness() {
+    if (!expireTransport) return;
+    if (socket?.readyState === WebSocket.OPEN && Date.now() - lastInboundAt >= TRANSPORT_STALE_MS)
+      expireTransport('HEARTBEAT_TIMEOUT');
+    else if (
+      socket?.readyState === WebSocket.CONNECTING &&
+      Date.now() - connectStartedAt >= TRANSPORT_CONNECT_MS
+    )
+      expireTransport('CONNECT_TIMEOUT');
+  }
+
+  function armFreshnessTimer() {
+    clearTimeout(freshnessTimer);
+    freshnessTimer = setTimeout(checkTransportFreshness, TRANSPORT_STALE_MS);
+  }
+
   function disconnect(reason: string) {
+    clearTimeout(freshnessTimer);
+    expireTransport = undefined;
     sharing.revoke();
     if (socket) recordDiagnostic('socket-close', 'remote_disconnect', { closeCode: 1000 });
     if (loop.active) {
@@ -803,6 +892,9 @@ export function startRemoteBackground() {
     loopReady = false;
     controlRecoveryReady = false;
     frameSelectionReady = false;
+    closedShadowReady = false;
+    childFramesReady = false;
+    agentStartReady = false;
     interruptReady = false;
     clearTimeout(handshakeTimer);
     preview.finish('interrupted');
@@ -850,8 +942,13 @@ export function startRemoteBackground() {
       return;
     }
     socket = ws;
+    connectStartedAt = Date.now();
+    clearTimeout(freshnessTimer);
+    freshnessTimer = setTimeout(checkTransportFreshness, TRANSPORT_CONNECT_MS);
     ws.onopen = () => {
       if (gen !== generation) return;
+      lastInboundAt = Date.now();
+      armFreshnessTimer();
       recordLifecycle('transport-open');
       backoff = BACKOFF_MIN_MS;
       state.connected = false;
@@ -862,6 +959,9 @@ export function startRemoteBackground() {
         type: 'hello',
         version: REMOTE_VERSION,
         capabilities: [
+          AGENT_TASK_START_CAPABILITY,
+          'recovery-closed-shadow-v1',
+          'recovery-child-frames-v1',
           'diagnostics-detail-share-v1',
           'diagnostics-incident-bundle-v2',
           CONTROL_RECOVERY_CAPABILITY,
@@ -887,13 +987,18 @@ export function startRemoteBackground() {
       }, HANDSHAKE_TIMEOUT_MS);
       publish();
     };
-    ws.onclose = (ev) => {
+    const transportClosed = (ev: { code: number }) => {
       if (gen === generation) sharing.revoke();
       if (gen !== generation) return;
+      generation++;
+      clearTimeout(freshnessTimer);
+      expireTransport = undefined;
       state.connected = false;
       recordDiagnostic('socket-close', 'remote_disconnect', {
         closeCode: ev.code >= 1000 && ev.code <= 4999 ? ev.code : undefined,
       });
+      // Transport loss pauses control; report it with the negotiated control-lost trigger.
+      incidents?.trigger(detailedContext(), 'control-lost');
       const terminalClose = [4001, 4002, 4004, 4005].includes(ev.code);
       const freshRetry = ev.code === 4005 && !freshRecoveryAttempted;
       if (freshRetry) freshRecoveryAttempted = true;
@@ -913,6 +1018,9 @@ export function startRemoteBackground() {
       loopReady = false;
       controlRecoveryReady = false;
       frameSelectionReady = false;
+      closedShadowReady = false;
+      childFramesReady = false;
+      agentStartReady = false;
       state.steeringSupported = false;
       interruptReady = false;
       clearTimeout(handshakeTimer);
@@ -933,6 +1041,20 @@ export function startRemoteBackground() {
       publish();
       if (!reconnectBlocked) scheduleReconnect();
     };
+    ws.onclose = transportClosed;
+    expireTransport = (code) => {
+      if (gen !== generation) return;
+      recordLifecycle('transport-error', { level: 'warn', code });
+      transportClosed({ code: 1006 });
+      try {
+        ws.close(
+          4000,
+          code === 'CONNECT_TIMEOUT' ? 'relay connect timed out' : 'relay heartbeat expired',
+        );
+      } catch {
+        // Local invalidation already fenced this socket's late callbacks.
+      }
+    };
     ws.onerror = () => {
       if (gen !== generation) return;
       recordLifecycle('transport-error', { level: 'error', code: 'SOCKET_ERROR' });
@@ -940,6 +1062,7 @@ export function startRemoteBackground() {
       publish();
     };
     ws.onmessage = (ev) => {
+      checkTransportFreshness();
       if (gen !== generation) return;
       void onFrame(String(ev.data), gen);
     };
@@ -959,6 +1082,9 @@ export function startRemoteBackground() {
       return;
     }
     const m = frame.data;
+    if (gen !== generation) return;
+    lastInboundAt = Date.now();
+    armFreshnessTimer();
     switch (m.type) {
       case 'ready':
         clearTimeout(handshakeTimer);
@@ -1004,6 +1130,9 @@ export function startRemoteBackground() {
         state.endpointId = m.endpointId;
         recordLifecycle('transport-ready');
         attachmentsReady = m.capabilities.includes(ATTACHMENT_CAPABILITY);
+        agentStartReady = m.capabilities.includes(AGENT_TASK_START_CAPABILITY);
+        closedShadowReady = m.capabilities.includes('recovery-closed-shadow-v1');
+        childFramesReady = m.capabilities.includes('recovery-child-frames-v1');
         state.steeringSupported = m.capabilities.includes(STEER_CAPABILITY);
         interruptReady = m.capabilities.includes(INTERRUPT_CAPABILITY);
         loopReady = true;
@@ -1108,6 +1237,118 @@ export function startRemoteBackground() {
       }
       return;
     }
+    if (m.method === 'task.start') {
+      try {
+        const input = taskStartSchema.parse(m.params);
+        if (!agentStartReady) throw taskStartError('TASK_START_UNSUPPORTED');
+        if (!agentStartEnabled) throw taskStartError('TASK_START_DISABLED');
+        const revision = agentStartRevision;
+        const chatEpoch = chatRevision;
+        const check = () => {
+          if (!agentStartEnabled || revision !== agentStartRevision || chatEpoch !== chatRevision)
+            throw taskStartError('TASK_START_REVOKED');
+          if (gen !== generation || !state.connected || !loopReady)
+            throw taskStartError('EXT_OFFLINE');
+        };
+        const result = await taskStarts.run(input, async () => {
+          check();
+          if (
+            loop.active ||
+            sendingChat ||
+            stopTaskPromise ||
+            completionPending() ||
+            currentControl()
+          )
+            throw taskStartError('TASK_START_CONFLICT');
+          sendingChat = true;
+          agentStartPending = true;
+          const id = crypto.randomUUID();
+          try {
+            publish();
+            const win = await chrome.windows.getLastFocused({ windowTypes: ['normal'] });
+            check();
+            if (win.incognito || win.id === undefined) throw taskStartError('TASK_START_CONFLICT');
+            const [source] = await chrome.tabs.query({ active: true, windowId: win.id });
+            check();
+            if (source?.id === undefined || source.incognito)
+              throw taskStartError('TASK_START_CONFLICT');
+            await createTask({
+              sourceTabId: source.id,
+              windowId: win.id,
+              url: input.url,
+              taskId: id,
+            });
+            check();
+            const control = currentControl();
+            if (!control || control.sessionId !== id) throw taskStartError('TASK_START_REVOKED');
+            const { context, page } = await waitForTaskPage(
+              control.tabId,
+              control.windowId,
+              () => {
+                check();
+                const owned = currentControl();
+                if (owned?.sessionId !== id || owned.tabId !== control.tabId)
+                  throw taskStartError('TASK_START_REVOKED');
+              },
+              () => captureCurrentPage(id, control.windowId, control.tabId),
+            );
+            check();
+            const ts = Date.now();
+            await appendChat({
+              id,
+              role: 'user',
+              origin: 'agent',
+              text: input.prompt,
+              ts,
+              delivery: 'sent',
+              page,
+              loopStatus: 'active',
+              agentHistory: { status: 'running', startedAt: ts, events: [], dropped: 0 },
+            });
+            check();
+            startDiagnosticTask();
+            setRecovery(undefined);
+            state.error = '';
+            agentStartedTask = id;
+            loop.start(
+              id,
+              { role: 'user', content: [{ type: 'text', text: input.prompt }] },
+              context,
+            );
+            return { requestId: input.requestId, taskId: id, status: 'started' as const };
+          } catch (error) {
+            forgetPageContext(id);
+            if (currentControl()?.sessionId === id)
+              await release(true, false, 'panel_stop').catch(() => {});
+            const entry = state.chat.find((item) => item.id === id);
+            if (entry) {
+              entry.loopStatus = 'interrupted';
+              if (entry.agentHistory) {
+                entry.agentHistory.status = 'interrupted';
+                entry.agentHistory.endedAt = Date.now();
+              }
+              await persistChat().catch(() => {});
+            }
+            throw error;
+          } finally {
+            sendingChat = false;
+            agentStartPending = false;
+            publish();
+          }
+        });
+        reply({ type: 'resp', result });
+      } catch (error) {
+        reply({
+          type: 'error',
+          code:
+            error instanceof z.ZodError
+              ? 'BAD_PARAMS'
+              : (error as { code?: string }).code || 'TASK_START_CONFLICT',
+          message: 'Browser task could not start',
+        });
+      }
+      return;
+    }
     if (m.method === 'diagnostics.get') {
       try {
         reply({ type: 'resp', result: await getDiagnostics(m.params) });
@@ -1175,6 +1416,8 @@ export function startRemoteBackground() {
     state.keyId = config.key ? await keyIdOf(config.key) : '';
     snapshot();
     if (!changed) return;
+    agentStartEnabled = false;
+    agentStartRevision++;
     clearPageContexts();
     disconnect('config changed');
     backoff = BACKOFF_MIN_MS;
@@ -1250,6 +1493,7 @@ export function startRemoteBackground() {
     if (alarm.name !== KEEPALIVE_ALARM) return;
     void boot.then(() => {
       expireDiagnostics();
+      checkTransportFreshness();
       if (
         !socket &&
         config.enabled &&
@@ -1268,6 +1512,7 @@ export function startRemoteBackground() {
     if (!parsed.success) return false;
     const run = async () => {
       await boot;
+      checkTransportFreshness();
       const m = parsed.data;
       switch (m.type) {
         case 'remote-detailed-set-enabled':
@@ -1278,7 +1523,7 @@ export function startRemoteBackground() {
           return incidentPreview(m.consent);
         case 'remote-detail-share-prepare': {
           const result = await sharing.prepare(incidentPreview(m.consent), shareContext());
-          if (!detailed.valid(m.consent)) {
+          if (!detailed.validExport(m.consent)) {
             sharing.revoke();
             throw new Error('ui.error.detailedExpired');
           }
@@ -1290,7 +1535,7 @@ export function startRemoteBackground() {
           sharing.revoke();
           return { revoked: true };
         case 'remote-detailed-validate':
-          return { valid: detailed.valid(m.consent) };
+          return { valid: detailed.validExport(m.consent) };
         case 'remote-detailed-event':
           return { accepted: detailed.append(m.consent, 'sidepanel', m.event, detailedContext()) };
         case 'remote-diagnostics-event':
@@ -1300,6 +1545,30 @@ export function startRemoteBackground() {
           publish();
           return snapshot();
         case 'remote-state':
+          return snapshot();
+        case 'remote-task-compatibility': {
+          const control = currentControl();
+          if (
+            !state.connected ||
+            !loop.active ||
+            !control ||
+            control.phase === 'finished' ||
+            control.sessionId !== m.taskId
+          )
+            throw taskStartError('TASK_START_REVOKED');
+          compatibilityTaskId = m.enabled ? m.taskId : undefined;
+          compatibilityLoopId = m.enabled ? loop.taskId : undefined;
+          if (!m.enabled) revokeAutomaticRemoval();
+          publish();
+          return snapshot();
+        }
+        case 'remote-agent-start-set-enabled':
+          if (!m.enabled) await revokeAgentStarts();
+          else {
+            agentStartEnabled = true;
+            agentStartRevision++;
+          }
+          publish();
           return snapshot();
         case 'remote-save': {
           const next = remoteConfigSchema.parse({
@@ -1311,7 +1580,9 @@ export function startRemoteBackground() {
           // Revoke sharing before persisting a different recipient. A worker
           // suspension between these writes must never expose the old records.
           if (next.key !== config.key || next.relayUrl !== config.relayUrl) {
+            const stopped = revokeAgentStarts();
             detailed.clear();
+            await stopped;
             await setDiagnosticsEnabled(false);
           }
           await diagnosticStorage('write', () =>
@@ -1321,7 +1592,11 @@ export function startRemoteBackground() {
           return snapshot();
         }
         case 'remote-set-enabled': {
-          if (config.enabled !== m.enabled) detailed.clear();
+          if (config.enabled !== m.enabled) {
+            const stopped = revokeAgentStarts();
+            detailed.clear();
+            await stopped;
+          }
           const next = { ...config, enabled: m.enabled };
           await diagnosticStorage('write', () =>
             chrome.storage.local.set({ [REMOTE_CONFIG_KEY]: next }),
@@ -1466,6 +1741,8 @@ export function startRemoteBackground() {
     // A second panel must not re-enable sharing between recipient revocation
     // and the durable connection update. Serialize these whole transactions.
     const mutatesConsent = [
+      'remote-agent-start-set-enabled',
+      'remote-task-compatibility',
       'remote-save',
       'remote-set-enabled',
       'remote-diagnostics-set-enabled',

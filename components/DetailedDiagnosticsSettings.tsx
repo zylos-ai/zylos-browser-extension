@@ -13,7 +13,9 @@ export function DetailedDiagnosticsSettings({
 }) {
   const { t } = useI18n();
   const details = state.detailedDiagnostics;
-  const token = details?.enabled ? details.consent : '';
+  const token = details?.exportConsent ?? (details?.enabled ? details.consent : '');
+  const exportExpiresAt = details?.exportExpiresAt ?? details?.expiresAt ?? 0;
+  const count = details?.frozenCount ?? details?.count ?? 0;
   const current = useRef(token);
   current.current = token;
   const mounted = useRef(true);
@@ -134,10 +136,7 @@ export function DetailedDiagnosticsSettings({
     };
   }, []);
   const valid = () =>
-    mounted.current &&
-    !!token &&
-    current.current === token &&
-    Date.now() < (details?.expiresAt ?? 0);
+    mounted.current && !!token && current.current === token && Date.now() < exportExpiresAt;
   const load = async (exportFile = false) => {
     if (!valid()) return;
     const request = ++localRequest.current;
@@ -164,7 +163,7 @@ export function DetailedDiagnosticsSettings({
           token,
           text,
           hash,
-          count: Array.isArray(records) ? records.length : (details?.count ?? 0),
+          count: Array.isArray(records) ? records.length : count,
         };
         setPreview(snapshot);
       }
@@ -203,7 +202,7 @@ export function DetailedDiagnosticsSettings({
           type="button"
           role="switch"
           className="connection-toggle"
-          aria-checked={!!token}
+          aria-checked={!!details?.enabled}
           aria-labelledby="detailed-heading"
           aria-describedby="detailed-hint"
           disabled={pending}
@@ -226,9 +225,16 @@ export function DetailedDiagnosticsSettings({
       </div>
       {!!token && (
         <>
-          <p className="settings-hint">
-            {t('detailedExpires')} {new Date(details!.expiresAt).toLocaleTimeString()}
-          </p>
+          {details?.enabled && (
+            <p className="settings-hint">
+              {t('detailedExpires')} {new Date(details.expiresAt).toLocaleTimeString()}
+            </p>
+          )}
+          {details?.frozenAt !== undefined && (
+            <p id="detailed-frozen" className="settings-hint">
+              {t('detailedFrozenExpires')} {new Date(exportExpiresAt).toLocaleString()}
+            </p>
+          )}
           <button
             id="detailed-download"
             type="button"
@@ -247,14 +253,39 @@ export function DetailedDiagnosticsSettings({
           >
             {t('detailSharePreview')}
           </button>
+          <button
+            id="detailed-clear"
+            type="button"
+            className="btn"
+            disabled={busy || pending}
+            onClick={async () => {
+              current.current = '';
+              localRequest.current++;
+              shareRequest.current++;
+              setPreview(undefined);
+              setShare(undefined);
+              setAccepted(false);
+              try {
+                const reply = await chrome.runtime.sendMessage({
+                  type: 'remote-detailed-set-enabled',
+                  enabled: false,
+                });
+                if (!reply?.ok) throw new Error('Unavailable');
+              } catch {
+                if (mounted.current) setError(true);
+              }
+            }}
+          >
+            {t('detailedClear')}
+          </button>
         </>
       )}
-      {!!token && (preview?.count ?? details?.count ?? 0) === 0 && (
+      {!!token && (preview?.count ?? count) === 0 && (
         <p id="detailed-empty" className="settings-hint">
           {t('detailedEmpty')}
         </p>
       )}
-      {!!token && (preview?.count ?? details?.count ?? 0) > 0 && (
+      {!!token && (preview?.count ?? count) > 0 && (
         <details
           id="detailed-preview"
           className="diagnostic-details"

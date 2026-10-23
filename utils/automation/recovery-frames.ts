@@ -1,16 +1,20 @@
 export type RecoveryFrameInspection = {
   candidates: { id: string; extensionOrigin: string }[];
   truncated: boolean;
-  coverage: 'root-document-open-shadow';
+  coverage:
+    | 'root-document-open-shadow'
+    | 'root-document-open-and-closed-shadow'
+    | 'documents-open-and-closed-shadow';
 };
 
 /** Serialized into the isolated world. Never reads iframe contents or exports src paths. */
 export async function recoveryFrameScript(options: {
-  action: 'inspect' | 'remove' | 'revoke';
+  action: 'inspect' | 'probe' | 'remove' | 'revoke';
   recoveryId: string;
   expiresAt: number;
   ownId: string;
   url: string;
+  allowClosedShadow?: boolean;
   selected?: string[];
   nonce?: string;
 }): Promise<{ inspection?: RecoveryFrameInspection; removed?: number; error?: string }> {
@@ -52,12 +56,32 @@ export async function recoveryFrameScript(options: {
       return undefined;
     }
   };
-  if (options.action === 'inspect') {
-    const saved = entries.get(options.recoveryId);
+  // A probe reports presence only; it never replaces the retained inspection snapshot.
+  if (options.action === 'inspect' || options.action === 'probe') {
+    const saved = options.action === 'inspect' ? entries.get(options.recoveryId) : undefined;
     if (saved) return { inspection: saved.inspection };
-    // Only one bounded snapshot is retained in this document's isolated world.
-    entries.clear();
+    if (options.action === 'inspect') entries.clear();
     const candidates: Candidate[] = [];
+    const dom = (
+      chrome as typeof chrome & {
+        dom?: { openOrClosedShadowRoot?: (element: Element) => ShadowRoot | null };
+      }
+    ).dom;
+    const closedShadowCovered =
+      options.allowClosedShadow === true && typeof dom?.openOrClosedShadowRoot === 'function';
+    let shadowAccessFailed = false;
+    // The API accepts only HTMLElement (an SVG element throws), so the check is per node:
+    // one unsupported element must not disable closed-root coverage for the rest.
+    const shadowRoot = (node: Element) => {
+      if (closedShadowCovered && node instanceof HTMLElement) {
+        try {
+          return dom!.openOrClosedShadowRoot!(node);
+        } catch {
+          shadowAccessFailed = true;
+        }
+      }
+      return node.shadowRoot;
+    };
     let visited = 0,
       truncated = false;
     const started = performance.now();
@@ -82,7 +106,8 @@ export async function recoveryFrameScript(options: {
               extensionOrigin: url.origin,
             });
         }
-        if (node.shadowRoot) visit(node.shadowRoot, depth + 1);
+        const shadow = shadowRoot(node);
+        if (shadow) visit(shadow, depth + 1);
         visit(node, depth + 1);
         if (truncated) return;
       }
@@ -90,9 +115,15 @@ export async function recoveryFrameScript(options: {
     visit(document, 0);
     const inspection: RecoveryFrameInspection = {
       candidates: candidates.map(({ id, extensionOrigin }) => ({ id, extensionOrigin })),
-      truncated,
-      coverage: 'root-document-open-shadow',
+      truncated:
+        truncated ||
+        shadowAccessFailed ||
+        (options.allowClosedShadow === true && !closedShadowCovered),
+      coverage: closedShadowCovered
+        ? 'root-document-open-and-closed-shadow'
+        : 'root-document-open-shadow',
     };
+    if (options.action === 'probe') return { inspection };
     const stored = { candidates, inspection, expiresAt: options.expiresAt, used: false };
     entries.set(options.recoveryId, stored);
     setTimeout(

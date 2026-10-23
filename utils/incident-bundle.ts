@@ -57,6 +57,7 @@ export class IncidentCapture {
   private actionScopes = new WeakMap<Correlation, Scope>();
   private incidentScopes = new WeakMap<Incident, Scope>();
   private evictedIncidents = 0;
+  private freezeTimer?: ReturnType<typeof setTimeout>;
   constructor(
     private scope: () => Scope,
     private runtime: () => Runtime = () => ({
@@ -66,8 +67,10 @@ export class IncidentCapture {
       scope: 'none',
       groupReference: 'none',
     }),
+    private freeze?: () => void,
   ) {}
   clear() {
+    clearTimeout(this.freezeTimer);
     this.correlations = [];
     this.incidents = [];
     this.document = undefined;
@@ -155,6 +158,18 @@ export class IncidentCapture {
   trigger(context: Context, trigger: Incident['trigger'], reason?: string) {
     try {
       this.collectTrigger(context, trigger, reason);
+      const scope = { ...this.scope() };
+      if (this.freeze && this.valid(scope) && this.incidents.length) {
+        this.freeze();
+        clearTimeout(this.freezeTimer);
+        this.freezeTimer = setTimeout(() => {
+          try {
+            if (this.valid(scope) && this.incidents.length) this.freeze?.();
+          } catch {
+            /* A snapshot failure cannot affect browser actions. */
+          }
+        }, INCIDENT_AFTER_MS);
+      }
     } catch {
       /* Diagnostics cannot affect actions. */
     }
@@ -241,7 +256,11 @@ export class IncidentCapture {
         });
     }
     const document = this.document;
-    if (trigger === 'control-lost' || !document || !this.sameDocument(document.scope)) {
+    if (
+      trigger === 'control-lost' ||
+      !document ||
+      !this.sameDocument(document.scope)
+    ) {
       incident.pageState = { status: 'unavailable', observedAt: Date.now() };
       return;
     }

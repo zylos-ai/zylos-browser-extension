@@ -2,6 +2,9 @@ import { z } from 'zod';
 
 export const DETAIL_TTL = 10 * 60_000;
 export const DETAIL_BYTES = 1024 * 1024;
+export const FROZEN_DETAIL_TTL = 24 * 60 * 60_000;
+export const FROZEN_DETAIL_BYTES = 2 * 1024 * 1024;
+export type DetailChange = 'changed' | 'capture-expired' | 'frozen' | 'frozen-expired';
 const nativeError = Error;
 const nativeStackGetter = Object.getOwnPropertyDescriptor(new Error(), 'stack')?.get;
 const nativeErrorPrototypes = new Set([
@@ -56,6 +59,10 @@ export const detailStateSchema = z.object({
   bytes: z.number(),
   dropped: z.number(),
   truncated: z.number(),
+  exportConsent: z.string().optional(),
+  exportExpiresAt: z.number().optional(),
+  frozenAt: z.number().optional(),
+  frozenCount: z.number().optional(),
 });
 
 export function redactDetail(text: string, secrets: string[] = []) {
@@ -159,6 +166,8 @@ export class DetailedCapture {
   private captureId = '';
   private expiresAt = 0;
   private timer?: ReturnType<typeof setTimeout>;
+  private frozenTimer?: ReturnType<typeof setTimeout>;
+  private frozen?: { token: string; at: number; expiresAt: number; text: string; count: number };
   private records: (DetailEvent & {
     source: 'background' | 'sidepanel';
     sequence: number;
@@ -171,10 +180,16 @@ export class DetailedCapture {
   private sequence = 0;
   readonly runtimeEpoch = crypto.randomUUID();
   constructor(
-    private changed: () => void,
+    private changed: (reason: DetailChange) => void,
     private secrets: () => string[] = () => [],
   ) {}
   clear() {
+    clearTimeout(this.frozenTimer);
+    this.frozen = undefined;
+    this.clearLive();
+    this.changed('changed');
+  }
+  private clearLive() {
     clearTimeout(this.timer);
     this.token = '';
     this.captureId = '';
@@ -184,19 +199,28 @@ export class DetailedCapture {
     this.dropped = 0;
     this.truncated = 0;
     this.sequence = 0;
-    this.changed();
+  }
+  private expireCapture() {
+    this.clearLive();
+    this.changed('capture-expired');
+  }
+  private expireFrozen() {
+    clearTimeout(this.frozenTimer);
+    this.frozen = undefined;
+    this.changed('frozen-expired');
   }
   enable() {
     this.clear();
     this.token = crypto.randomUUID();
     this.captureId = crypto.randomUUID();
     this.expiresAt = Date.now() + DETAIL_TTL;
-    this.timer = setTimeout(() => this.clear(), DETAIL_TTL);
-    this.changed();
+    this.timer = setTimeout(() => this.expireCapture(), DETAIL_TTL);
+    this.changed('changed');
     return this.state();
   }
   state() {
-    if (this.token && Date.now() >= this.expiresAt) this.clear();
+    if (this.token && Date.now() >= this.expiresAt) this.expireCapture();
+    if (this.frozen && Date.now() >= this.frozen.expiresAt) this.expireFrozen();
     return {
       enabled: !!this.token,
       consent: this.token,
@@ -205,7 +229,56 @@ export class DetailedCapture {
       bytes: this.bytes,
       dropped: this.dropped,
       truncated: this.truncated,
+      exportConsent: this.frozen?.token ?? this.token,
+      exportExpiresAt: this.frozen?.expiresAt ?? this.expiresAt,
+      frozenAt: this.frozen?.at,
+      frozenCount: this.frozen?.count,
     };
+  }
+  /** The caller supplies an already redacted incident bundle, never arbitrary page data. */
+  freeze(token: string, snapshot: unknown) {
+    if (!this.valid(token)) return false;
+    try {
+      const at = Date.now();
+      const expiresAt = at + FROZEN_DETAIL_TTL;
+      const value = structuredClone(snapshot) as {
+        capture?: { records?: unknown[] };
+        limitations?: unknown;
+      };
+      // Retention is stated inside the existing limitations list, not as a new
+      // top-level field, so a negotiated v2 bundle stays valid for Remote.
+      const retention = `Frozen fault snapshot taken ${new Date(at).toISOString()}; kept in extension memory until ${new Date(expiresAt).toISOString()} (maximum ${FROZEN_DETAIL_BYTES} bytes); background restart removes it.`;
+      if (Array.isArray(value.limitations))
+        value.limitations = [...value.limitations.slice(0, 31), retention];
+      const text = JSON.stringify(value, null, 2);
+      if (new TextEncoder().encode(text).length > FROZEN_DETAIL_BYTES) return false;
+      clearTimeout(this.frozenTimer);
+      this.frozen = {
+        token: crypto.randomUUID(),
+        at,
+        expiresAt,
+        text,
+        count: value.capture?.records?.length ?? 0,
+      };
+      this.frozenTimer = setTimeout(() => this.expireFrozen(), FROZEN_DETAIL_TTL);
+      this.changed('frozen');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  exportContext() {
+    const state = this.state();
+    return { consent: state.exportConsent, expiresAt: state.exportExpiresAt };
+  }
+  validExport(token: string) {
+    return !!token && this.exportContext().consent === token;
+  }
+  frozenPreview(token: string): unknown | undefined {
+    this.state();
+    if (this.frozen?.token === token) return JSON.parse(this.frozen.text);
+    if (!this.validExport(token)) throw new Error('ui.error.detailedExpired');
+    return undefined;
   }
   valid(token: string) {
     return !!token && this.state().consent === token;
@@ -245,10 +318,19 @@ export class DetailedCapture {
   }
   preview(token: string) {
     if (!this.valid(token)) throw new Error('ui.error.detailedExpired');
+    // The exported capture keeps the negotiated v1 field set; export-token and
+    // frozen-snapshot state are local UI fields that Remote validation rejects.
+    const {
+      consent: _consent,
+      exportConsent: _exportConsent,
+      exportExpiresAt: _exportExpiresAt,
+      frozenAt: _frozenAt,
+      frozenCount: _frozenCount,
+      ...state
+    } = this.state();
     return {
       schemaVersion: 1,
-      ...this.state(),
-      consent: undefined,
+      ...state,
       runtimeEpoch: this.runtimeEpoch,
       captureId: this.captureId,
       extensionVersion: chrome.runtime.getManifest().version,

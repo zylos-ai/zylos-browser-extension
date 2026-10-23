@@ -66,6 +66,29 @@ it('deduplicates the terminal control loss and keeps failure facts separate', ()
   capture.trigger({ task: 1 }, 'control-lost');
   expect(capture.bundle(snapshot(), runtime).incidents).toHaveLength(1);
 });
+it('freezes immediately and after the bounded post-window, but never after revocation or clear', async () => {
+  const freeze = vi.fn();
+  capture = new IncidentCapture(
+    () => scope,
+    () => runtime,
+    freeze,
+  );
+  capture.trigger({}, 'control-lost');
+  expect(freeze).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(freeze).toHaveBeenCalledTimes(2);
+  capture.trigger({}, 'control-lost');
+  scope.consent = '';
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(freeze).toHaveBeenCalledTimes(3);
+  capture.trigger({}, 'control-lost');
+  expect(freeze).toHaveBeenCalledTimes(3);
+  scope.consent = 'new';
+  capture.trigger({}, 'control-lost');
+  capture.clear();
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(freeze).toHaveBeenCalledTimes(4);
+});
 it('does not collect while disabled or export untrusted correlation strings', () => {
   scope.consent = '';
   expect(capture.begin({}, taskId, id, 'fill')).toBeUndefined();
@@ -77,6 +100,23 @@ it('does not collect while disabled or export untrusted correlation strings', ()
   const result = capture.bundle(snapshot(), runtime);
   expect(JSON.stringify(result)).not.toContain('PRIVATE');
   expect(result.incidents[0]!.window.gaps).toContain('correlation-unavailable');
+});
+it('retains transport loss as a distinct fact without probing the disconnected page', () => {
+  const freeze = vi.fn();
+  capture = new IncidentCapture(
+    () => scope,
+    () => ({ ...runtime, connected: false }),
+    freeze,
+  );
+  capture.trigger({}, 'control-lost');
+  const incident = capture.bundle(snapshot(), runtime).incidents[0];
+  expect(incident).toMatchObject({
+    trigger: 'control-lost',
+    runtimeAtTrigger: { connected: false },
+    pageState: { status: 'unavailable' },
+  });
+  expect(page.captureIncidentPageState).not.toHaveBeenCalled();
+  expect(freeze).toHaveBeenCalledOnce();
 });
 it('drops late page state after new task and clears all correlation on disable', async () => {
   let finish!: (result: any) => void;

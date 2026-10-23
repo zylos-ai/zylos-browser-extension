@@ -144,6 +144,29 @@ it('selected removal failure reports possible side effects and no rollback', asy
     expect.objectContaining({ recoveryRemoval: { requested: 1, outcome: 'unknown' } }),
   );
 });
+it('automatic removal uncertainty stays in results and terminal receipt, not recovery wire descriptor', () => {
+  const { loop, requests, io } = setup();
+  const descriptor = recoveryDescriptor();
+  const removalReceipt = { requested: 1, outcome: 'unknown' as const };
+  loop.suspendRecovery({ ...descriptor, removalReceipt }, [
+    { method: 'fill', outcome: 'uncertain' },
+  ]);
+  expect(requests.at(-1)!.execution.recovery).toEqual(descriptor);
+  expect(requests.at(-1)!.execution.results).toContainEqual({
+    method: 'recover-control',
+    status: 'uncertain',
+    removal: removalReceipt,
+    replayed: false,
+  });
+  loop.endRecovery('failed');
+  expect(io.finish).toHaveBeenCalledWith(
+    expect.any(String),
+    'interrupted',
+    'task-1',
+    { kind: 'recovery-removal-interrupted' },
+    expect.objectContaining({ recoveryRemoval: removalReceipt }),
+  );
+});
 it('successful recovery preserves old uncertain receipts and never replays the original action', async () => {
   const { loop, requests, io } = setup();
   const recovery = recoveryDescriptor();

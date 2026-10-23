@@ -1,10 +1,15 @@
 export default {
+  taskCompatibilityPermission: '允许本次任务移除其他扩展在网页内显示的界面',
+  agentStartPermission: '允许 Agent 在本次会话发起任务',
+  agentStartPermissionHint:
+    '已连接的 Agent 可以打开任务标签页。关闭此权限会停止其当前任务。浏览器后台重启或连接设置改变后，权限会重置。',
   detailSharePreview: '准备诊断文件',
   detailShareRecipient: '接收方 Remote：',
   detailShareExpires: '分享授权截止时间：',
   detailShareDisclosure:
     '此诊断文件可能包含敏感信息。授权后，上述 Remote、其运营者、Agent 及其配置的 AI 服务商可能接收并保留副本。仅允许通过 WSS 在最长两分钟内读取一次。撤销仅阻止后续读取，无法删除已收到的副本。响应丢失也可能消耗授权，不会自动重试或重新授权。',
-  detailShareConsent: '我了解此文件可能包含敏感信息，同意上述接收方及其 Agent 和 AI 服务商接收本次诊断文件。',
+  detailShareConsent:
+    '我了解此文件可能包含敏感信息，同意上述接收方及其 Agent 和 AI 服务商接收本次诊断文件。',
   detailShareAuthorize: '授权读取一次',
   detailShareAuthorized: '已授权一次读取，截止时间如上。',
   detailShareConsumed: '授权已消耗。诊断文件已提交连接发送，无法确认对方是否收到。',
@@ -13,17 +18,19 @@ export default {
   detailShareRevoke: '撤销分享并清除文件',
   detailedDiagnostics: '详细本地诊断',
   detailedDiagnosticsHint:
-    '临时记录插件日志、错误及任务、连接和有限页面状态，用于排查故障。默认关闭，不自动分享；最多保存 10 分钟、1 MiB / 1,000 条。不采集页面文字、输入值或截图，但错误日志仍可能含敏感信息，请在分享前检查。关闭、到期、修改连接配置或后台重启后清除。',
-  detailedExpires: '记录清除时间',
+    '默认关闭，不自动分享。采集 10 分钟后停止（最多 1 MiB / 1,000 条）。开启期间发生故障时，最新详细快照在内存保留 24 小时（最多 2 MiB）；采集到期后保留该快照，不继续采集。清除、关闭、重新开启、修改连接配置或后台重启会删除快照。不采集页面文字、输入值或截图，错误文字可能含敏感信息，请在分享前检查。',
+  detailedExpires: '实时采集停止时间',
+  detailedFrozenExpires: '故障快照清除时间',
+  detailedClear: '清除诊断并停止采集',
   detailedPreview: '查看文件详情',
   detailedHide: '收起文件详情',
   detailedSnapshotCount: '此文件包含 {count} 条详细日志',
   detailedEmpty: '暂无详细日志。诊断文件仍可能包含事件元数据。',
   detailedReviewWarning:
     '此文件可能含敏感信息。省略、截断和丢失情况会标记在文件中。这不是完整的 DevTools 录制。',
-  detailedDownload: '下载诊断文件',
+  detailedDownload: '下载详细诊断',
   detailedExpired: '采集已过期或变更，请重新开启后重试。',
-  diagnostics: '分享诊断事件',
+  diagnostics: '分享事件元数据',
   diagnosticsHint:
     '允许已连接的 Agent 读取最近 30 分钟的任务、控制、连接、异常类型和控制台级别事件（最多 1,000 条）。不含网页内容、网址、输入、密钥、异常原文或控制台参数。默认关闭；关闭后清除已存事件。',
   settings: '设置',
@@ -57,6 +64,7 @@ export default {
   markdownFootnotes: '注释',
   markdownFootnoteBack: '返回正文',
   you: '你',
+  agentStarted: 'Agent 发起',
   system: '系统',
   systemMessage: '系统消息',
   today: '今天',
