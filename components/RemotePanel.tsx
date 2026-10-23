@@ -301,6 +301,12 @@ export function RemotePanel() {
             return ok;
           }}
           onToggle={() => void action({ type: 'remote-set-enabled', enabled: !state.enabled })}
+          onCompatibilityToggle={() =>
+            void action({
+              type: 'remote-compatibility-set-enabled',
+              enabled: !state.compatibilityEnabled,
+            })
+          }
           onAgentStartToggle={() =>
             void action({
               type: 'remote-agent-start-set-enabled',
@@ -345,25 +351,6 @@ export function RemotePanel() {
               inputRef.current?.focus();
             }}
           />
-          {state.task && state.loopActive && (
-            <label className="flex items-start gap-2 px-4 py-2 text-sm">
-              <input
-                id="task-compatibility"
-                type="checkbox"
-                className="checkbox checkbox-sm"
-                checked={state.compatibilityTaskId === state.task.sessionId}
-                disabled={!connected || pending !== null || stopping}
-                onChange={(event) =>
-                  void action({
-                    type: 'remote-task-compatibility',
-                    taskId: state.task!.sessionId,
-                    enabled: event.target.checked,
-                  })
-                }
-              />
-              <span>{t('taskCompatibilityPermission')}</span>
-            </label>
-          )}
           <ChatComposer
             files={fileAttachments.files}
             onAddFiles={fileAttachments.addFiles}

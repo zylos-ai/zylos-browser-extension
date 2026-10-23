@@ -1,8 +1,9 @@
 import type zh from './zh-CN';
 
 export default {
-  taskCompatibilityPermission:
-    "Allow this task to remove other extensions' inline UI from the page",
+  taskCompatibilityPermission: 'Extension compatibility mode',
+  compatibilityHint:
+    "Allow active browser tasks to remove other extensions' inline UI. Saved across tasks and restarts; cleared when the connection address or key changes.",
   agentStartPermission: 'Allow Agent to start tasks this session',
   agentStartPermissionHint:
     'The connected Agent may open task tabs. Turning this off stops its active task. Permission resets when the browser worker restarts or the connection settings change.',

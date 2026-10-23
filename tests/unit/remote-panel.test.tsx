@@ -916,32 +916,23 @@ test('a cancelled in-flight send cannot restore busy state or display a late sen
   expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('发送消息');
 });
 
-test('compatibility toggle explicitly grants only the displayed active task', async () => {
-  state.loopActive = true;
-  state.task = {
-    sessionId: 'current-task',
-    phase: 'running',
-    tabId: 5,
-    tabCount: 1,
-    title: '',
-    url: 'https://example.com',
-  };
+test('compatibility setting is available without an active task', async () => {
   await mount();
-  const toggle = container.querySelector<HTMLInputElement>('#task-compatibility')!;
-  expect(toggle.checked).toBe(false);
-  expect(toggle.closest('label')!.textContent).toContain('移除其他扩展');
-  await click('#task-compatibility');
+  await click('.settings-button');
+  const toggle = container.querySelector<HTMLButtonElement>('#compatibility-enabled')!;
+  expect(toggle.getAttribute('aria-checked')).toBe('false');
+  expect(container.querySelector('#compatibility-hint')!.textContent).toContain('移除其他扩展');
+  await click('#compatibility-enabled');
   expect(send).toHaveBeenCalledWith({
-    type: 'remote-task-compatibility',
-    taskId: 'current-task',
+    type: 'remote-compatibility-set-enabled',
     enabled: true,
   });
-  state.compatibilityTaskId = 'current-task';
+  state.compatibilityEnabled = true;
   await act(async () => listener({ type: 'remote-updated', state }));
-  expect(toggle.checked).toBe(true);
+  expect(toggle.getAttribute('aria-checked')).toBe('true');
   state.connected = false;
   await act(async () => listener({ type: 'remote-updated', state }));
-  expect(toggle.disabled).toBe(true);
+  expect(toggle.disabled).toBe(false);
 });
 
 test('runtime updates render real tasks, stop/reveal remain wired, and disconnect disables sending', async () => {

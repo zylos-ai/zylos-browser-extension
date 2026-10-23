@@ -1,5 +1,7 @@
 export default {
-  taskCompatibilityPermission: '允许本次任务移除其他扩展在网页内显示的界面',
+  taskCompatibilityPermission: '扩展兼容模式',
+  compatibilityHint:
+    '允许进行中的浏览器任务移除其他扩展在网页内显示的界面。跨任务和重启保留；更换连接地址或密钥后清除。',
   agentStartPermission: '允许 Agent 在本次会话发起任务',
   agentStartPermissionHint:
     '已连接的 Agent 可以打开任务标签页。关闭此权限会停止其当前任务。浏览器后台重启或连接设置改变后，权限会重置。',

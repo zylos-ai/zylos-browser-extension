@@ -13,6 +13,7 @@ export function ConnectionSettings({
   onDiagnosticsToggle,
   onDetailedToggle,
   onAgentStartToggle,
+  onCompatibilityToggle,
 }: {
   state: RemoteState;
   saving: boolean;
@@ -22,6 +23,7 @@ export function ConnectionSettings({
   onDiagnosticsToggle?: () => void;
   onDetailedToggle?: () => void;
   onAgentStartToggle?: () => void;
+  onCompatibilityToggle?: () => void;
 }) {
   const { t, preference, changeLanguage, savingLanguage, languageError } = useI18n();
   const [relayUrl, setRelayUrl] = useState(state.relayUrl || 'ws://127.0.0.1:3802/ext');
@@ -96,6 +98,31 @@ export function ConnectionSettings({
         aria-labelledby="preferences-heading"
       >
         <h2 id="preferences-heading">{t('preferences')}</h2>
+        <div className="settings-row">
+          <div className="settings-copy">
+            <label id="compatibility-label" htmlFor="compatibility-enabled">
+              {t('taskCompatibilityPermission')}
+            </label>
+            <p id="compatibility-hint" className="settings-hint">
+              {t('compatibilityHint')}
+            </p>
+          </div>
+          <button
+            id="compatibility-enabled"
+            className="connection-toggle"
+            type="button"
+            role="switch"
+            aria-checked={!!state.compatibilityEnabled}
+            aria-labelledby="compatibility-label"
+            aria-describedby="compatibility-hint"
+            disabled={pending}
+            onClick={onCompatibilityToggle}
+          >
+            <span className="settings-switch-track" aria-hidden="true">
+              <span />
+            </span>
+          </button>
+        </div>
         <div className="settings-row">
           <div className="settings-copy">
             <label id="agent-start-label" htmlFor="agent-start-enabled">

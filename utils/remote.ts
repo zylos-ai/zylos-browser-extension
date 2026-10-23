@@ -31,6 +31,7 @@ export const remoteConfigSchema = z.object({
     .union([z.literal(''), z.string().regex(/^[a-f0-9]{32,128}$/, 'ui.error.invalidKey')])
     .default(''),
   enabled: z.boolean().default(true),
+  compatibilityEnabled: z.boolean().default(false),
 });
 export type RemoteConfig = z.infer<typeof remoteConfigSchema>;
 export const REMOTE_CONFIG_KEY = 'remoteConfig';
@@ -122,7 +123,7 @@ export const remoteStateSchema = z.object({
   detailedDiagnostics: detailStateSchema.optional(),
   diagnosticsEnabled: z.boolean().optional(),
   agentStartEnabled: z.boolean().optional(),
-  compatibilityTaskId: z.string().optional(),
+  compatibilityEnabled: z.boolean().optional(),
   diagnosticsConsent: z.string().optional(),
   configured: z.boolean(),
   enabled: z.boolean(),
@@ -175,8 +176,7 @@ export const remoteRequestSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('remote-agent-start-set-enabled'), enabled: z.boolean() }).strict(),
   z
     .object({
-      type: z.literal('remote-task-compatibility'),
-      taskId: z.string().min(1),
+      type: z.literal('remote-compatibility-set-enabled'),
       enabled: z.boolean(),
     })
     .strict(),

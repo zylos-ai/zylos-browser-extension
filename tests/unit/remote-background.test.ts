@@ -352,24 +352,21 @@ describe('decision transport background', () => {
     });
     expect((await state()).loopActive).toBe(false);
   });
-  it('compatibility permission defaults off, binds the current task and clears on Stop', async () => {
+  it('compatibility setting defaults off and persists across Stop and new tasks', async () => {
     const ws = await taskStartSetup();
     const first = await requestStart(ws);
     const taskId = (first!.result as any).taskId;
     const hooks = executor.configureControlRecovery.mock.calls.at(-1)![0];
     expect(hooks.automaticRemovalEnabled()).toBe(false);
-    expect(
-      (await ask({ type: 'remote-task-compatibility', taskId: 'stale', enabled: true })).ok,
-    ).toBe(false);
-    expect((await ask({ type: 'remote-task-compatibility', taskId, enabled: true })).ok).toBe(true);
+    expect((await ask({ type: 'remote-compatibility-set-enabled', enabled: true })).ok).toBe(true);
     expect(hooks.automaticRemovalEnabled()).toBe(true);
-    await ask({ type: 'remote-task-compatibility', taskId, enabled: false });
+    await ask({ type: 'remote-compatibility-set-enabled', enabled: false });
     expect(executor.revokeAutomaticRemoval).toHaveBeenCalledTimes(1);
     expect(hooks.automaticRemovalEnabled()).toBe(false);
-    await ask({ type: 'remote-task-compatibility', taskId, enabled: true });
+    await ask({ type: 'remote-compatibility-set-enabled', enabled: true });
     await ask({ type: 'remote-stop' });
     expect(hooks.automaticRemovalEnabled()).toBe(false);
-    expect((await state()).compatibilityTaskId).toBeUndefined();
+    expect((await state()).compatibilityEnabled).toBe(true);
     executor.currentControl.mockReturnValue(null);
     const second = await requestStart(
       ws,
@@ -377,26 +374,75 @@ describe('decision transport background', () => {
       901,
     );
     expect(second).toMatchObject({ type: 'resp', result: { status: 'started' } });
-    expect(hooks.automaticRemovalEnabled()).toBe(false);
-    expect((await ask({ type: 'remote-task-compatibility', taskId, enabled: true })).ok).toBe(
-      false,
-    );
+    expect(hooks.automaticRemovalEnabled()).toBe(true);
   });
-  it('compatibility permission cannot transfer to a different control session or survive disconnect', async () => {
+  it('compatibility persists across disconnect but cannot remove without active control', async () => {
     const ws = await taskStartSetup();
     const first = await requestStart(ws);
     const taskId = (first!.result as any).taskId;
     const hooks = executor.configureControlRecovery.mock.calls.at(-1)![0];
-    await ask({ type: 'remote-task-compatibility', taskId, enabled: true });
+    await ask({ type: 'remote-compatibility-set-enabled', enabled: true });
     const control = executor.currentControl();
-    executor.currentControl.mockReturnValue({ ...control!, sessionId: 'different' });
+    executor.currentControl.mockReturnValue(null);
     expect(hooks.automaticRemovalEnabled()).toBe(false);
     executor.currentControl.mockReturnValue(control);
-    expect(hooks.automaticRemovalEnabled()).toBe(false);
-    await ask({ type: 'remote-task-compatibility', taskId, enabled: true });
+    expect(hooks.automaticRemovalEnabled()).toBe(true);
     ws.serverClose(1006);
     await flush();
     expect(hooks.automaticRemovalEnabled()).toBe(false);
+    expect((await state()).compatibilityEnabled).toBe(true);
+  });
+  it('loads saved compatibility preference after worker restart without granting idle control', async () => {
+    (storage.remoteConfig as any).compatibilityEnabled = true;
+    await bootConnected();
+    expect((await state()).compatibilityEnabled).toBe(true);
+    expect(executor.configureControlRecovery.mock.calls.at(-1)![0].automaticRemovalEnabled()).toBe(
+      false,
+    );
+  });
+  it('keeps compatibility after successful task completion but disables idle removal', async () => {
+    const ws = await taskStartSetup();
+    await requestStart(ws);
+    await ask({ type: 'remote-compatibility-set-enabled', enabled: true });
+    await respond(ws, ws.last('agent-request')!, { kind: 'done', text: 'Finished' });
+    expect((await state()).compatibilityEnabled).toBe(true);
+    expect(executor.configureControlRecovery.mock.calls.at(-1)![0].automaticRemovalEnabled()).toBe(
+      false,
+    );
+    expect((storage.remoteConfig as any).compatibilityEnabled).toBe(true);
+  });
+  it.each([
+    { relayUrl: 'wss://new.example/ext', key: KEY },
+    { relayUrl: 'wss://agent.example/browser-remote/ext', key: 'b'.repeat(64) },
+  ])('clears saved compatibility when connection identity changes: %j', async (change) => {
+    await bootConnected();
+    await ask({ type: 'remote-compatibility-set-enabled', enabled: true });
+    expect((await ask({ type: 'remote-save', ...change })).ok).toBe(true);
+    expect((storage.remoteConfig as any).compatibilityEnabled).toBe(false);
+    expect((await state()).compatibilityEnabled).toBe(false);
+  });
+  it('failed enable does not grant permission, failed disable still revokes immediately', async () => {
+    await bootConnected();
+    vi.mocked(chrome.storage.local.set).mockRejectedValueOnce(new Error('disk full'));
+    expect((await ask({ type: 'remote-compatibility-set-enabled', enabled: true })).ok).toBe(false);
+    expect((await state()).compatibilityEnabled).toBe(false);
+    await ask({ type: 'remote-compatibility-set-enabled', enabled: true });
+    vi.mocked(chrome.storage.local.set).mockRejectedValueOnce(new Error('disk full'));
+    expect((await ask({ type: 'remote-compatibility-set-enabled', enabled: false })).ok).toBe(
+      false,
+    );
+    expect((await state()).compatibilityEnabled).toBe(false);
+    expect(executor.revokeAutomaticRemoval).toHaveBeenCalled();
+  });
+  it('saving unchanged connection identity preserves compatibility', async () => {
+    await bootConnected();
+    await ask({ type: 'remote-compatibility-set-enabled', enabled: true });
+    await ask({
+      type: 'remote-save',
+      relayUrl: 'wss://agent.example/browser-remote/ext',
+      key: KEY,
+    });
+    expect((storage.remoteConfig as any).compatibilityEnabled).toBe(true);
   });
   it('refuses agent start while a panel task is active', async () => {
     const ws = await taskStartSetup();

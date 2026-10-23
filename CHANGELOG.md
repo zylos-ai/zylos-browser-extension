@@ -4,9 +4,10 @@
 
 ### Added
 
-- Add a default-off compatibility permission scoped to the current task. It allows
-  removal of inspected, revalidated foreign extension frames during recovery and
-  is cleared on task changes, completion, stop or disconnect.
+- Add a default-off persistent extension compatibility setting. It allows removal
+  of inspected, revalidated foreign extension frames only during recovery of the
+  controlled task. Normal reconnects and task completion preserve the preference;
+  changing the connection identity clears it, and disabling revokes active removal.
 - In compatibility mode, separate input preparation from text dispatch so a
   focus-time detach can recover before sending text once. Revalidate the original
   document, node, value and caret; never replay uncertain text input.

@@ -152,20 +152,15 @@ export function startRemoteBackground() {
   let interruptReady = false;
   let sendingChat = false;
   let agentStartEnabled = false;
-  let compatibilityTaskId: string | undefined;
-  let compatibilityLoopId: string | undefined;
   function compatibilityEnabled() {
     const control = currentControl();
-    if (
-      !state.connected ||
-      !loop?.active ||
-      !control ||
-      control.phase === 'finished' ||
-      compatibilityTaskId !== control.sessionId ||
-      loop.taskId !== compatibilityLoopId
-    )
-      compatibilityTaskId = undefined;
-    return !!compatibilityTaskId;
+    return !!(
+      config.compatibilityEnabled &&
+      state.connected &&
+      loop?.active &&
+      control &&
+      control.phase !== 'finished'
+    );
   }
   let agentStartRevision = 0;
   let agentStartedTask: string | undefined;
@@ -349,7 +344,7 @@ export function startRemoteBackground() {
   };
   function snapshot(): RemoteState {
     state.agentStartEnabled = agentStartEnabled;
-    state.compatibilityTaskId = compatibilityEnabled() ? compatibilityTaskId : undefined;
+    state.compatibilityEnabled = config.compatibilityEnabled;
     state.detailedDiagnostics = detailed.state();
     state.detailedSharing = sharing.state();
     state.diagnosticsEnabled = diagnosticsEnabled();
@@ -752,7 +747,6 @@ export function startRemoteBackground() {
   });
 
   function cancelLoop(status: 'stopped' | 'interrupted', interrupt = false) {
-    compatibilityTaskId = undefined;
     state.agentActivity = undefined;
     chatRevision++; // Also invalidate a message still collecting its initial page overview.
     const taskId = loop.taskId;
@@ -1546,19 +1540,18 @@ export function startRemoteBackground() {
           return snapshot();
         case 'remote-state':
           return snapshot();
-        case 'remote-task-compatibility': {
-          const control = currentControl();
-          if (
-            !state.connected ||
-            !loop.active ||
-            !control ||
-            control.phase === 'finished' ||
-            control.sessionId !== m.taskId
-          )
-            throw taskStartError('TASK_START_REVOKED');
-          compatibilityTaskId = m.enabled ? m.taskId : undefined;
-          compatibilityLoopId = m.enabled ? loop.taskId : undefined;
-          if (!m.enabled) revokeAutomaticRemoval();
+        case 'remote-compatibility-set-enabled': {
+          const next = { ...config, compatibilityEnabled: m.enabled };
+          // Revoke immediately even when persisting the new choice fails.
+          if (!m.enabled) {
+            config = next;
+            revokeAutomaticRemoval();
+            publish();
+          }
+          await diagnosticStorage('write', () =>
+            chrome.storage.local.set({ [REMOTE_CONFIG_KEY]: next }),
+          );
+          config = next;
           publish();
           return snapshot();
         }
@@ -1575,11 +1568,17 @@ export function startRemoteBackground() {
             relayUrl: m.relayUrl.trim(),
             key: m.key.trim(),
             enabled: config.enabled,
+            compatibilityEnabled:
+              config.compatibilityEnabled &&
+              m.relayUrl.trim() === config.relayUrl &&
+              m.key.trim() === config.key,
           });
           if (!next.relayUrl || !next.key) throw new Error('ui.error.credentialsRequired');
           // Revoke sharing before persisting a different recipient. A worker
           // suspension between these writes must never expose the old records.
           if (next.key !== config.key || next.relayUrl !== config.relayUrl) {
+            config.compatibilityEnabled = false;
+            revokeAutomaticRemoval();
             const stopped = revokeAgentStarts();
             detailed.clear();
             await stopped;
@@ -1742,7 +1741,7 @@ export function startRemoteBackground() {
     // and the durable connection update. Serialize these whole transactions.
     const mutatesConsent = [
       'remote-agent-start-set-enabled',
-      'remote-task-compatibility',
+      'remote-compatibility-set-enabled',
       'remote-save',
       'remote-set-enabled',
       'remote-diagnostics-set-enabled',
