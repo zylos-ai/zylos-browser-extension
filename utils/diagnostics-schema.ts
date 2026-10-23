@@ -22,6 +22,9 @@ export const diagnosticEventName = z.enum([
   'transport-open',
   'transport-ready',
   'transport-error',
+  'transport-timer',
+  'transport-recovery',
+  'panel-visibility',
   'request',
   'response',
   'storage-error',
@@ -164,6 +167,29 @@ export const diagnosticMetadata = z
     argCount: z.number().int().min(0).max(50).optional(),
     count: z.number().int().min(1).max(1000000).optional(),
     closeCode: z.number().int().min(1000).max(4999).optional(),
+    generation: integer.optional(),
+    scheduledAt: integer.optional(),
+    firedAt: integer.optional(),
+    delayMs: integer.optional(),
+    inboundAgeMs: integer.optional(),
+    outboundAgeMs: integer.optional(),
+    workerUptimeMs: integer.optional(),
+    timer: z.enum(['freshness', 'connect', 'reconnect', 'handshake', 'recovery']).optional(),
+    phase: z
+      .enum(['disconnected', 'reconnecting', 'restored', 'failed', 'cleared', 'scheduled'])
+      .optional(),
+    visibility: z.enum(['visible', 'hidden']).optional(),
+    resumeCategory: z
+      .enum([
+        'state_missing',
+        'capability_missing',
+        'runtime_changed',
+        'task_mismatch',
+        'invalid_resume',
+        'request_mismatch',
+        'state_expired',
+      ])
+      .optional(),
     status: z
       .enum(['success', 'error', 'cancelled', 'done', 'blocked', 'stopped', 'interrupted'])
       .optional(),
@@ -185,9 +211,25 @@ export const panelDiagnosticSchema = diagnosticMetadata
     method: true,
     closeCode: true,
     status: true,
+    generation: true,
+    scheduledAt: true,
+    firedAt: true,
+    delayMs: true,
+    inboundAgeMs: true,
+    outboundAgeMs: true,
+    workerUptimeMs: true,
+    timer: true,
+    phase: true,
+    resumeCategory: true,
   })
   .extend({
-    event: z.enum(['runtime-error', 'unhandled-rejection', 'console', 'capture-overflow']),
+    event: z.enum([
+      'runtime-error',
+      'unhandled-rejection',
+      'console',
+      'capture-overflow',
+      'panel-visibility',
+    ]),
   })
   .strict();
 export const diagnosticsQuery = z

@@ -4,6 +4,14 @@
 
 ### Added
 
+- Record bounded transport timer deadlines, actual firing times, scheduling delay,
+  last inbound/outbound ages, worker uptime, connection generation, recovery stages
+  and panel visibility in consented metadata diagnostics. Existing worker-start
+  events identify worker restarts. No page content, input values or credentials are
+  captured; a scheduling delay alone does not prove operating-system sleep.
+- Preserve categorized resume rejection reasons when supplied by Remote. Full
+  remote retrieval of these new metadata fields requires the companion Remote
+  PR #17 diagnostics update; local diagnostic exports retain them independently.
 - Add a default-off persistent extension compatibility setting. It allows removal
   of inspected, revalidated foreign extension frames only during recovery of the
   controlled task. Normal reconnects and task completion preserve the preference;

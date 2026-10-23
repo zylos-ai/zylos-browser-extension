@@ -141,6 +141,35 @@ export function startRemoteBackground() {
   let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
   let freshnessTimer: ReturnType<typeof setTimeout> | undefined;
   let lastInboundAt = 0;
+  let lastOutboundAt = 0;
+  const workerStartedAt = Date.now();
+  function transportMetadata() {
+    const now = Date.now();
+    return {
+      generation,
+      workerUptimeMs: Math.max(0, now - workerStartedAt),
+      ...(lastInboundAt ? { inboundAgeMs: Math.max(0, now - lastInboundAt) } : {}),
+      ...(lastOutboundAt ? { outboundAgeMs: Math.max(0, now - lastOutboundAt) } : {}),
+    };
+  }
+  function transportTimer(
+    timer: 'freshness' | 'connect' | 'reconnect' | 'handshake' | 'recovery',
+    delay: number,
+    callback: () => void,
+  ) {
+    const scheduledAt = Date.now() + delay;
+    return setTimeout(() => {
+      const firedAt = Date.now();
+      recordLifecycle('transport-timer', {
+        ...transportMetadata(),
+        timer,
+        scheduledAt,
+        firedAt,
+        delayMs: Math.max(0, firedAt - scheduledAt),
+      });
+      callback();
+    }, delay);
+  }
   let connectStartedAt = 0;
   let expireTransport: ((code: 'HEARTBEAT_TIMEOUT' | 'CONNECT_TIMEOUT') => void) | undefined;
   let loopReady = false;
@@ -256,6 +285,8 @@ export function startRemoteBackground() {
   let recoveryNoticeTimer: ReturnType<typeof setTimeout> | undefined;
   let recoveryNoticeRevision = 0;
   function setRecovery(value: RemoteState['recovery']) {
+    if (value !== state.recovery)
+      recordLifecycle('transport-recovery', { ...transportMetadata(), phase: value ?? 'cleared' });
     clearTimeout(recoveryNoticeTimer);
     const revision = ++recoveryNoticeRevision;
     state.recovery = value;
@@ -482,6 +513,7 @@ export function startRemoteBackground() {
     if (socket?.readyState !== WebSocket.OPEN) return false;
     try {
       socket.send(JSON.stringify(frame));
+      lastOutboundAt = Date.now();
       return true;
     } catch {
       return false;
@@ -846,7 +878,8 @@ export function startRemoteBackground() {
     clearTimeout(reconnectTimer);
     if (!config.enabled || !state.configured || reconnectBlocked) return;
     const jitter = Math.floor(Math.random() * 500);
-    reconnectTimer = setTimeout(() => void connect(), backoff + jitter);
+    recordLifecycle('transport-recovery', { ...transportMetadata(), phase: 'scheduled' });
+    reconnectTimer = transportTimer('reconnect', backoff + jitter, () => void connect());
     backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
   }
 
@@ -863,7 +896,7 @@ export function startRemoteBackground() {
 
   function armFreshnessTimer() {
     clearTimeout(freshnessTimer);
-    freshnessTimer = setTimeout(checkTransportFreshness, TRANSPORT_STALE_MS);
+    freshnessTimer = transportTimer('freshness', TRANSPORT_STALE_MS, checkTransportFreshness);
   }
 
   function disconnect(reason: string) {
@@ -913,7 +946,7 @@ export function startRemoteBackground() {
     if (!config.enabled || !state.configured || reconnectBlocked) return;
     if (socket && socket.readyState <= WebSocket.OPEN) return;
     const gen = ++generation;
-    recordLifecycle('transport-connect');
+    recordLifecycle('transport-connect', transportMetadata());
     state.connecting = true;
     if (recoveryDeadline) setRecovery('reconnecting');
     if (state.recovery !== 'failed') state.error = '';
@@ -938,12 +971,14 @@ export function startRemoteBackground() {
     socket = ws;
     connectStartedAt = Date.now();
     clearTimeout(freshnessTimer);
-    freshnessTimer = setTimeout(checkTransportFreshness, TRANSPORT_CONNECT_MS);
+    lastInboundAt = 0;
+    lastOutboundAt = 0;
+    freshnessTimer = transportTimer('connect', TRANSPORT_CONNECT_MS, checkTransportFreshness);
     ws.onopen = () => {
       if (gen !== generation) return;
       lastInboundAt = Date.now();
       armFreshnessTimer();
-      recordLifecycle('transport-open');
+      recordLifecycle('transport-open', transportMetadata());
       backoff = BACKOFF_MIN_MS;
       state.connected = false;
       state.connecting = true;
@@ -973,12 +1008,12 @@ export function startRemoteBackground() {
         runtimeEpoch,
         ...(helloResume ? { resume: helloResume } : {}),
       });
-      handshakeTimer = setTimeout(() => {
+      handshakeTimer = transportTimer('handshake', HANDSHAKE_TIMEOUT_MS, () => {
         if (gen !== generation || loopReady) return;
         recordLifecycle('transport-error', { level: 'error', code: 'PROTOCOL_MISMATCH' });
         state.error = 'ui.error.protocolMismatch';
         ws.close(4002, 'agent-loop-v1 required');
-      }, HANDSHAKE_TIMEOUT_MS);
+      });
       publish();
     };
     const transportClosed = (ev: { code: number }) => {
@@ -989,6 +1024,7 @@ export function startRemoteBackground() {
       expireTransport = undefined;
       state.connected = false;
       recordDiagnostic('socket-close', 'remote_disconnect', {
+        ...transportMetadata(),
         closeCode: ev.code >= 1000 && ev.code <= 4999 ? ev.code : undefined,
       });
       // Transport loss pauses control; report it with the negotiated control-lost trigger.
@@ -1001,9 +1037,8 @@ export function startRemoteBackground() {
       if (recoverable) {
         if (!recoveryDeadline) {
           recoveryDeadline = Date.now() + recoveryWindowMs;
-          recoveryTimer = setTimeout(
-            () => failRecovery('ui.error.taskRecoveryExpired'),
-            recoveryWindowMs,
+          recoveryTimer = transportTimer('recovery', recoveryWindowMs, () =>
+            failRecovery('ui.error.taskRecoveryExpired'),
           );
         }
         setRecovery('disconnected');
@@ -1038,7 +1073,7 @@ export function startRemoteBackground() {
     ws.onclose = transportClosed;
     expireTransport = (code) => {
       if (gen !== generation) return;
-      recordLifecycle('transport-error', { level: 'warn', code });
+      recordLifecycle('transport-error', { ...transportMetadata(), level: 'warn', code });
       transportClosed({ code: 1006 });
       try {
         ws.close(
@@ -1083,6 +1118,11 @@ export function startRemoteBackground() {
       case 'ready':
         clearTimeout(handshakeTimer);
         if (m.resume?.status === 'rejected') {
+          recordLifecycle('transport-recovery', {
+            ...transportMetadata(),
+            phase: 'failed',
+            resumeCategory: m.resume.category,
+          });
           failRecovery();
           socket?.close(4005, 'task resume rejected');
           return;
@@ -1106,6 +1146,17 @@ export function startRemoteBackground() {
             !recoveryDeadline ||
             Date.now() >= recoveryDeadline)
         ) {
+          recordLifecycle('transport-recovery', {
+            ...transportMetadata(),
+            phase: 'failed',
+            resumeCategory: !m.capabilities.includes(RESUME_CAPABILITY)
+              ? 'capability_missing'
+              : m.runtimeEpoch !== runtimeEpoch
+                ? 'runtime_changed'
+                : recoveryDeadline && Date.now() >= recoveryDeadline
+                  ? 'state_expired'
+                  : 'state_missing',
+          });
           failRecovery();
           socket?.close(4005, 'task resume mismatch');
           return;
@@ -1122,7 +1173,7 @@ export function startRemoteBackground() {
           state.error = '';
         }
         state.endpointId = m.endpointId;
-        recordLifecycle('transport-ready');
+        recordLifecycle('transport-ready', transportMetadata());
         attachmentsReady = m.capabilities.includes(ATTACHMENT_CAPABILITY);
         agentStartReady = m.capabilities.includes(AGENT_TASK_START_CAPABILITY);
         closedShadowReady = m.capabilities.includes('recovery-closed-shadow-v1');

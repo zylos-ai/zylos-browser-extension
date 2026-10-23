@@ -41,9 +41,15 @@ afterEach(() => {
 it('keeps a synchronous invalidated-context failure from escaping the caller', async () => {
   vi.useFakeTimers();
   const d = await import('../../utils/diagnostics-panel');
-  d.startPanelDiagnostics(); await flush();
-  listener({ type: 'remote-updated', state: { diagnosticsEnabled: true, diagnosticsConsent: 'token-a' } });
-  vi.mocked(chrome.runtime.sendMessage).mockImplementation(() => { throw new Error('PRIVATE_INVALIDATED'); });
+  d.startPanelDiagnostics();
+  await flush();
+  listener({
+    type: 'remote-updated',
+    state: { diagnosticsEnabled: true, diagnosticsConsent: 'token-a' },
+  });
+  vi.mocked(chrome.runtime.sendMessage).mockImplementation(() => {
+    throw new Error('PRIVATE_INVALIDATED');
+  });
   expect(() => d.reportPanelDiagnostic({ event: 'runtime-error', level: 'error' })).not.toThrow();
   await flush();
   listener({ type: 'remote-updated', state: { diagnosticsEnabled: false } });
@@ -51,6 +57,30 @@ it('keeps a synchronous invalidated-context failure from escaping the caller', a
 const flush = async () => {
   for (let i = 0; i < 10; i++) await Promise.resolve();
 };
+
+it('records panel visibility only while diagnostics consent is active', async () => {
+  const documentEvents = new EventTarget();
+  vi.stubGlobal('document', Object.assign(documentEvents, { visibilityState: 'visible' }));
+  vi.stubGlobal('window', new EventTarget());
+  const d = await import('../../utils/diagnostics-panel');
+  d.startPanelDiagnostics();
+  await flush();
+  document.dispatchEvent(new Event('visibilitychange'));
+  expect(sent).toHaveLength(0);
+  listener({
+    type: 'remote-updated',
+    state: { diagnosticsEnabled: true, diagnosticsConsent: 'token-a' },
+  });
+  expect(sent.at(-1).event).toMatchObject({ event: 'panel-visibility', visibility: 'visible' });
+  Object.assign(document, { visibilityState: 'hidden' });
+  document.dispatchEvent(new Event('visibilitychange'));
+  expect(sent.at(-1).event).toMatchObject({ event: 'panel-visibility', visibility: 'hidden' });
+  listener({ type: 'remote-updated', state: { diagnosticsEnabled: false } });
+  document.dispatchEvent(new Event('visibilitychange'));
+  expect(sent).toHaveLength(2);
+  for (const done of pending) done();
+  await flush();
+});
 
 it('collects only after consent and reports bounded queue overflow without payloads', async () => {
   const d = await import('../../utils/diagnostics-panel');

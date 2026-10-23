@@ -243,6 +243,17 @@ export const relayFrameSchema = z.discriminatedUnion('type', [
     resume: z
       .object({
         status: z.enum(['fresh', 'resumed', 'rejected']),
+        category: z
+          .enum([
+            'state_missing',
+            'capability_missing',
+            'runtime_changed',
+            'task_mismatch',
+            'invalid_resume',
+            'request_mismatch',
+            'state_expired',
+          ])
+          .optional(),
         reason: z.string().max(128).optional(),
       })
       .optional(),

@@ -15,6 +15,7 @@ vi.mock('../../utils/automation/executor', () => ({
 vi.mock('../../utils/automation/task-lifecycle', () => ({ recoverTasks: vi.fn(async () => {}) }));
 vi.mock('../../utils/messages', () => ({ isPanelSender: () => true }));
 import { startRemoteBackground } from '../../entrypoints/background/remote';
+import { getDiagnostics, setDiagnosticsEnabled } from '../../utils/diagnostics';
 
 let sockets: Socket[];
 let handler: (m: unknown, s: unknown, reply: (r: any) => void) => void;
@@ -167,4 +168,46 @@ it('does not reconnect after explicitly disabling the transport', async () => {
   await flush();
   expect(sockets).toHaveLength(1);
   expect((await state()).connected).toBe(false);
+});
+
+it('records delayed callback timing and transport ages without traffic content', async () => {
+  await setDiagnosticsEnabled(true);
+  const start = Date.now();
+  vi.setSystemTime(start + 120_000);
+  await vi.advanceTimersByTimeAsync(60_000);
+  const { events } = await getDiagnostics({});
+  const timer = events.find((e) => e.event === 'transport-timer' && e.timer === 'freshness');
+  expect(timer).toMatchObject({
+    scheduledAt: start + 60_000,
+    firedAt: start + 180_000,
+    delayMs: 120_000,
+    inboundAgeMs: 180_000,
+    outboundAgeMs: 180_000,
+    generation: expect.any(Number),
+  });
+  expect(events.some((e) => e.code === 'HEARTBEAT_TIMEOUT' && e.inboundAgeMs === 180_000)).toBe(
+    true,
+  );
+  expect(JSON.stringify(events)).not.toContain('agent.example');
+  expect(JSON.stringify(events)).not.toContain('a'.repeat(64));
+});
+
+it('retains the bounded server resume rejection category', async () => {
+  await setDiagnosticsEnabled(true);
+  sockets[0]!.receive({
+    type: 'ready',
+    capabilities: [],
+    endpointId: `abababababab.${storage.remoteBrowserId}`,
+    resume: { status: 'rejected', reason: 'RESUME_STATE_MISMATCH', category: 'runtime_changed' },
+  });
+  await flush();
+  const { events } = await getDiagnostics({});
+  expect(
+    events.some(
+      (e) =>
+        e.event === 'transport-recovery' &&
+        e.phase === 'failed' &&
+        e.resumeCategory === 'runtime_changed',
+    ),
+  ).toBe(true);
 });

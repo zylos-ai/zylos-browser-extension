@@ -54,6 +54,19 @@ export function reportPanelDiagnostic(event: PanelDiagnostic) {
     });
 }
 export function startPanelDiagnostics() {
+  const reportVisibility = () =>
+    typeof document !== 'undefined' &&
+    reportPanelDiagnostic({
+      event: 'panel-visibility',
+      level: 'info',
+      visibility: document.visibilityState === 'visible' ? 'visible' : 'hidden',
+    });
+  if (typeof document !== 'undefined')
+    document.addEventListener('visibilitychange', reportVisibility);
+  if (typeof window !== 'undefined')
+    window.addEventListener('pagehide', () =>
+      reportPanelDiagnostic({ event: 'panel-visibility', level: 'info', visibility: 'hidden' }),
+    );
   let detailToken = '';
   let detailExpires = 0;
   let detailPending = 0;
@@ -114,7 +127,9 @@ export function startPanelDiagnostics() {
       clearTimeout(retry);
       retry = undefined;
     }
+    const changed = consent !== next;
     consent = next;
+    if (changed && consent) reportVisibility();
   };
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type === 'remote-updated' && message.state) {
