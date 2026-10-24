@@ -1,3 +1,4 @@
+import { extensionBuild, extensionVersion } from '../../utils/extension-build';
 import {
   LANGUAGE_STORAGE_KEY,
   setWorkerLanguage,
@@ -78,7 +79,6 @@ import {
   REMOTE_CONFIG_KEY,
   REMOTE_KEY_PROTO_PREFIX,
   REMOTE_SUBPROTOCOL,
-  REMOTE_VERSION,
   chatEntrySchema,
   initialRemoteState,
   keyIdOf,
@@ -984,9 +984,11 @@ export function startRemoteBackground() {
       state.connecting = true;
       if (state.recovery !== 'failed') state.error = '';
       helloResume = recoveryDeadline ? resumeDescriptor() : undefined;
+      const build = extensionBuild();
       sendRaw({
         type: 'hello',
-        version: REMOTE_VERSION,
+        version: extensionVersion(),
+        ...(build ? { build } : {}),
         capabilities: [
           AGENT_TASK_START_CAPABILITY,
           'recovery-closed-shadow-v1',

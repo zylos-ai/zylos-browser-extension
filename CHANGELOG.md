@@ -28,6 +28,9 @@
 
 ### Fixed
 
+- Report the installed manifest version in the connection handshake and tool
+  catalog instead of a hardcoded version. Include validated build identity in
+  the handshake when available; omit unknown build fields.
 - Wait for an Agent-started task page to become readable before its first context.
 - Preserve recovery scan scope across transport interruption, reject incomplete
   child-frame probes and record each probe outcome. Keep detailed fault exports

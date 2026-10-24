@@ -1428,6 +1428,7 @@ describe('decision transport background', () => {
 
   it('persists a random instance identity and reuses it after reconnect, clearing chat, and worker restart', async () => {
     const ws = await bootConnected();
+    expect(ws.last('hello')!.version).toBe(chrome.runtime.getManifest().version);
     const id = storage.remoteBrowserId;
     expect(id).toMatch(/^[a-f0-9-]{36}$/);
     expect(ws.last('hello')!.browserId).toBe(id);
