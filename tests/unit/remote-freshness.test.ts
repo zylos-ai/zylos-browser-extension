@@ -146,13 +146,29 @@ it('abandons a reconnect whose upgrade never completes and tries again', async (
   expect((await state()).connected).toBe(true);
 });
 it('keeps recent valid inbound traffic alive', async () => {
-  for (let n = 0; n < 5; n++) {
+  await setDiagnosticsEnabled(true);
+  for (let n = 0; n < 120; n++) {
     await vi.advanceTimersByTimeAsync(17_000);
     sockets[0]!.receive({ type: 'ping', ts: Date.now() });
     await flush();
+    const { events } = await getDiagnostics({});
+    expect(events.some((event) => event.event === 'transport-timer')).toBe(false);
   }
   expect((await state()).connected).toBe(true);
   expect(sockets[0]!.close).not.toHaveBeenCalled();
+  const { events } = await getDiagnostics({});
+  expect(events.filter((event) => event.event === 'transport-timer')).toEqual([]);
+  expect(events.filter((event) => event.code === 'HEARTBEAT_TIMEOUT')).toEqual([]);
+});
+
+it('retains timely timeout diagnostics when inbound heartbeats stop', async () => {
+  await setDiagnosticsEnabled(true);
+  await vi.advanceTimersByTimeAsync(60_000);
+  const { events } = await getDiagnostics({});
+  expect(events.find((event) => event.event === 'transport-timer')).toMatchObject({
+    timer: 'freshness', delayMs: 0, inboundAgeMs: 60_000,
+  });
+  expect(events.some((event) => event.code === 'HEARTBEAT_TIMEOUT')).toBe(true);
 });
 it('checks elapsed time on alarm after suspension even if timers did not fire', async () => {
   vi.setSystemTime(Date.now() + 90_000);

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Tests
+
+- Verify 34 minutes of regular inbound heartbeats emit no watchdog timer logs,
+  while an on-time heartbeat timeout retains timing evidence. The watchdog resets
+  on inbound traffic; it is not a periodic success log.
+
 ### Added
 
 - Record bounded transport timer deadlines, actual firing times, scheduling delay,

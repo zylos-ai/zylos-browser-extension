@@ -895,6 +895,7 @@ export function startRemoteBackground() {
   }
 
   function armFreshnessTimer() {
+    // Inbound traffic resets this watchdog; healthy heartbeats do not emit periodic timer logs.
     clearTimeout(freshnessTimer);
     freshnessTimer = transportTimer('freshness', TRANSPORT_STALE_MS, checkTransportFreshness);
   }
