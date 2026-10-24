@@ -159,7 +159,9 @@ export function Conversation({
                       className={`message ${message.role}`}
                       aria-label={
                         message.role === 'user'
-                          ? t('you')
+                          ? message.origin === 'agent'
+                            ? t('agentStarted')
+                            : t('you')
                           : message.role === 'assistant'
                             ? 'Zylos'
                             : t('systemMessage')
@@ -173,6 +175,9 @@ export function Conversation({
                       )}
                       {message.role === 'system' && (
                         <span className="system-label">{t('system')}</span>
+                      )}
+                      {message.role === 'user' && message.origin === 'agent' && (
+                        <span className="system-label">{t('agentStarted')}</span>
                       )}
                       {message.attachments?.some((attachment) => attachment.type !== 'quote') && (
                         <ul

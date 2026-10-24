@@ -4,6 +4,8 @@ import {
   DetailedCapture,
   DETAIL_BYTES,
   DETAIL_TTL,
+  FROZEN_DETAIL_TTL,
+  FROZEN_DETAIL_BYTES,
   serializeDetail,
   redactDetail,
 } from '../../utils/detailed-diagnostics';
@@ -68,6 +70,62 @@ it('bounds retained bytes and event count and reports drops, truncation and corr
   });
   output.records.length = 0;
   expect(capture.preview(token).records.length).toBeGreaterThan(0);
+});
+
+it('retains a frozen fault after capture expiry without extending collection or sharing consent', async () => {
+  const changes = vi.fn();
+  const capture = new DetailedCapture(changes);
+  expect(capture.freeze('missing', {})).toBe(false);
+  const token = capture.enable().consent;
+  capture.append(token, 'background', event('fault'));
+  const snapshot = {
+    capture: capture.preview(token),
+    incidents: [{ reason: 'target_closed' }],
+    limitations: ['existing'],
+  };
+  // Remote validates the v1 capture field set exactly.
+  expect(Object.keys(snapshot.capture)).not.toEqual(
+    expect.arrayContaining(['exportExpiresAt', 'frozenAt', 'frozenCount', 'consent']),
+  );
+  expect(capture.freeze(token, snapshot)).toBe(true);
+  const exported = capture.exportContext();
+  expect(exported.consent).not.toBe(token);
+  snapshot.capture.records[0]!.text = 'mutated';
+  await vi.advanceTimersByTimeAsync(DETAIL_TTL);
+  expect(capture.state()).toMatchObject({ enabled: false, consent: '', count: 0, frozenCount: 1 });
+  expect(capture.valid(token)).toBe(false);
+  expect(capture.append(token, 'background', event('late'))).toBe(false);
+  expect(capture.append(exported.consent, 'background', event('export token'))).toBe(false);
+  expect(capture.freeze(exported.consent, {})).toBe(false);
+  expect(capture.validExport(exported.consent)).toBe(true);
+  const frozen = capture.frozenPreview(exported.consent) as any;
+  expect(frozen).toMatchObject({ capture: { records: [{ text: 'fault' }] } });
+  expect(frozen.retention).toBeUndefined();
+  expect(frozen.limitations[0]).toBe('existing');
+  expect(frozen.limitations[1]).toContain(new Date(exported.expiresAt!).toISOString());
+  expect(changes).toHaveBeenCalledWith('capture-expired');
+  await vi.advanceTimersByTimeAsync(FROZEN_DETAIL_TTL - DETAIL_TTL);
+  expect(capture.validExport(exported.consent)).toBe(false);
+  expect(() => capture.frozenPreview(exported.consent)).toThrow();
+});
+
+it('bounds immutable frozen evidence and revokes previous export tokens on replacement and clear', () => {
+  const capture = new DetailedCapture(() => {});
+  const token = capture.enable().consent;
+  expect(capture.freeze(token, { capture: { records: [] } })).toBe(true);
+  const first = capture.exportContext().consent;
+  expect(capture.freeze(token, { text: 'x'.repeat(FROZEN_DETAIL_BYTES) })).toBe(false);
+  expect(capture.validExport(first)).toBe(true);
+  expect(capture.freeze(token, { capture: { records: ['new'] } })).toBe(true);
+  expect(capture.validExport(first)).toBe(false);
+  const second = capture.exportContext().consent;
+  capture.clear();
+  expect(capture.validExport(second)).toBe(false);
+  const third = capture.enable().consent;
+  capture.freeze(third, { capture: { records: [] } });
+  const fourth = capture.exportContext().consent;
+  capture.enable();
+  expect(capture.validExport(fourth)).toBe(false);
 });
 
 it('does not invoke object getters/toJSON and marks opaque, cyclic and revoked objects omitted', () => {

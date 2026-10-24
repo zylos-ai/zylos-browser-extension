@@ -460,6 +460,100 @@ test('inspection is immutable, does not attach and selected removal requires aut
   await s.executor.release(false);
 });
 
+test('child-document inspection removes a candidate only through its own document', async () => {
+  const s = await frameSelectionSetup();
+  const child = { documentId: 'document-2', frameId: 5, url: 'https://child.example/form' };
+  chrome.webNavigation.getAllFrames = async () => [
+    { frameId: 0, documentId: 'document-1', url: s.tab.url },
+    { frameId: 5, documentId: 'document-2', parentDocumentId: 'document-1', url: child.url },
+    // Extension pages cannot be scripted; unrelated documents are never reached.
+    {
+      frameId: 6,
+      documentId: 'ext-doc',
+      parentDocumentId: 'document-2',
+      url: `chrome-extension://${'b'.repeat(32)}/menu.html`,
+    },
+    {
+      frameId: 7,
+      documentId: 'broken-doc',
+      parentDocumentId: 'document-1',
+      url: 'https://broken.example/',
+    },
+    {
+      frameId: 8,
+      documentId: 'other-doc',
+      parentDocumentId: 'elsewhere',
+      url: 'https://other.example/',
+    },
+  ];
+  s.executor.configureControlRecovery({
+    enabled: () => true,
+    frameSelectionEnabled: () => true,
+    closedShadowEnabled: () => true,
+    childFramesEnabled: () => true,
+    onSuspended: s.suspended,
+    onRevoked: s.revoked,
+  });
+  const candidate = {
+    id: crypto.randomUUID(),
+    extensionOrigin: `chrome-extension://${'b'.repeat(32)}`,
+  };
+  const targets = [];
+  let authorizations;
+  chrome.scripting.executeScript = async (request) => {
+    const args = request.args[0];
+    const [documentId] = request.target.documentIds;
+    targets.push(`${args.action}:${documentId}`);
+    if (args.action === 'revoke') return [];
+    if (documentId === 'broken-doc') throw new Error('Cannot access frame');
+    const frameId = documentId === 'document-2' ? 5 : 0;
+    assert.equal(args.url, documentId === 'document-2' ? child.url : s.tab.url);
+    if (args.action === 'inspect')
+      return [
+        {
+          frameId,
+          documentId,
+          result: {
+            inspection: {
+              candidates: documentId === 'document-2' ? [candidate] : [],
+              truncated: false,
+              coverage: 'root-document-open-and-closed-shadow',
+            },
+          },
+        },
+      ];
+    const root = { frameId: 0, documentId: 'document-1', url: s.tab.url };
+    authorizations = [
+      await s.authorize(args, root),
+      await s.authorize(args, { ...child, documentId: 'document-2', frameId: 0 }),
+      await s.authorize(args, child),
+      await s.authorize(args, child),
+    ];
+    return [{ frameId, documentId, result: { removed: 1 } }];
+  };
+  const id = s.executor.currentControlRecovery().recoveryId;
+  const { inspection } = await s.executor.inspectRecoveryFrames(id);
+  assert.deepEqual(inspection, {
+    candidates: [candidate],
+    truncated: true,
+    coverage: 'documents-open-and-closed-shadow',
+  });
+  assert.deepEqual(targets.sort(), [
+    'inspect:broken-doc',
+    'inspect:document-1',
+    'inspect:document-2',
+  ]);
+  const result = await s.executor.recoverControl(id, Infinity, [candidate.id]);
+  assert.equal(result.recovered, true);
+  assert.ok(targets.includes('remove:document-2'));
+  assert.ok(!targets.includes('remove:document-1'));
+  assert.deepEqual(
+    authorizations.map((item) => item.allowed),
+    [false, false, true, false],
+  );
+  await s.executor.release(false);
+});
+
 test.each(['unknown', 'duplicate', 'document'])(
   'selected recovery fails terminal before removal for %s',
   async (invalid) => {
@@ -547,6 +641,440 @@ test('recovery blocks automatic unpark, uses exact original tab once and returns
   assert.equal(s.executor.currentControlRecovery(), undefined);
   assert.equal(s.executor.currentControl(), null);
 });
+async function automaticSetup() {
+  const s = await recoverySetup();
+  s.executor.configureControlRecovery({
+    enabled: () => true,
+    automaticEnabled: () => true,
+    onSuspended: s.suspended,
+    onRevoked: s.revoked,
+  });
+  return s;
+}
+
+async function automaticRemovalSetup() {
+  const s = await frameSelectionSetup();
+  let allowed = true;
+  s.executor.configureControlRecovery({
+    enabled: () => true,
+    frameSelectionEnabled: () => true,
+    automaticEnabled: () => true,
+    automaticRemovalEnabled: () => allowed,
+    onSuspended: s.suspended,
+    onRevoked: s.revoked,
+  });
+  const script = chrome.scripting.executeScript;
+  chrome.scripting.executeScript = async (request) =>
+    request.args[0].action === 'probe'
+      ? [{ frameId: 0, documentId: 'document-1', result: { inspection: s.inspection } }]
+      : script(request);
+  return {
+    ...s,
+    revoke: () => {
+      allowed = false;
+    },
+  };
+}
+
+test('current-task compatibility grant removes only inspected candidates and recovers without input', async () => {
+  const s = await automaticRemovalSetup();
+  const result = await s.executor.autoRecoverControl();
+  assert.equal(result.recovered, true);
+  assert.deepEqual(result.removal, { requested: 1, removed: 1, outcome: 'completed' });
+  assert.deepEqual(s.scripts, ['inspect', 'remove']);
+  assert.equal(
+    s.methods.some((method) => method.startsWith('Input.')),
+    false,
+  );
+  await s.executor.release(false);
+});
+
+test('compatibility mode refuses a truncated inspection', async () => {
+  const s = await automaticRemovalSetup();
+  const script = chrome.scripting.executeScript;
+  chrome.scripting.executeScript = async (request) => {
+    const result = await script(request);
+    if (request.args[0].action === 'inspect')
+      result[0].result.inspection = { ...s.inspection, truncated: true };
+    return result;
+  };
+  assert.equal(await s.executor.autoRecoverControl(), undefined);
+  assert.deepEqual(s.scripts, ['inspect']);
+  assert.equal(s.attached.size, 0);
+  await s.executor.release(false);
+});
+
+test('compatibility grant revoked while asynchronous removal waits prevents removal authorization', async () => {
+  const s = await automaticRemovalSetup();
+  const script = chrome.scripting.executeScript;
+  chrome.scripting.executeScript = async (request) => {
+    if (request.args[0].action === 'remove') s.revoke();
+    return script(request);
+  };
+  assert.equal(await s.executor.autoRecoverControl(), undefined);
+  assert.equal(s.attached.size, 0);
+  assert.equal(await s.executor.autoRecoverControl(), undefined);
+  await s.executor.release(false);
+});
+
+test('failed attach after automatic removal preserves an explicit uncertain removal receipt', async () => {
+  const s = await automaticRemovalSetup();
+  chrome.debugger.attach = async () => {
+    throw new Error('attach failed');
+  };
+  assert.equal(await s.executor.autoRecoverControl(), undefined);
+  assert.deepEqual(s.executor.currentControlRecovery().removalReceipt, {
+    requested: 1,
+    outcome: 'unknown',
+  });
+  assert.deepEqual(s.scripts, ['inspect', 'remove']);
+  assert.equal(await s.executor.autoRecoverControl(), undefined);
+  await s.executor.release(false);
+});
+
+test('compatibility revoke during asynchronous authorization validation denies the document', async () => {
+  const s = await automaticRemovalSetup();
+  const script = chrome.scripting.executeScript;
+  chrome.scripting.executeScript = async (request) => {
+    if (request.args[0].action === 'remove') {
+      const get = chrome.tabs.get;
+      chrome.tabs.get = async (id) => {
+        const tab = await get(id);
+        s.revoke();
+        return tab;
+      };
+      assert.deepEqual(await s.authorize(request.args[0]), { allowed: false });
+      return [{ frameId: 0, documentId: 'document-1', result: { error: 'RECOVERY_UNAVAILABLE' } }];
+    }
+    return script(request);
+  };
+  assert.equal(await s.executor.autoRecoverControl(), undefined);
+  assert.equal(s.attached.size, 0);
+  await s.executor.release(false);
+});
+
+test.each([
+  'recover',
+  'recover-delayed',
+  'owner-update',
+  'late-owner-update',
+  'revoke',
+  'navigation',
+  'type-unknown-caret',
+])(
+  'prepared input handles %s before insertion without replaying focus or text',
+  async (scenario) => {
+    const s = await automaticRemovalSetup();
+    await s.executor.recoverControl(s.executor.currentControlRecovery().recoveryId);
+    const snapshot = await s.executor.execute({ op: 'snapshot' }, Infinity);
+    const ref = snapshot.text.match(/@[a-f0-9]{8}-e\d+/)[0];
+    const { PageActions } = await import('../../utils/automation/page-actions');
+    let prepared = 0,
+      inserted = 0,
+      ownerUpdated = false;
+    const prepare = vi
+      .spyOn(PageActions.prototype, 'prepareInput')
+      .mockImplementation(async function () {
+        prepared++;
+        this.io.onInputPrepared?.({ value: '', selectionStart: 0, selectionEnd: 0 });
+        if (scenario === 'recover-delayed') {
+          setTimeout(() => s.detach(), 20);
+          throw new Error('Detached while handling command.');
+        }
+        s.detach();
+        if (scenario === 'owner-update') ownerUpdated = true;
+        if (scenario === 'revoke') s.revoke();
+        if (scenario === 'navigation')
+          chrome.webNavigation.getFrame = async () => ({
+            documentId: 'new-document',
+            url: s.tab.url,
+          });
+      });
+    const commit = vi
+      .spyOn(PageActions.prototype, 'commitInput')
+      .mockImplementation(async function () {
+        if (scenario === 'late-owner-update') ownerUpdated = true;
+        await this.io.send('Input.insertText', { text: 'fixture' });
+        inserted++;
+        return { done: true };
+      });
+    try {
+      const work = s.executor.execute(
+        { op: scenario === 'type-unknown-caret' ? 'type' : 'fill', ref, text: 'fixture' },
+        Infinity,
+        {
+          beforeInput: () => {
+            if (ownerUpdated)
+              throw Object.assign(new Error('Owner update'), { code: 'OWNER_INPUT_REQUIRED' });
+          },
+        },
+      );
+      if (scenario === 'recover' || scenario === 'recover-delayed') {
+        assert.deepEqual(await work, { done: true });
+        assert.equal(inserted, 1);
+      } else {
+        await assert.rejects(work);
+        assert.equal(inserted, 0);
+      }
+      assert.equal(prepared, 1);
+    } finally {
+      prepare.mockRestore();
+      commit.mockRestore();
+      await s.executor.release(false);
+    }
+  },
+);
+
+test('automatic reattachment runs once per detach outside the Agent budget and restores its own refs', async () => {
+  const s = await automaticSetup();
+  const before = await s.executor.execute({ op: 'snapshot' }, Infinity);
+  const ref = before.text.match(/@[a-f0-9]{8}-e\d+/)[0];
+  s.detach();
+  const recovery = s.executor.currentControlRecovery();
+  const result = await s.executor.autoRecoverControl();
+  assert.equal(result.recovered, true);
+  assert.equal(result.replayed, false);
+  assert.equal(s.executor.currentControlRecovery(), undefined);
+  assert.equal(s.executor.currentGrant().id, s.tab.id);
+  assert.equal(s.executor.restoreRecoveredRefs([ref, '@00000000-e9']), 1);
+  assert.equal(
+    s.methods.some((method) => method.startsWith('Input.')),
+    false,
+  );
+  // The Agent's own three attempts remain available after automatic recoveries.
+  for (let i = 0; i < 2; i++) {
+    s.detach();
+    await s.executor.recoverControl(s.executor.currentControlRecovery().recoveryId);
+  }
+  assert.notEqual(s.executor.currentControlRecovery()?.recoveryId, recovery.recoveryId);
+  await s.executor.release(false);
+});
+
+test('a failed automatic attempt leaves the same lease for the Agent and is not retried', async () => {
+  const s = await automaticSetup();
+  s.detach();
+  const recovery = s.executor.currentControlRecovery();
+  const attach = chrome.debugger.attach;
+  chrome.debugger.attach = async () => {
+    throw new Error('Cannot access a chrome-extension:// URL of different extension');
+  };
+  assert.equal(await s.executor.autoRecoverControl(), undefined);
+  assert.equal(s.executor.currentControlRecovery().recoveryId, recovery.recoveryId);
+  assert.equal(await s.executor.autoRecoverControl(), undefined);
+  chrome.debugger.attach = attach;
+  const result = await s.executor.recoverControl(recovery.recoveryId);
+  assert.equal(result.recovered, true);
+  // Manual recovery never rebinds old refs.
+  assert.equal(s.executor.restoreRecoveredRefs(['@00000000-e1']), 0);
+  await s.executor.release(false);
+});
+
+test('automatic reattachment waits while a foreign extension frame remains and then gives way', async () => {
+  const s = await frameSelectionSetup();
+  s.executor.configureControlRecovery({
+    enabled: () => true,
+    frameSelectionEnabled: () => true,
+    automaticEnabled: () => true,
+    onSuspended: s.suspended,
+    onRevoked: s.revoked,
+  });
+  const probes = [];
+  chrome.scripting.executeScript = async (request) => {
+    probes.push(request.args[0].action);
+    return [
+      {
+        frameId: 0,
+        documentId: 'document-1',
+        result: {
+          inspection: {
+            candidates: [{ id: 'x', extensionOrigin: 'chrome-extension://' + 'b'.repeat(32) }],
+            truncated: false,
+            coverage: 'root-document-open-shadow',
+          },
+        },
+      },
+    ];
+  };
+  const started = Date.now();
+  assert.equal(await s.executor.autoRecoverControl(), undefined);
+  assert.ok(Date.now() - started >= 4500);
+  assert.ok(probes.length >= 5 && probes.every((action) => action === 'probe'));
+  assert.equal(s.attached.size, 0);
+  assert.ok(s.executor.currentControlRecovery());
+  await s.executor.release(false);
+}, 15000);
+
+test('automatic recovery stops probing when negotiated capabilities disappear', async () => {
+  const s = await frameSelectionSetup();
+  let ready = true;
+  s.executor.configureControlRecovery({
+    enabled: () => ready,
+    frameSelectionEnabled: () => ready,
+    closedShadowEnabled: () => ready,
+    childFramesEnabled: () => ready,
+    automaticEnabled: () => ready,
+    onSuspended: s.suspended,
+    onRevoked: s.revoked,
+  });
+  chrome.webNavigation.getAllFrames = async () => [];
+  let probes = 0;
+  chrome.scripting.executeScript = async () => {
+    probes++;
+    ready = false;
+    return [{ result: { inspection: { candidates: [], truncated: false } } }];
+  };
+  const recover = s.executor.currentControlRecovery();
+  vi.useFakeTimers();
+  try {
+    const pending = s.executor.autoRecoverControl();
+    await vi.advanceTimersByTimeAsync(5200);
+    assert.equal(await pending, undefined);
+  } finally {
+    vi.useRealTimers();
+  }
+  assert.equal(probes, 1);
+  assert.equal(s.attached.size, 0);
+  assert.equal(s.executor.currentControlRecovery().recoveryId, recover.recoveryId);
+  assert.equal(s.executor.currentControlRecovery().attempted, undefined);
+  await s.executor.release(false);
+});
+
+test('automatic recovery records repeated frame presence and the eventual clear probe', async () => {
+  const s = await frameSelectionSetup();
+  const diagnostics = await import('../../utils/diagnostics');
+  const recorded = vi.spyOn(diagnostics, 'recordDiagnostic');
+  s.executor.configureControlRecovery({
+    enabled: () => true,
+    automaticEnabled: () => true,
+    frameSelectionEnabled: () => true,
+    onSuspended: s.suspended,
+    onRevoked: s.revoked,
+  });
+  let probes = 0;
+  chrome.scripting.executeScript = async () => [
+    {
+      result: {
+        inspection: {
+          candidates: ++probes < 3 ? [{ id: 'foreign' }] : [],
+          truncated: false,
+        },
+      },
+    },
+  ];
+  vi.useFakeTimers();
+  try {
+    const pending = s.executor.autoRecoverControl();
+    await vi.advanceTimersByTimeAsync(1000);
+    assert.equal((await pending).recovered, true);
+    const results = recorded.mock.calls.filter(
+      ([event, , data]) =>
+        event === 'operation-result' && data?.method === 'inspect-recovery-frames',
+    );
+    assert.deepEqual(
+      results.map(([, , data]) => [data.status, data.count, data.code]),
+      [
+        ['error', 1, 'FOREIGN_FRAME_PRESENT'],
+        ['error', 1, 'FOREIGN_FRAME_PRESENT'],
+        ['success', undefined, undefined],
+      ],
+    );
+  } finally {
+    vi.useRealTimers();
+    recorded.mockRestore();
+    await s.executor.release(false);
+  }
+});
+
+test.each(['reconnect', 'missing-scope', 'stop'])(
+  'automatic recovery handles %s during its bounded wait',
+  async (mode) => {
+    const s = await frameSelectionSetup();
+    let ready = true;
+    let childrenReady = true;
+    s.executor.configureControlRecovery({
+      enabled: () => ready,
+      automaticEnabled: () => ready,
+      frameSelectionEnabled: () => ready,
+      closedShadowEnabled: () => ready,
+      childFramesEnabled: () => ready && childrenReady,
+      onSuspended: s.suspended,
+      onRevoked: s.revoked,
+    });
+    chrome.webNavigation.getAllFrames = async () => [];
+    let probes = 0;
+    chrome.scripting.executeScript = async (request) => {
+      if (request.args[0].action !== 'probe') return [];
+      assert.equal(request.args[0].allowClosedShadow, true);
+      probes++;
+      if (probes === 1) ready = false;
+      return [{ result: { inspection: { candidates: [], truncated: false } } }];
+    };
+    vi.useFakeTimers();
+    try {
+      const pending = s.executor.autoRecoverControl();
+      await vi.advanceTimersByTimeAsync(350);
+      assert.equal(s.attached.size, 0);
+      assert.equal(probes, 1);
+      if (mode === 'stop') await s.executor.release(false);
+      childrenReady = mode !== 'missing-scope';
+      ready = true;
+      await vi.advanceTimersByTimeAsync(5100);
+      const result = await pending;
+      if (mode === 'reconnect') {
+        assert.equal(result.recovered, true);
+        assert.equal(probes, 2);
+      } else {
+        assert.equal(result, undefined);
+        assert.equal(s.attached.size, 0);
+        assert.equal(probes, 1);
+      }
+    } finally {
+      vi.useRealTimers();
+      await s.executor.release(false);
+    }
+  },
+);
+
+test.each(['child-error', 'truncated'])(
+  'automatic recovery does not attach after an incomplete %s probe',
+  async (failure) => {
+    const s = await frameSelectionSetup();
+    s.executor.configureControlRecovery({
+      enabled: () => true,
+      frameSelectionEnabled: () => true,
+      closedShadowEnabled: () => true,
+      childFramesEnabled: () => true,
+      automaticEnabled: () => true,
+      onSuspended: s.suspended,
+      onRevoked: s.revoked,
+    });
+    chrome.webNavigation.getAllFrames = async () => [
+      {
+        frameId: 1,
+        documentId: 'child',
+        parentDocumentId: 'document-1',
+        url: 'https://child.example/',
+      },
+    ];
+    chrome.scripting.executeScript = async (request) => {
+      if (failure === 'child-error' && request.target.documentIds[0] === 'child')
+        throw new Error('Cannot inspect child');
+      return [{ result: { inspection: { candidates: [], truncated: failure === 'truncated' } } }];
+    };
+    vi.useFakeTimers();
+    try {
+      const pending = s.executor.autoRecoverControl();
+      await vi.advanceTimersByTimeAsync(5100);
+      assert.equal(await pending, undefined);
+      assert.equal(s.attached.size, 0);
+      assert.ok(s.executor.currentControlRecovery());
+    } finally {
+      vi.useRealTimers();
+      await s.executor.release(false);
+    }
+  },
+);
+
 test('explicit Chrome cancellation never enters recovery', async () => {
   const s = await recoverySetup();
   s.detach('canceled_by_user');

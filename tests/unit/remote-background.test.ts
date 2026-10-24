@@ -19,6 +19,7 @@ const executor = vi.hoisted(() => ({
   onState: vi.fn(),
   initializeExecutor: vi.fn(),
   configureControlRecovery: vi.fn((_hooks: any) => {}),
+  revokeAutomaticRemoval: vi.fn(),
   abortControlRecovery: vi.fn(),
   revealTask: vi.fn(async () => {}),
 }));
@@ -110,6 +111,7 @@ beforeEach(() => {
     remoteConfig: { relayUrl: 'wss://agent.example/browser-remote/ext', key: KEY, enabled: true },
   };
   executor.currentControl.mockReturnValue(null);
+  executor.createTask.mockReset();
   executor.currentGrant.mockReturnValue(null);
   executor.completeTask.mockImplementation(async () => {
     executor.currentControl.mockReturnValue(null);
@@ -169,6 +171,7 @@ async function bootConnected(
   resume = false,
   controlRecovery = false,
   frameSelection = false,
+  agentStart = false,
 ) {
   startRemoteBackground();
   await flush();
@@ -180,6 +183,7 @@ async function bootConnected(
       'agent-loop-v1',
       'browser-instance-v1',
       'agent-message-v2',
+      ...(agentStart ? ['agent-task-start-v1'] : []),
       ...(attachments ? ['attachments-v1'] : []),
       ...(interrupt ? ['agent-interrupt-v1'] : []),
       ...(steering ? ['agent-input-v1'] : []),
@@ -230,6 +234,316 @@ const respond = async (
 };
 
 describe('decision transport background', () => {
+  it('retains consented transport fault evidence after collection expires and clears it explicitly', async () => {
+    const ws = await bootConnected();
+    await ask({ type: 'remote-detailed-set-enabled', enabled: true });
+    const capture = (await state()).detailedDiagnostics as any;
+    await ask({
+      type: 'remote-detailed-event',
+      consent: capture.consent,
+      event: {
+        kind: 'console',
+        level: 'info',
+        at: Date.now(),
+        text: 'before transport loss',
+        truncated: false,
+      },
+    });
+    ws.serverClose(1006);
+    const frozen = (await state()).detailedDiagnostics as any;
+    expect(frozen.exportConsent).not.toBe(capture.consent);
+    expect(frozen.frozenAt).toEqual(expect.any(Number));
+    await vi.advanceTimersByTimeAsync(10 * 60_000 + 1);
+    const expired = (await state()).detailedDiagnostics as any;
+    expect(expired.enabled).toBe(false);
+    expect(expired.exportConsent).toBeTruthy();
+    const preview = await ask({ type: 'remote-detailed-preview', consent: expired.exportConsent });
+    expect(preview.ok).toBe(true);
+    expect(JSON.stringify(preview.value)).toContain('control-lost');
+    expect(
+      (
+        await ask({
+          type: 'remote-detailed-event',
+          consent: capture.consent,
+          event: {
+            kind: 'console',
+            level: 'info',
+            at: Date.now(),
+            text: 'after expiry',
+            truncated: false,
+          },
+        })
+      ).value,
+    ).toEqual({ accepted: false });
+    await ask({ type: 'remote-detailed-set-enabled', enabled: false });
+    expect(
+      (await ask({ type: 'remote-detailed-preview', consent: expired.exportConsent })).ok,
+    ).toBe(false);
+  });
+  const startInput = {
+    requestId: '22222222-2222-4222-8222-222222222222',
+    prompt: 'Inspect the task page',
+    url: 'https://example.com/',
+  };
+  const requestStart = async (ws: Socket, params = startInput, id = 900) => {
+    ws.receive({ type: 'req', id, method: 'task.start', params });
+    await flush();
+    return ws.frames.findLast((frame) => frame.id === id);
+  };
+  const taskStartSetup = async () => {
+    const ws = await bootConnected(false, false, true, false, false, false, true);
+    chrome.tabs.get = vi.fn(async (id: number) => ({
+      id,
+      windowId: 1,
+      status: 'complete',
+      url: 'https://example.com/',
+    })) as any;
+    chrome.windows.get = vi.fn(async () => ({ id: 1 })) as any;
+    chrome.webNavigation = {
+      getFrame: vi.fn(async () => ({
+        documentId: 'task-document',
+        url: 'https://example.com/',
+      })),
+    } as any;
+    executor.createTask.mockImplementation(async (input) => {
+      executor.currentControl.mockReturnValue({
+        sessionId: input.taskId,
+        tabId: 20,
+        tabIds: [20],
+        phase: 'ready',
+        windowId: 1,
+      } as any);
+    });
+    await ask({ type: 'remote-agent-start-set-enabled', enabled: true });
+    return ws;
+  };
+  it('requires explicit session permission and negotiated agent-start support', async () => {
+    const ws = await bootConnected(false, false, true, false, false, false, true);
+    expect(await requestStart(ws)).toMatchObject({ type: 'error', code: 'TASK_START_DISABLED' });
+    expect(executor.createTask).not.toHaveBeenCalled();
+    expect((await state()).agentStartEnabled).toBe(false);
+  });
+  it('starts an owned task once and replays the same task result', async () => {
+    const ws = await taskStartSetup();
+    const first = await requestStart(ws);
+    expect(first).toMatchObject({
+      type: 'resp',
+      result: { requestId: startInput.requestId, status: 'started' },
+    });
+    expect(executor.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceTabId: 3, windowId: 1, url: startInput.url }),
+    );
+    const taskId = (first!.result as any).taskId;
+    expect(ws.last('agent-request')).toMatchObject({ taskId });
+    expect(((await state()) as any).chat.find((entry: any) => entry.id === taskId)).toMatchObject({
+      role: 'user',
+      origin: 'agent',
+    });
+    expect(await requestStart(ws, startInput, 901)).toMatchObject({
+      result: { taskId, status: 'existing' },
+    });
+    expect(executor.createTask).toHaveBeenCalledTimes(1);
+    expect(await requestStart(ws, { ...startInput, prompt: 'changed' }, 902)).toMatchObject({
+      code: 'TASK_START_CONFLICT',
+    });
+    await ask({ type: 'remote-stop' });
+    expect(await requestStart(ws, startInput, 903)).toMatchObject({
+      result: { taskId, status: 'existing' },
+    });
+    expect((await state()).loopActive).toBe(false);
+  });
+  it('compatibility setting defaults off and persists across Stop and new tasks', async () => {
+    const ws = await taskStartSetup();
+    const first = await requestStart(ws);
+    const taskId = (first!.result as any).taskId;
+    const hooks = executor.configureControlRecovery.mock.calls.at(-1)![0];
+    expect(hooks.automaticRemovalEnabled()).toBe(false);
+    expect((await ask({ type: 'remote-compatibility-set-enabled', enabled: true })).ok).toBe(true);
+    expect(hooks.automaticRemovalEnabled()).toBe(true);
+    await ask({ type: 'remote-compatibility-set-enabled', enabled: false });
+    expect(executor.revokeAutomaticRemoval).toHaveBeenCalledTimes(1);
+    expect(hooks.automaticRemovalEnabled()).toBe(false);
+    await ask({ type: 'remote-compatibility-set-enabled', enabled: true });
+    await ask({ type: 'remote-stop' });
+    expect(hooks.automaticRemovalEnabled()).toBe(false);
+    expect((await state()).compatibilityEnabled).toBe(true);
+    executor.currentControl.mockReturnValue(null);
+    const second = await requestStart(
+      ws,
+      { ...startInput, requestId: '33333333-3333-4333-8333-333333333333' },
+      901,
+    );
+    expect(second).toMatchObject({ type: 'resp', result: { status: 'started' } });
+    expect(hooks.automaticRemovalEnabled()).toBe(true);
+  });
+  it('compatibility persists across disconnect but cannot remove without active control', async () => {
+    const ws = await taskStartSetup();
+    const first = await requestStart(ws);
+    const taskId = (first!.result as any).taskId;
+    const hooks = executor.configureControlRecovery.mock.calls.at(-1)![0];
+    await ask({ type: 'remote-compatibility-set-enabled', enabled: true });
+    const control = executor.currentControl();
+    executor.currentControl.mockReturnValue(null);
+    expect(hooks.automaticRemovalEnabled()).toBe(false);
+    executor.currentControl.mockReturnValue(control);
+    expect(hooks.automaticRemovalEnabled()).toBe(true);
+    ws.serverClose(1006);
+    await flush();
+    expect(hooks.automaticRemovalEnabled()).toBe(false);
+    expect((await state()).compatibilityEnabled).toBe(true);
+  });
+  it('loads saved compatibility preference after worker restart without granting idle control', async () => {
+    (storage.remoteConfig as any).compatibilityEnabled = true;
+    await bootConnected();
+    expect((await state()).compatibilityEnabled).toBe(true);
+    expect(executor.configureControlRecovery.mock.calls.at(-1)![0].automaticRemovalEnabled()).toBe(
+      false,
+    );
+  });
+  it('keeps compatibility after successful task completion but disables idle removal', async () => {
+    const ws = await taskStartSetup();
+    await requestStart(ws);
+    await ask({ type: 'remote-compatibility-set-enabled', enabled: true });
+    await respond(ws, ws.last('agent-request')!, { kind: 'done', text: 'Finished' });
+    expect((await state()).compatibilityEnabled).toBe(true);
+    expect(executor.configureControlRecovery.mock.calls.at(-1)![0].automaticRemovalEnabled()).toBe(
+      false,
+    );
+    expect((storage.remoteConfig as any).compatibilityEnabled).toBe(true);
+  });
+  it.each([
+    { relayUrl: 'wss://new.example/ext', key: KEY },
+    { relayUrl: 'wss://agent.example/browser-remote/ext', key: 'b'.repeat(64) },
+  ])('clears saved compatibility when connection identity changes: %j', async (change) => {
+    await bootConnected();
+    await ask({ type: 'remote-compatibility-set-enabled', enabled: true });
+    expect((await ask({ type: 'remote-save', ...change })).ok).toBe(true);
+    expect((storage.remoteConfig as any).compatibilityEnabled).toBe(false);
+    expect((await state()).compatibilityEnabled).toBe(false);
+  });
+  it('failed enable does not grant permission, failed disable still revokes immediately', async () => {
+    await bootConnected();
+    vi.mocked(chrome.storage.local.set).mockRejectedValueOnce(new Error('disk full'));
+    expect((await ask({ type: 'remote-compatibility-set-enabled', enabled: true })).ok).toBe(false);
+    expect((await state()).compatibilityEnabled).toBe(false);
+    await ask({ type: 'remote-compatibility-set-enabled', enabled: true });
+    vi.mocked(chrome.storage.local.set).mockRejectedValueOnce(new Error('disk full'));
+    expect((await ask({ type: 'remote-compatibility-set-enabled', enabled: false })).ok).toBe(
+      false,
+    );
+    expect((await state()).compatibilityEnabled).toBe(false);
+    expect(executor.revokeAutomaticRemoval).toHaveBeenCalled();
+  });
+  it('saving unchanged connection identity preserves compatibility', async () => {
+    await bootConnected();
+    await ask({ type: 'remote-compatibility-set-enabled', enabled: true });
+    await ask({
+      type: 'remote-save',
+      relayUrl: 'wss://agent.example/browser-remote/ext',
+      key: KEY,
+    });
+    expect((storage.remoteConfig as any).compatibilityEnabled).toBe(true);
+  });
+  it('refuses agent start while a panel task is active', async () => {
+    const ws = await taskStartSetup();
+    await begin(ws);
+    expect(await requestStart(ws)).toMatchObject({ code: 'TASK_START_CONFLICT' });
+    expect(executor.createTask).not.toHaveBeenCalled();
+  });
+  it('defers the first request until the owned task tab finishes navigating', async () => {
+    const ws = await taskStartSetup();
+    vi.mocked(chrome.tabs.get).mockResolvedValueOnce({
+      id: 20,
+      windowId: 1,
+      status: 'loading',
+      pendingUrl: startInput.url,
+    } as any);
+    ws.receive({ type: 'req', id: 900, method: 'task.start', params: startInput });
+    await flush();
+    expect(ws.last('agent-request')).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(ws.last('agent-request')).toBeDefined();
+    expect(executor.createTask).toHaveBeenCalledTimes(1);
+  });
+  it('Stop while waiting for the first page prevents a late agent request', async () => {
+    const ws = await taskStartSetup();
+    vi.mocked(chrome.tabs.get).mockResolvedValue({
+      id: 20,
+      windowId: 1,
+      status: 'loading',
+      pendingUrl: startInput.url,
+    } as any);
+    ws.receive({ type: 'req', id: 900, method: 'task.start', params: startInput });
+    await flush();
+    await ask({ type: 'remote-stop' });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(ws.frames.findLast((frame) => frame.id === 900)).toMatchObject({
+      code: 'TASK_START_REVOKED',
+    });
+    expect(ws.last('agent-request')).toBeUndefined();
+    expect(await requestStart(ws, startInput, 901)).toMatchObject({ code: 'TASK_START_REVOKED' });
+    expect(executor.createTask).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    { type: 'remote-set-enabled', enabled: false },
+    { type: 'remote-save', relayUrl: 'wss://other.example/ext', key: 'b'.repeat(64) },
+  ])('revokes permission before saving connection changes: $type', async (change) => {
+    const ws = await taskStartSetup();
+    let finish!: () => void;
+    vi.mocked(chrome.storage.local.set).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const saving = ask(change);
+    await flush();
+    expect((await state()).agentStartEnabled).toBe(false);
+    expect(await requestStart(ws)).toMatchObject({ code: 'TASK_START_DISABLED' });
+    expect(executor.createTask).not.toHaveBeenCalled();
+    finish();
+    expect((await saving).ok).toBe(true);
+  });
+  it('revoking permission during task creation prevents a late task start', async () => {
+    const ws = await taskStartSetup();
+    let finish!: () => void;
+    executor.createTask.mockImplementationOnce(
+      (input) =>
+        new Promise<void>((resolve) => {
+          finish = () => {
+            executor.currentControl.mockReturnValue({
+              sessionId: input.taskId,
+              tabId: 20,
+              tabIds: [20],
+              phase: 'ready',
+            });
+            resolve();
+          };
+        }),
+    );
+    ws.receive({ type: 'req', id: 900, method: 'task.start', params: startInput });
+    await flush();
+    await ask({ type: 'remote-agent-start-set-enabled', enabled: false });
+    finish();
+    await flush();
+    expect(ws.frames.findLast((frame) => frame.id === 900)).toMatchObject({
+      code: 'TASK_START_REVOKED',
+    });
+    expect(ws.last('agent-request')).toBeUndefined();
+    expect(executor.release).toHaveBeenCalled();
+    expect((await state()).agentStartEnabled).toBe(false);
+  });
+  it('Stop during half-open transport prevents a new task after reconnect', async () => {
+    const ws = await bootConnected(false, false, true, true);
+    await begin(ws);
+    ws.close = vi.fn();
+    await vi.advanceTimersByTimeAsync(60000);
+    expect((await state()).connected).toBe(false);
+    await ask({ type: 'remote-stop' });
+    expect((await state()).loopActive).toBe(false);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect((await state()).loopActive).toBe(false);
+  });
   it('explicit Stop preserves possible selected-removal effects', async () => {
     const ws = await bootConnected(false, false, true, false, true, true);
     const request = await begin(ws);
@@ -342,7 +656,9 @@ describe('decision transport background', () => {
           finishCleanup = resolve;
         }),
     );
+    const pingTimer = setInterval(() => ws.receive({ type: 'ping', ts: Date.now() }), 17000);
     await vi.advanceTimersByTimeAsync(121001);
+    clearInterval(pingTimer);
     expect(executor.abortControlRecovery).toHaveBeenCalled();
     expect(ws.last('agent-turn-end')).toMatchObject({
       taskId: original.taskId,
@@ -836,7 +1152,9 @@ describe('decision transport background', () => {
       kind: 'actions',
       actions: [{ method: 'find', params: { selector: 'table' } }],
     });
+    const pingTimer = setInterval(() => ws.receive({ type: 'ping', ts: Date.now() }), 17000);
     await vi.advanceTimersByTimeAsync(60_000);
+    clearInterval(pingTimer);
     expect(ws.last('agent-request')!.id).toBe(request.id);
     expect((await state()).loopActive).toBe(true);
     complete();
@@ -1110,6 +1428,7 @@ describe('decision transport background', () => {
 
   it('persists a random instance identity and reuses it after reconnect, clearing chat, and worker restart', async () => {
     const ws = await bootConnected();
+    expect(ws.last('hello')!.version).toBe(chrome.runtime.getManifest().version);
     const id = storage.remoteBrowserId;
     expect(id).toMatch(/^[a-f0-9-]{36}$/);
     expect(ws.last('hello')!.browserId).toBe(id);
@@ -1211,6 +1530,9 @@ describe('decision transport background', () => {
     const ws = await bootConnected();
     expect(ws.protocols).toEqual([REMOTE_SUBPROTOCOL, `key.${KEY}`]);
     expect(ws.last('hello')!.capabilities).toEqual([
+      'agent-task-start-v1',
+      'recovery-closed-shadow-v1',
+      'recovery-child-frames-v1',
       'diagnostics-detail-share-v1',
       'diagnostics-incident-bundle-v2',
       'recovery-judgment-v1',
@@ -1379,7 +1701,7 @@ describe('decision transport background', () => {
     sockets[1]!.open();
     sockets[1]!.receive({
       type: 'ready',
-      capabilities: ['agent-loop-v1', 'browser-instance-v1'],
+      capabilities: ['agent-loop-v1', 'browser-instance-v1', 'agent-message-v2'],
       endpointId: `abababababab.${storage.remoteBrowserId}`,
     });
     await flush();

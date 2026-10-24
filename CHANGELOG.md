@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+### Tests
+
+- Verify 34 minutes of regular inbound heartbeats emit no watchdog timer logs,
+  while an on-time heartbeat timeout retains timing evidence. The watchdog resets
+  on inbound traffic; it is not a periodic success log.
+
+### Added
+
+- Record bounded transport timer deadlines, actual firing times, scheduling delay,
+  last inbound/outbound ages, worker uptime, connection generation, recovery stages
+  and panel visibility in consented metadata diagnostics. Existing worker-start
+  events identify worker restarts. No page content, input values or credentials are
+  captured; a scheduling delay alone does not prove operating-system sleep.
+- Preserve categorized resume rejection reasons when supplied by Remote. Full
+  remote retrieval of these new metadata fields requires the companion Remote
+  PR #17 diagnostics update; local diagnostic exports retain them independently.
+- Add a default-off persistent extension compatibility setting. It allows removal
+  of inspected, revalidated foreign extension frames only during recovery of the
+  controlled task. Normal reconnects and task completion preserve the preference;
+  changing the connection identity clears it, and disabling revokes active removal.
+- In compatibility mode, separate input preparation from text dispatch so a
+  focus-time detach can recover before sending text once. Revalidate the original
+  document, node, value and caret; never replay uncertain text input.
+- Allow a connected Agent to start a task with explicit, revocable permission for
+  the current worker session. Starts use new task tabs, negotiated support and a
+  bounded request-ID ledger; duplicate or uncertain requests never repeat effects.
+- Retain the latest consented fault snapshot for up to 24 hours in memory, bounded
+  to 2 MiB. Live detailed capture still ends after 10 minutes. Export, explicit
+  clear and one-time sharing remain separate from metadata diagnostics.
+
+### Fixed
+
+- Report the installed manifest version in the connection handshake and tool
+  catalog instead of a hardcoded version. Include validated build identity in
+  the handshake when available; omit unknown build fields.
+- Wait for an Agent-started task page to become readable before its first context.
+- Preserve recovery scan scope across transport interruption, reject incomplete
+  child-frame probes and record each probe outcome. Keep detailed fault exports
+  compatible with the existing Remote schema.
+- Detect silent relay loss after 60 seconds without valid inbound traffic, fence
+  late socket callbacks and preserve the existing bounded task recovery deadline.
+- Discover selected foreign extension iframe candidates in closed shadow roots
+  only after negotiating support. Older Remote versions retain open-root scans;
+  original-document checks, one-use removal and no input replay remain enforced.
+
 ## [0.17.1] - 2026-10-21
 
 Pairs with Zylos Browser Remote 0.10.2. Update Remote before reloading the

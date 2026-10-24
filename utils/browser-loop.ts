@@ -215,7 +215,10 @@ export class BrowserLoop {
   suspendRecovery(value: ControlRecovery, results: ControlInterruption['results'] = []) {
     const turn = this.turn;
     if (!turn || turn.ending) return;
-    if (turn.recovery?.recoveryId === value.recoveryId && !results.length) return;
+    if (turn.recovery?.recoveryId === value.recoveryId && !results.length) {
+      turn.recovery = value;
+      return;
+    }
     if (turn.recovery?.recoveryId !== value.recoveryId) {
       turn.recoveryAttempted = false;
       turn.recoveryRemovalRequested = undefined;
@@ -239,8 +242,10 @@ export class BrowserLoop {
   endRecovery(outcome: RecoveryOutcome = 'revoked') {
     const turn = this.turn;
     if (!turn || turn.ending || !turn.recovery) return;
+    const removalRequested =
+      turn.recoveryRemovalRequested ?? turn.recovery.removalReceipt?.requested;
     const notice = {
-      kind: turn.recoveryRemovalRequested ? 'recovery-removal-interrupted' : 'interrupted',
+      kind: removalRequested ? 'recovery-removal-interrupted' : 'interrupted',
     } as const;
     void this.end(turn, formatTaskNotice(workerLocale(), notice), 'interrupted', notice, {
       reason: 'CONTROL_LOST',
@@ -248,10 +253,10 @@ export class BrowserLoop {
       observation: 'unavailable',
       resume: 'new-user-message-required',
       recoveryOutcome: outcome,
-      ...(turn.recoveryRemovalRequested
+      ...(removalRequested
         ? {
             recoveryRemoval: {
-              requested: turn.recoveryRemovalRequested,
+              requested: removalRequested,
               outcome: 'unknown' as const,
             },
           }
@@ -438,10 +443,11 @@ export class BrowserLoop {
     turn.executingRequest = undefined;
     const first = turn.round++ === 0;
     turn.requestedInputId = turn.inputId;
+    const { removalReceipt, ...recoveryDescriptor } = turn.recovery ?? {};
     const execution: AgentRequest['execution'] = {
       protocol: 'browser-decision-v1',
       mode: turn.mode,
-      ...(turn.recovery ? { recovery: turn.recovery } : {}),
+      ...(turn.recovery ? { recovery: recoveryDescriptor as ControlRecovery } : {}),
       ...(first || turn.sentMode !== turn.mode
         ? {
             instructions:
@@ -473,7 +479,17 @@ export class BrowserLoop {
       ...(last
         ? {
             observation: last.observation,
-            results: last.results,
+            results: removalReceipt
+              ? [
+                  ...last.results,
+                  {
+                    method: 'recover-control',
+                    status: 'uncertain',
+                    removal: removalReceipt,
+                    replayed: false,
+                  },
+                ]
+              : last.results,
             failed: last.failed,
           }
         : {}),

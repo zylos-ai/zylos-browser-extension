@@ -1,6 +1,12 @@
 import type zh from './zh-CN';
 
 export default {
+  taskCompatibilityPermission: 'Extension compatibility mode',
+  compatibilityHint:
+    "Allow active browser tasks to remove other extensions' inline UI. Saved across tasks and restarts; cleared when the connection address or key changes.",
+  agentStartPermission: 'Allow Agent to start tasks this session',
+  agentStartPermissionHint:
+    'The connected Agent may open task tabs. Turning this off stops its active task. Permission resets when the browser worker restarts or the connection settings change.',
   detailSharePreview: 'Prepare diagnostic file',
   detailShareRecipient: 'Recipient Remote:',
   detailShareExpires: 'Sharing expires at',
@@ -17,8 +23,10 @@ export default {
   detailShareRevoke: 'Revoke sharing and clear file',
   detailedDiagnostics: 'Detailed local diagnostics',
   detailedDiagnosticsHint:
-    'Temporarily record extension logs, errors, task and connection details, and limited page state for troubleshooting. Off by default; never shared automatically. Retained for up to 10 minutes, 1 MiB / 1,000 events. No page text, input values or screenshots are collected, but error logs may contain sensitive information. Review before sharing. Cleared on disable, expiry, connection changes or background restart.',
-  detailedExpires: 'Capture clears at',
+    'Off by default; never shared automatically. Capture stops after 10 minutes (1 MiB / 1,000 events). While enabled, faults retain the latest detailed snapshot for 24 hours in memory (2 MiB maximum). Expiry stops collection but keeps that snapshot. Clear, disable, new capture, connection configuration changes or background restart remove it. No page text, input values or screenshots; error text may be sensitive. Review before sharing.',
+  detailedExpires: 'Live capture stops at',
+  detailedFrozenExpires: 'Frozen fault snapshot expires at',
+  detailedClear: 'Clear diagnostics and stop capture',
   detailedPreview: 'View file details',
   detailedHide: 'Hide file details',
   detailedSnapshotCount: 'Detailed logs in this file: {count}',
@@ -26,9 +34,9 @@ export default {
     'No detailed logs captured. The diagnostic file may still contain incident metadata.',
   detailedReviewWarning:
     'This file may contain sensitive information. Omitted, truncated and dropped events are reported in the file. This is not a complete DevTools recording.',
-  detailedDownload: 'Download diagnostic file',
+  detailedDownload: 'Download detailed diagnostics',
   detailedExpired: 'Capture expired or changed. Enable a new capture and try again.',
-  diagnostics: 'Share diagnostic events',
+  diagnostics: 'Share event metadata',
   diagnosticsHint:
     'Allow the connected agent to read task, control, connection, error-type and console-severity events from the last 30 minutes (up to 1,000). No page content, URLs, input, keys, error text or console arguments. Off by default. Turning off clears stored events.',
   settings: 'Settings',
@@ -63,6 +71,7 @@ export default {
   markdownFootnotes: 'Footnotes',
   markdownFootnoteBack: 'Back to content',
   you: 'You',
+  agentStarted: 'Started by Agent',
   system: 'System',
   systemMessage: 'System message',
   today: 'Today',

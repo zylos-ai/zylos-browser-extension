@@ -17,7 +17,6 @@ import { panelDiagnosticSchema } from './diagnostics-schema';
 
 export const REMOTE_SUBPROTOCOL = 'zylos-browser-remote.v3';
 export const REMOTE_KEY_PROTO_PREFIX = 'key.';
-export const REMOTE_VERSION = '1.5.0';
 export const MAX_CHAT_TEXT = 8000;
 export const CHAT_LOG_CAP = 200;
 export const REPLY_NOTICE_MS = 120_000;
@@ -31,6 +30,7 @@ export const remoteConfigSchema = z.object({
     .union([z.literal(''), z.string().regex(/^[a-f0-9]{32,128}$/, 'ui.error.invalidKey')])
     .default(''),
   enabled: z.boolean().default(true),
+  compatibilityEnabled: z.boolean().default(false),
 });
 export type RemoteConfig = z.infer<typeof remoteConfigSchema>;
 export const REMOTE_CONFIG_KEY = 'remoteConfig';
@@ -77,6 +77,8 @@ export const chatEntrySchema = z
   .object({
     id: z.string().max(128).optional(),
     role: z.enum(['user', 'assistant', 'system']),
+    // Set when a connected Agent supplied this prompt through task.start.
+    origin: z.literal('agent').optional(),
     text: z.string().max(MAX_CHAT_TEXT),
     notice: taskNoticeSchema.optional(),
     ts: z.number().int(),
@@ -119,6 +121,8 @@ export const remoteStateSchema = z.object({
     .optional(),
   detailedDiagnostics: detailStateSchema.optional(),
   diagnosticsEnabled: z.boolean().optional(),
+  agentStartEnabled: z.boolean().optional(),
+  compatibilityEnabled: z.boolean().optional(),
   diagnosticsConsent: z.string().optional(),
   configured: z.boolean(),
   enabled: z.boolean(),
@@ -168,6 +172,13 @@ export const initialRemoteState: RemoteState = {
 
 // Panel -> background. Only the bundled sidepanel may send these.
 export const remoteRequestSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('remote-agent-start-set-enabled'), enabled: z.boolean() }).strict(),
+  z
+    .object({
+      type: z.literal('remote-compatibility-set-enabled'),
+      enabled: z.boolean(),
+    })
+    .strict(),
   z.object({ type: z.literal('remote-detailed-set-enabled'), enabled: z.boolean() }).strict(),
   z.object({ type: z.literal('remote-detailed-preview'), consent: z.string().uuid() }).strict(),
   z.object({ type: z.literal('remote-detail-share-prepare'), consent: z.string().uuid() }).strict(),
@@ -231,6 +242,17 @@ export const relayFrameSchema = z.discriminatedUnion('type', [
     resume: z
       .object({
         status: z.enum(['fresh', 'resumed', 'rejected']),
+        category: z
+          .enum([
+            'state_missing',
+            'capability_missing',
+            'runtime_changed',
+            'task_mismatch',
+            'invalid_resume',
+            'request_mismatch',
+            'state_expired',
+          ])
+          .optional(),
         reason: z.string().max(128).optional(),
       })
       .optional(),

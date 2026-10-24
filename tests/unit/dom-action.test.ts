@@ -4,7 +4,7 @@ import source from '../../utils/automation/injected/dom-action.js?raw';
 const action = (0, eval)(`(${source})`) as (
   this: HTMLElement,
   action: string,
-  option?: boolean,
+  option?: unknown,
 ) => unknown;
 afterEach(() => {
   document.body.replaceChildren();
@@ -21,6 +21,95 @@ test('input preparation scrolls minimally and focus never causes a second viewpo
   expect(scroll).toHaveBeenCalledWith({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
   expect(focus).toHaveBeenCalledWith({ preventScroll: true });
   expect(document.activeElement).toBe(input);
+});
+
+test.each(['value', 'caret', 'focus'] as const)(
+  'checkpoint commit rejects changed %s before selection',
+  (change) => {
+    const input = document.createElement('input');
+    const other = document.createElement('input');
+    document.body.append(input, other);
+    input.value = 'original';
+    input.setSelectionRange(2, 2);
+    const expected = action.call(input, 'read-input-state');
+    input.focus();
+    if (change === 'value') input.value = 'owner changed';
+    if (change === 'caret') input.setSelectionRange(3, 3);
+    if (change === 'focus') other.focus();
+    const select = vi.spyOn(input, 'select');
+    const focus = vi.spyOn(input, 'focus');
+    expect(() =>
+      action.call(input, 'commit-input', { replace: change !== 'caret', expected }),
+    ).toThrow();
+    expect(select).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+  },
+);
+
+test.each([true, false])(
+  'checkpoint commit preserves the value and only selects for replace=%s',
+  (replace) => {
+    const input = document.createElement('input');
+    document.body.append(input);
+    input.value = 'original';
+    input.setSelectionRange(2, 2);
+    const expected = action.call(input, 'read-input-state');
+    input.focus();
+    const focus = vi.spyOn(input, 'focus');
+    action.call(input, 'commit-input', { replace, expected });
+    expect(input.value).toBe('original');
+    expect([input.selectionStart, input.selectionEnd]).toEqual(replace ? [0, 8] : [2, 2]);
+    expect(focus).not.toHaveBeenCalled();
+  },
+);
+
+test('fill checkpoint accepts a focus-induced caret change before selecting all', () => {
+  const input = document.createElement('input');
+  document.body.append(input);
+  input.value = 'original';
+  input.setSelectionRange(0, 0);
+  const expected = action.call(input, 'read-input-state');
+  input.focus();
+  input.setSelectionRange(8, 8);
+  expect(() => action.call(input, 'commit-input', { replace: true, expected })).not.toThrow();
+  expect([input.selectionStart, input.selectionEnd]).toEqual([0, 8]);
+  expect(input.value).toBe('original');
+});
+
+test('contenteditable fill accepts a new focused selection while preserving its original text', () => {
+  const input = document.createElement('div');
+  input.tabIndex = 0;
+  input.textContent = 'original';
+  Object.defineProperty(input, 'isContentEditable', { value: true });
+  document.body.append(input);
+  window.getSelection()!.removeAllRanges();
+  const expected = action.call(input, 'read-input-state');
+  input.focus();
+  const range = document.createRange();
+  range.setStart(input.firstChild!, 4);
+  range.collapse(true);
+  window.getSelection()!.addRange(range);
+  expect(() => action.call(input, 'commit-input', { replace: true, expected })).not.toThrow();
+  expect(window.getSelection()!.toString()).toBe('original');
+  expect(input.textContent).toBe('original');
+});
+
+test('input checkpoint capture does not focus, select, or change the field', () => {
+  const input = document.createElement('textarea');
+  document.body.append(input);
+  input.value = 'original';
+  input.setSelectionRange(1, 4, 'backward');
+  const focus = vi.spyOn(input, 'focus');
+  const select = vi.spyOn(input, 'select');
+  expect(action.call(input, 'read-input-state')).toEqual({
+    value: 'original',
+    start: 1,
+    end: 4,
+    direction: 'backward',
+  });
+  expect(focus).not.toHaveBeenCalled();
+  expect(select).not.toHaveBeenCalled();
+  expect(input.value).toBe('original');
 });
 test('visible button preparation avoids forced centering and still rejects an obstruction', () => {
   const button = document.createElement('button');

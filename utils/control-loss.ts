@@ -43,6 +43,7 @@ export type ControlRecovery = {
   cause: 'unknown';
   frameSelection?: true;
   inspection?: import('./automation/recovery-frames').RecoveryFrameInspection;
+  removalReceipt?: { requested: number; outcome: 'unknown' };
 };
 export class ControlSuspended extends Error {
   readonly code = 'CONTROL_SUSPENDED';

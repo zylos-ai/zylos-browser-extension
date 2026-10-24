@@ -1,14 +1,18 @@
 import {
   browserPageVersion,
   currentControl,
+  matchesCurrentControlScope,
   controlLossRevision,
   currentGrant,
   flushTaskPopups,
   taskPopupOpener,
   currentControlRecovery,
+  autoRecoverControl,
+  restoreRecoveredRefs,
 } from './automation/executor';
 import type { LoopAction, RoundResult } from './browser-loop';
 import { ControlLoss, ControlSuspended, type ControlInterruption } from './control-loss';
+import { consumeInputRecovery } from './automation/input-checkpoint';
 
 type Call = (
   method: string,
@@ -42,7 +46,7 @@ export async function runBrowserRound(
   expectedControl = false,
   beforeOperation: () => Promise<void> = async () => {},
 ): Promise<RoundResult> {
-  const startLoss = controlLossRevision();
+  let startLoss = controlLossRevision();
   const hadControl = expectedControl || !!currentControl();
   const results: ControlInterruption['results'] = actions.map(({ method }) => ({
     method,
@@ -56,6 +60,19 @@ export async function runBrowserRound(
     const index = actions.findIndex((_, i) => id === `${requestId}:${i}`);
     if (index >= 0) results[index]!.outcome = 'uncertain';
     const value = await call(method, params, id);
+    const recoveryProof = consumeInputRecovery(value);
+    if (
+      index >= 0 &&
+      ['fill', 'type'].includes(method) &&
+      recoveryProof &&
+      matchesCurrentControlScope(recoveryProof.scope) &&
+      recoveryProof.beforeLoss === startLoss &&
+      recoveryProof.afterLoss === controlLossRevision() &&
+      recoveryProof.afterLoss > recoveryProof.beforeLoss
+    ) {
+      startLoss = recoveryProof.afterLoss;
+      restoreRecoveredRefs(refsIn(actions.slice(index + 1)));
+    }
     if (index >= 0) results[index]!.outcome = 'completed';
     if (lost()) throw Object.assign(new Error('Control lost'), { code: 'STOPPED' });
     return value;
@@ -113,8 +130,19 @@ export async function runBrowserRound(
     return result;
   } catch (error) {
     const suspended = currentControlRecovery();
-    if (suspended && !actions.some((action) => action.method === 'recover-control'))
-      throw new ControlSuspended(suspended, results);
+    if (suspended && !actions.some((action) => action.method === 'recover-control')) {
+      const resumed = await resumeAfterAutomaticRecovery(
+        actions,
+        results,
+        call,
+        assertActive,
+        requestId,
+        hasUpdates,
+        beforeOperation,
+      );
+      if (resumed) return resumed;
+      throw new ControlSuspended(currentControlRecovery() ?? suspended, results);
+    }
     if (lost() || ['STOPPED', 'TASK_TAB_UNAVAILABLE'].includes(errorInfo(error).code))
       throw new ControlLoss({
         reason: 'CONTROL_LOST',
@@ -124,6 +152,100 @@ export async function runBrowserRound(
       });
     throw error;
   }
+}
+
+const refPattern = /^@?[a-f0-9]{8}-e\d+$/;
+const refsIn = (actions: LoopAction[]) =>
+  actions.flatMap((action) =>
+    Object.values(action.params ?? {}).filter(
+      (value): value is string => typeof value === 'string' && refPattern.test(value),
+    ),
+  );
+
+/**
+ * The extension reattaches once by itself after a transient detach. Actions that
+ * never started continue only when nothing before them is uncertain; an uncertain
+ * action is reported for the Agent to verify and is never repeated here.
+ */
+async function resumeAfterAutomaticRecovery(
+  actions: LoopAction[],
+  results: ControlInterruption['results'],
+  call: Call,
+  assertActive: () => void,
+  requestId: string,
+  hasUpdates: () => boolean,
+  beforeOperation: () => Promise<void>,
+): Promise<RoundResult | undefined> {
+  const recovered = (await autoRecoverControl()) as
+    { observation: unknown; target: unknown } | undefined;
+  if (!recovered) return undefined;
+  assertActive();
+  const done = results
+    .filter((r) => r.outcome === 'completed')
+    .map((r) => ({ method: r.method, status: 'success' }));
+  const uncertain = results.filter((r) => r.outcome === 'uncertain');
+  const remaining = actions.filter((_, i) => results[i]!.outcome === 'not-executed');
+  const automatic = {
+    method: 'recover-control',
+    status: 'success',
+    automatic: true,
+    replayed: false,
+    note: 'Browser control was briefly interrupted and reattached by the extension.',
+  };
+  if (!uncertain.length && remaining.length && !hasUpdates()) {
+    restoreRecoveredRefs(refsIn(remaining));
+    try {
+      const continued = await runBrowserRound(
+        remaining,
+        call,
+        assertActive,
+        `${requestId}~resume`,
+        hasUpdates,
+        true,
+        beforeOperation,
+      );
+      return { ...continued, results: [...done, automatic, ...continued.results] };
+    } catch (error) {
+      const prefix = results.filter((r) => r.outcome === 'completed');
+      if (error instanceof ControlSuspended)
+        throw new ControlSuspended(error.recovery, [...prefix, ...error.results]);
+      if (error instanceof ControlLoss)
+        throw new ControlLoss({
+          ...error.interruption,
+          results: [...prefix, ...error.interruption.results],
+        });
+      throw error;
+    }
+  }
+  return {
+    mode: 'operating',
+    observation: {
+      page: recovered.observation,
+      target: recovered.target,
+      recovery: { recovered: true, automatic: true, replayed: false },
+    },
+    results: [
+      ...done,
+      ...uncertain.map((r) => ({
+        method: r.method,
+        status: 'uncertain',
+        note: 'Control was interrupted while this action ran. Verify the page before repeating it.',
+      })),
+      automatic,
+      ...(remaining.length
+        ? [
+            {
+              status: 'skipped',
+              count: remaining.length,
+              reason: uncertain.length
+                ? 'Remaining actions need a fresh decision after the uncertain action.'
+                : 'New owner input arrived. Remaining actions need a fresh decision.',
+            },
+          ]
+        : []),
+    ],
+    failed: uncertain.length > 0,
+  };
 }
 
 async function executeRound(

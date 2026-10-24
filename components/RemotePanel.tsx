@@ -301,6 +301,18 @@ export function RemotePanel() {
             return ok;
           }}
           onToggle={() => void action({ type: 'remote-set-enabled', enabled: !state.enabled })}
+          onCompatibilityToggle={() =>
+            void action({
+              type: 'remote-compatibility-set-enabled',
+              enabled: !state.compatibilityEnabled,
+            })
+          }
+          onAgentStartToggle={() =>
+            void action({
+              type: 'remote-agent-start-set-enabled',
+              enabled: !state.agentStartEnabled,
+            })
+          }
           onDiagnosticsToggle={() =>
             void action({
               type: 'remote-diagnostics-set-enabled',

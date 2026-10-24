@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { actionParams } from './commands';
-import { REMOTE_VERSION } from './remote';
+import { extensionVersion } from './extension-build';
 import { researchParams } from './research-ledger';
 
 // The same schemas validate local actions and generate the Agent's live reference.
@@ -239,7 +239,7 @@ type ToolCatalog = {
 export function describeTools(names: BrowserMethod[], frameSelection = true): ToolCatalog {
   return {
     schemaVersion: 1,
-    extensionVersion: REMOTE_VERSION,
+    extensionVersion: extensionVersion(),
     tools: names.map((name) => ({
       name,
       ...toolHelp[name],

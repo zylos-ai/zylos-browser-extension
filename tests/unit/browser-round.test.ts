@@ -1,17 +1,22 @@
 // @vitest-environment node
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const executor = vi.hoisted(() => ({
   currentControl: vi.fn(),
+  matchesCurrentControlScope: vi.fn(),
   currentGrant: vi.fn(),
   browserPageVersion: vi.fn(),
   flushTaskPopups: vi.fn(async () => {}),
   taskPopupOpener: vi.fn(),
   controlLossRevision: vi.fn(),
   currentControlRecovery: vi.fn(),
+  autoRecoverControl: vi.fn(),
+  restoreRecoveredRefs: vi.fn(),
 }));
 vi.mock('../../utils/automation/executor', () => executor);
 import { runBrowserRound } from '../../utils/browser-round';
 import { BrowserLoop, type AgentRequest } from '../../utils/browser-loop';
+import { ControlSuspended } from '../../utils/control-loss';
+import { markInputRecovery } from '../../utils/automation/input-checkpoint';
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -26,6 +31,92 @@ beforeEach(() => {
     },
   });
 });
+
+it('accepts an in-process input recovery receipt without replaying the completed mutation', async () => {
+  const scope = { sessionId: 'task', tabId: 1, tabIds: [1] };
+  executor.currentControl.mockImplementation(() => ({ ...scope, tabIds: [...scope.tabIds] }));
+  executor.matchesCurrentControlScope.mockImplementation((candidate) => candidate === scope);
+  const call = vi.fn(async (method: string) => {
+    if (method === 'fill') {
+      executor.controlLossRevision.mockReturnValue(1);
+      return markInputRecovery({ done: true }, { scope, beforeLoss: 0, afterLoss: 1 });
+    }
+    if (method === 'tabs') return { tabs: [] };
+    return { text: 'fixture' };
+  });
+  const result = await runBrowserRound(
+    [{ method: 'fill', params: { ref: '@1a2b3c4d-e1', text: 'fixture' } }],
+    call,
+    () => {},
+    'request',
+  );
+  expect(result.results).toContainEqual(
+    expect.objectContaining({ method: 'fill', status: 'success' }),
+  );
+  expect(call.mock.calls.filter(([method]) => method === 'fill')).toHaveLength(1);
+  expect(executor.autoRecoverControl).not.toHaveBeenCalled();
+});
+
+it('restores remaining batch refs after trusted same-document input recovery', async () => {
+  const scope = { sessionId: 'task', tabId: 1, tabIds: [1] };
+  executor.currentControl.mockImplementation(() => ({ ...scope, tabIds: [...scope.tabIds] }));
+  executor.matchesCurrentControlScope.mockImplementation((candidate) => candidate === scope);
+  const call = vi.fn(async (method: string, params: Record<string, unknown>) => {
+    if (method === 'fill' && params.ref === '@1a2b3c4d-e1') {
+      executor.controlLossRevision.mockReturnValue(1);
+      return markInputRecovery({ done: true }, { scope, beforeLoss: 0, afterLoss: 1 });
+    }
+    if (method === 'fill')
+      expect(executor.restoreRecoveredRefs).toHaveBeenCalledWith(['@1a2b3c4d-e2']);
+    if (method === 'tabs') return { tabs: [] };
+    return { text: 'fixture' };
+  });
+  const result = await runBrowserRound(
+    [
+      { method: 'fill', params: { ref: '@1a2b3c4d-e1', text: 'first' } },
+      { method: 'fill', params: { ref: '@1a2b3c4d-e2', text: 'second' } },
+    ],
+    call,
+    () => {},
+    'request',
+  );
+  expect(result.results.filter((result: any) => result.method === 'fill')).toEqual([
+    expect.objectContaining({ status: 'success' }),
+    expect.objectContaining({ status: 'success' }),
+  ]);
+  expect(call.mock.calls.filter(([method]) => method === 'fill')).toHaveLength(2);
+});
+
+it.each(['wrong-scope', 'old-baseline', 'later-loss', 'serialized'])(
+  'rejects %s recovery proof',
+  async (kind) => {
+    const scope = executor.currentControl();
+    executor.matchesCurrentControlScope.mockImplementation((candidate) => candidate === scope);
+    const call = vi.fn(async () => {
+      executor.controlLossRevision.mockReturnValue(kind === 'later-loss' ? 2 : 1);
+      const result = markInputRecovery(
+        { done: true },
+        {
+          scope: kind === 'wrong-scope' ? {} : scope,
+          beforeLoss: kind === 'old-baseline' ? -1 : 0,
+          afterLoss: 1,
+        },
+      );
+      return kind === 'serialized' ? JSON.parse(JSON.stringify(result)) : result;
+    });
+    await expect(
+      runBrowserRound(
+        [{ method: 'fill', params: { ref: '@1a2b3c4d-e1', text: 'fixture' } }],
+        call,
+        () => {},
+        'request',
+      ),
+    ).rejects.toMatchObject({
+      interruption: { results: [{ method: 'fill', outcome: 'completed' }] },
+    });
+    expect(call).toHaveBeenCalledTimes(1);
+  },
+);
 it('recovery returns the canonical observation page without repeating snapshot or input', async () => {
   const page = { text: '@fresh-e1 textbox', nodeCount: 1 };
   const target = { id: 1, url: 'https://example.com' };
@@ -376,4 +467,114 @@ it('pauses between batch operations, retains the completed result and respects n
     expect.objectContaining({ method: 'fill', status: 'success' }),
     expect.objectContaining({ status: 'skipped', count: 1 }),
   ]);
+});
+
+describe('automatic recovery inside a batch', () => {
+  const recovery = {
+    recoveryId: '22222222-2222-4222-8222-222222222222',
+    expiresAt: Date.now() + 120000,
+    reason: 'target_closed',
+    cause: 'unknown',
+  };
+  const fills = ['@aaaaaaaa-e1', '@aaaaaaaa-e2', '@aaaaaaaa-e3'].map((ref, i) => ({
+    method: 'fill' as const,
+    params: { ref, text: `value-${i}` },
+  }));
+  const detach = () => {
+    executor.controlLossRevision.mockReturnValue(1);
+    executor.currentControlRecovery.mockReturnValue(recovery);
+  };
+  const recovered = {
+    recovered: true,
+    replayed: false,
+    observation: { text: 'fresh' },
+    target: { id: 1 },
+  };
+  const call = (failOn: string, during: boolean) =>
+    vi.fn(async (method: string, params: Record<string, unknown>) => {
+      if (method === 'snapshot') return { text: 'after' };
+      if (method === 'tabs') return [];
+      if (params.ref === failOn) {
+        detach();
+        if (during)
+          throw Object.assign(new Error('Detached while handling command.'), { code: 'OTHER' });
+      }
+      return { done: true };
+    });
+  beforeEach(() => {
+    executor.autoRecoverControl.mockImplementation(async () => {
+      executor.currentControlRecovery.mockReturnValue(undefined);
+      return recovered;
+    });
+  });
+
+  it('continues never-started actions once, with rebound refs, after a detach between actions', async () => {
+    const browser = call('@aaaaaaaa-e1', false);
+    const result = await runBrowserRound(
+      fills,
+      browser,
+      () => {},
+      'req',
+      () => false,
+      true,
+    );
+    expect(browser.mock.calls.filter(([m]) => m === 'fill').map(([, p]) => p.ref)).toEqual([
+      '@aaaaaaaa-e1',
+      '@aaaaaaaa-e2',
+      '@aaaaaaaa-e3',
+    ]);
+    expect(executor.restoreRecoveredRefs).toHaveBeenCalledWith(['@aaaaaaaa-e2', '@aaaaaaaa-e3']);
+    expect(result.mode).toBe('operating');
+    expect(result.results.slice(0, 2)).toEqual([
+      { method: 'fill', status: 'success' },
+      expect.objectContaining({ method: 'recover-control', automatic: true, replayed: false }),
+    ]);
+    expect(
+      result.results.filter((r: any) => r.method === 'fill' && r.status === 'success'),
+    ).toHaveLength(3);
+  });
+
+  it('stops at an uncertain action: reattaches but never repeats it or runs later actions', async () => {
+    const browser = call('@aaaaaaaa-e2', true);
+    const result = await runBrowserRound(
+      fills,
+      browser,
+      () => {},
+      'req',
+      () => false,
+      true,
+    );
+    expect(browser.mock.calls.filter(([m]) => m === 'fill')).toHaveLength(2);
+    expect(executor.restoreRecoveredRefs).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      mode: 'operating',
+      failed: true,
+      observation: { page: { text: 'fresh' }, recovery: { automatic: true, replayed: false } },
+    });
+    expect(result.results).toEqual([
+      { method: 'fill', status: 'success' },
+      expect.objectContaining({ method: 'fill', status: 'uncertain' }),
+      expect.objectContaining({ method: 'recover-control', automatic: true }),
+      expect.objectContaining({ status: 'skipped', count: 1 }),
+    ]);
+  });
+
+  it('hands the original lease and receipts to the Agent when automatic reattachment declines', async () => {
+    executor.autoRecoverControl.mockResolvedValue(undefined);
+    const browser = call('@aaaaaaaa-e2', true);
+    const error = await runBrowserRound(
+      fills,
+      browser,
+      () => {},
+      'req',
+      () => false,
+      true,
+    ).catch((e) => e);
+    expect(error).toBeInstanceOf(ControlSuspended);
+    expect(error.results.map((r: any) => r.outcome)).toEqual([
+      'completed',
+      'uncertain',
+      'not-executed',
+    ]);
+  });
 });

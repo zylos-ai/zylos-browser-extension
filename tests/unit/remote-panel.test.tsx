@@ -577,6 +577,19 @@ test('an older relay keeps the draft without showing a square stop button', asyn
   expect(container.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(true);
 });
 
+test('Agent-started prompts are labelled instead of attributed to the user', async () => {
+  state.chat = [
+    { id: 'mine', role: 'user', text: 'My request', ts: 1 },
+    { id: 'agent', role: 'user', origin: 'agent', text: 'Agent request', ts: 2 },
+  ];
+  await mount();
+  const [mine, agent] = [...container.querySelectorAll('article.message.user')];
+  expect(mine!.getAttribute('aria-label')).toBe('你');
+  expect(mine!.querySelector('.system-label')).toBeNull();
+  expect(agent!.getAttribute('aria-label')).toBe('Agent 发起');
+  expect(agent!.querySelector('.system-label')!.textContent).toBe('Agent 发起');
+});
+
 test('legacy progress keeps its timing but no longer expands local browser steps', async () => {
   state.chat = [
     { id: 'question', role: 'user', text: '看看当前页面', ts: 1 },
@@ -901,6 +914,25 @@ test('a cancelled in-flight send cannot restore busy state or display a late sen
   await act(async () => finishSend({ ok: false, error: 'ui.error.sendFailed' }));
   expect(container.querySelector('[role="alert"]')).toBeNull();
   expect(container.querySelector('#send')!.getAttribute('aria-label')).toBe('发送消息');
+});
+
+test('compatibility setting is available without an active task', async () => {
+  await mount();
+  await click('.settings-button');
+  const toggle = container.querySelector<HTMLButtonElement>('#compatibility-enabled')!;
+  expect(toggle.getAttribute('aria-checked')).toBe('false');
+  expect(container.querySelector('#compatibility-hint')!.textContent).toContain('移除其他扩展');
+  await click('#compatibility-enabled');
+  expect(send).toHaveBeenCalledWith({
+    type: 'remote-compatibility-set-enabled',
+    enabled: true,
+  });
+  state.compatibilityEnabled = true;
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(toggle.getAttribute('aria-checked')).toBe('true');
+  state.connected = false;
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(toggle.disabled).toBe(false);
 });
 
 test('runtime updates render real tasks, stop/reveal remain wired, and disconnect disables sending', async () => {

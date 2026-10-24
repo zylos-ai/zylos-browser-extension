@@ -181,10 +181,11 @@ export function dispatch(
   idem: IdempotencyCache,
   onStart?: () => void,
   onExecute?: () => void,
+  beforeInput?: () => void,
 ): Promise<unknown> {
   return idem.run(req, (assertActive) => {
     onStart?.();
-    return dispatchNow(req, idem, assertActive, onExecute);
+    return dispatchNow(req, idem, assertActive, onExecute, beforeInput);
   });
 }
 async function dispatchNow(
@@ -192,6 +193,7 @@ async function dispatchNow(
   idem: IdempotencyCache,
   assertActive: () => void,
   onExecute?: () => void,
+  beforeInput?: () => void,
 ): Promise<unknown> {
   const method = req.method as BrowserMethod;
   const schema = Object.hasOwn(paramSchemas, method) ? paramSchemas[method] : undefined;
@@ -255,7 +257,20 @@ async function dispatchNow(
         : await startTask(params.url as string, assertActive);
       break;
     default:
-      result = await execute(commandSchema.parse({ op: method, ...params }) as Command, deadline);
+      if (method === 'fill' || method === 'type') {
+        result = await execute(
+          commandSchema.parse({ op: method, ...params }) as Command,
+          deadline,
+          {
+            beforeInput: () => {
+              assertActive();
+              beforeInput?.();
+            },
+          },
+        );
+      } else {
+        result = await execute(commandSchema.parse({ op: method, ...params }) as Command, deadline);
+      }
   }
 
   if (req.requestId && IDEMPOTENT_METHODS.has(method)) idem.set(req.requestId, result);

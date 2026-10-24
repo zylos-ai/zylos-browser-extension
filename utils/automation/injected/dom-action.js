@@ -179,7 +179,7 @@ function domAction(action, option) {
     if (!active()) throw new Error('Could not focus element');
     return null;
   }
-  if (action === 'prepare-input' || action === 'commit-input') {
+  if (['prepare-input', 'commit-input', 'read-input-state'].includes(action)) {
     const assertEditable = () => {
       if (!this.isConnected) throw new Error('Element is detached');
       if (this.matches?.('input[type=password],input[autocomplete=one-time-code]'))
@@ -197,14 +197,50 @@ function domAction(action, option) {
         throw new Error('Element is not editable');
     };
     assertEditable();
+    const inputState = () => {
+      if (!this.isContentEditable)
+        return {
+          value: this.value,
+          start: this.selectionStart,
+          end: this.selectionEnd,
+          direction: this.selectionDirection,
+        };
+      const selection = view.getSelection();
+      const path = (node) => {
+        const result = [];
+        while (node && node !== this) {
+          if (!node.parentNode) return null;
+          result.unshift(Array.prototype.indexOf.call(node.parentNode.childNodes, node));
+          node = node.parentNode;
+        }
+        return node === this ? result : null;
+      };
+      return {
+        value: this.textContent,
+        anchor: path(selection?.anchorNode),
+        anchorOffset: selection?.anchorOffset,
+        focus: path(selection?.focusNode),
+        focusOffset: selection?.focusOffset,
+      };
+    };
+    if (action === 'read-input-state') return inputState();
     if (action === 'prepare-input') {
       this.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
       this.focus({ preventScroll: true });
       assertEditable();
       if (!active()) throw new Error('Could not focus element');
     } else if (!active()) throw new Error('Focus changed during input preview');
+    if (
+      action === 'commit-input' &&
+      option &&
+      typeof option === 'object' &&
+      (option.replace
+        ? inputState().value !== option.expected?.value
+        : JSON.stringify(inputState()) !== JSON.stringify(option.expected))
+    )
+      throw new Error('Input value or selection changed during recovery');
     // Selection belongs immediately before the single native insertion, after preview.
-    if (action === 'commit-input' && option) {
+    if (action === 'commit-input' && (typeof option === 'object' ? option?.replace : option)) {
       if (this.isContentEditable) {
         const range = doc.createRange();
         range.selectNodeContents(this);
