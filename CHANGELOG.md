@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-10-24
+
+Pairs with Zylos Browser Remote 0.10.3. Deploy Remote 0.10.3 before loading
+extension 0.17.2 to enable Agent task starts, expanded recovery negotiation,
+complete transport diagnostic metadata and build identity reporting.
+
+Compatibility mode remains default-off. Cross-site recovery, repeated frame
+reinjection and long-running reliability are not yet comprehensively validated.
+Recovery cannot resume tasks across extension worker, browser or Remote restarts.
+Timer delays are diagnostic evidence, not proof of operating-system sleep.
+
 ### Tests
 
 - Verify 34 minutes of regular inbound heartbeats emit no watchdog timer logs,
@@ -17,7 +28,7 @@
   captured; a scheduling delay alone does not prove operating-system sleep.
 - Preserve categorized resume rejection reasons when supplied by Remote. Full
   remote retrieval of these new metadata fields requires the companion Remote
-  PR #17 diagnostics update; local diagnostic exports retain them independently.
+  0.10.3 diagnostics update; local diagnostic exports retain them independently.
 - Add a default-off persistent extension compatibility setting. It allows removal
   of inspected, revalidated foreign extension frames only during recovery of the
   controlled task. Normal reconnects and task completion preserve the preference;
