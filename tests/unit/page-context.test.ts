@@ -57,6 +57,7 @@ test('captures DOM text without CDP and pins reads/operations despite foreground
     contextId: id,
     tabId: 7,
     status: 'overview',
+    contentVersion: '12-abc',
     url: tab.url,
     title: tab.title,
   });
@@ -254,7 +255,12 @@ test('sends only URL and title, never page content, even when the page offers an
   expect(chrome.scripting.executeScript).toHaveBeenCalledWith(
     expect.objectContaining({ args: [{ limit: 1 }] }),
   );
-  expect(context).toMatchObject({ status: 'overview', url: tab.url, title: tab.title });
+  expect(context).toMatchObject({
+    status: 'overview',
+    contentVersion: '12-abc',
+    url: tab.url,
+    title: tab.title,
+  });
   for (const key of ['text', 'viewport', 'outline', 'links', 'nextOffset'])
     expect(context).not.toHaveProperty(key);
   expect(JSON.stringify(context)).not.toContain('secret');
