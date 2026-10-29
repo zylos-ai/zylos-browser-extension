@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.17.3] - 2026-10-29
+
+No Remote change required; works with Zylos Browser Remote 0.10.3.
+
 ### Changed
 
 - Side panel messages now attach only the current tab's URL and title
