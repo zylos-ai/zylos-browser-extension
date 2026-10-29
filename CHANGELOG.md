@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Side panel messages now attach only the current tab's URL and title
+  (OPENM-843). The page viewport and heading outline are no longer sent; the
+  Agent reads page text on demand with `read-page` and the message's
+  `contextId`. A one-character probe still checks the page is readable and pins
+  its `contentVersion`; no page text from it is sent.
+
 ## [0.17.2] - 2026-10-24
 
 Pairs with Zylos Browser Remote 0.10.3. Deploy Remote 0.10.3 before loading
