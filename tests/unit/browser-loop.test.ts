@@ -58,6 +58,9 @@ it('advertises the iframe and requested-operation entry paths before control too
   expect(instructions).toContain('use-current-tab, then frames and find(selector, frameId)');
   expect(instructions).toContain('Do not stop at manual instructions');
   expect(instructions).toContain('limited=false, nextOffset=null');
+  expect(instructions).toMatch(
+    /zero detectedFrameCount does not prove\s+complete page coverage or that no iframe exists/,
+  );
   expect(instructions).toContain('A denied read does not authorize');
   loop.cancel();
 });

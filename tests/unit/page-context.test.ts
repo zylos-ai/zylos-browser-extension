@@ -287,10 +287,12 @@ test('carries structural iframe coverage into initial context and reads without 
   const { context } = await captureCurrentPage(id, 2, 7);
   expect(context).toMatchObject({ limited: false, coverage });
   expect(context.scope).toContain('frames and find with frameId');
+  expect(context.scope).toContain('lower bound of frames encountered, not a complete inventory');
   expect(context).not.toHaveProperty('text');
   const read = await readPageContext(id, {}, () => {});
   expect(read).toMatchObject({ limited: false, coverage });
   expect(read.scope).toContain('limited=false and nextOffset=null do not prove');
+  expect(read.scope).toContain('coverage.detectedFrameCount is a lower bound, including when zero');
   expect(executor.useExistingTab).not.toHaveBeenCalled();
   expect(chrome.debugger.attach).not.toHaveBeenCalled();
 });
