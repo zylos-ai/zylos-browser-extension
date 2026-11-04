@@ -11,6 +11,14 @@ import {
 } from '../../utils/tool-catalog';
 
 describe('extension-owned Agent reference', () => {
+  it('keeps zero detected frames from claiming complete read coverage in the advertised tool', () => {
+    const { tools } = describeTools(['read-page']);
+    const constraints = tools[0]!.constraints!.join(' ');
+    expect(constraints).toContain('limited=false is not proof of whole-page coverage');
+    expect(constraints).toContain(
+      'coverage.detectedFrameCount is a lower bound of frames encountered, not a complete inventory (even when zero)',
+    );
+  });
   it('covers every local action schema', () => {
     expect(Object.keys(toolHelp).sort()).toEqual([...BROWSER_METHODS].sort());
     const catalog = describeTools(BROWSER_METHODS);

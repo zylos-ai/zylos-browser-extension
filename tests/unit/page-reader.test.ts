@@ -81,6 +81,39 @@ test('includes open shadow text and slotted content once without altering the pa
   expect(host.shadowRoot!.innerHTML).toBe(before);
 });
 
+test('reports omitted same-origin and cross-origin frames without reading contents or URLs', () => {
+  document.body.innerHTML = `<p>Workspace shell</p><iframe id="same"></iframe>
+    <iframe src="https://other.example/private?token=secret">fallback-secret</iframe>
+    <div id="host"></div>`;
+  const same = document.querySelector<HTMLIFrameElement>('#same')!;
+  same.contentDocument!.body.innerHTML = '<p>embedded-secret</p>';
+  document.querySelector('#host')!.attachShadow({ mode: 'open' }).innerHTML =
+    '<iframe src="https://shadow.example/private"></iframe>';
+  const page = extractPageText();
+  expect(page).toMatchObject({
+    text: 'Workspace shell',
+    limited: false,
+    nextOffset: null,
+    coverage: { scope: 'main-frame', frameContents: 'not-read', detectedFrameCount: 3 },
+  });
+  expect(JSON.stringify(page)).not.toMatch(/secret|other\.example|shadow\.example/);
+  expect(same.contentDocument!.body.textContent).toBe('embedded-secret');
+});
+
+test('frame count is only a lower bound when traversal skips hidden or unvisited content', () => {
+  document.body.innerHTML = '<iframe hidden></iframe><div id="slow"><iframe></iframe></div>';
+  const compute = getComputedStyle;
+  vi.spyOn(globalThis, 'getComputedStyle').mockImplementation((element) => {
+    const style = compute(element);
+    if (element.id === 'slow') elapsed += 251;
+    return style;
+  });
+  expect(extractPageText()).toMatchObject({
+    limited: true,
+    coverage: { scope: 'main-frame', frameContents: 'not-read', detectedFrameCount: 0 },
+  });
+});
+
 test('chunks are bounded, have stable offsets/version, and report extraction limits', () => {
   document.body.innerHTML = '<p>' + 'article '.repeat(3000) + '</p>';
   const first = extractPageText({ limit: 6000 });

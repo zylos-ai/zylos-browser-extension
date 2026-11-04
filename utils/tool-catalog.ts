@@ -80,15 +80,16 @@ export const toolHelp = {
       'Read loaded text and links from the page attached to a user message, without debugger attachment, scrolling, navigation or screenshots.',
     constraints: [
       'Use the exact message contextId. This action runs alone in its batch. Start at offset 0 with the message contentVersion. For more text, pass the returned nextOffset as offset and the same contentVersion. Stop when enough evidence is collected.',
-      'On PAGE_CONTENT_CHANGED restart at offset 0; do not combine chunks from different versions. nextOffset=null ends the extracted text. limited=true means coverage is incomplete; unexpanded, unloaded, closed-shadow and embedded frame contents may be absent. Never claim to have read the whole page when limited.',
-      'A closed, reloaded or navigated message page cannot be retargeted. No executable refs are returned. For actual interaction or advanced observations use use-current-tab to enter browser control.',
+      'On PAGE_CONTENT_CHANGED restart at offset 0; do not combine chunks from different versions. nextOffset=null ends the extracted main-frame text. limited=true means an extraction budget was reached. limited=false is not proof of whole-page coverage: iframe documents, closed shadow roots, unexpanded and unloaded content are outside this reader. coverage.scope is main-frame; coverage.frameContents is not-read; coverage.detectedFrameCount is a lower bound of frames encountered, not a complete inventory (even when zero).',
+      'A closed, reloaded or navigated message page cannot be retargeted. No executable refs are returned. If needed content is embedded in an iframe, use use-current-tab, then frames and find(selector, frameId); use observe when visual evidence is needed. Browser control supports permitted child frames, including cross-origin frames. Do not infer unsupported browser capabilities from this reader or bypass denied access.',
     ],
   },
   'use-current-tab': {
     description:
-      'Enter browser control on the page attached to a user message, without reopening or regrouping it. Use read-page for ordinary text questions.',
+      'Enter browser control on the page attached to a user message, without reopening or regrouping it. Use for requested page operations or embedded content missing from read-page; use read-page for ordinary text questions.',
     constraints: [
       'Use the exact contextId from that message, never a guessed tab ID. Contexts expire after 30 minutes or a worker restart. A navigated or closed page requires a new user message. Fresh evidence is returned automatically after selecting. User-owned tabs are never closed by task cleanup.',
+      'Full tools arrive after selection. For iframe content, call frames then find with the actual frameId; find/inspect and fresh refs can be used even when an Iframe snapshot node has no children. Do not reopen the embedded URL merely because the first read omitted it.',
     ],
   },
   open: {
@@ -117,7 +118,7 @@ export const toolHelp = {
   },
   find: {
     description:
-      'Find elements by CSS selector, traversing open Shadow DOM; return refs and state, including actual link destinations in state.href and native video/audio playback facts in state.media.',
+      'Find elements by CSS selector across permitted frames and open Shadow DOM; optionally scope to an actual frameId from frames. Return refs and state, including actual link destinations in state.href and native video/audio playback facts in state.media.',
     examples: [{ selector: 'input[type="search"]' }, { selector: 'video,audio' }],
     constraints: [
       'Quote CSS attribute values containing punctuation: a[href*="/comments/"] is valid; a[href*=/comments/] is not.',
