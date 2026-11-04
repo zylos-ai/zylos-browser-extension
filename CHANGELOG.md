@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.17.4] - 2026-11-04
+
+No Remote protocol change required. Remote 0.10.5 provides the companion Agent
+discovery and proactive-start guidance.
+
+### Fixed
+
+- Mark page text as main-frame-only, with child-frame contents not read and
+  detected frame counts reported as a lower bound, including when zero.
+  Keep extraction-budget limits separate from frame coverage.
+- Guide the Agent to inspect allowed frames when needed and to act on explicit
+  page-operation requests, while preserving denied-read and authorization
+  boundaries. No CDP or frame-input execution changes.
+
 ## [0.17.3] - 2026-10-29
 
 No Remote change required; works with Zylos Browser Remote 0.10.3.
