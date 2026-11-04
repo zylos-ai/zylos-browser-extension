@@ -26,6 +26,12 @@ export type ReadPageOptions = {
   /** Pre-send overview: the viewport digest plus a heading outline of the whole page. */
   overview?: boolean;
 };
+export type PageReadCoverage = {
+  scope: 'main-frame';
+  frameContents: 'not-read';
+  /** Lower bound from the bounded rendered-DOM traversal, not a frame inventory. */
+  detectedFrameCount: number;
+};
 function fail(code: string, message = code): never {
   throw Object.assign(new Error(message), { code });
 }
@@ -64,6 +70,7 @@ export function extractPageText(options: ReadPageOptions = {}) {
   let solid = 0;
   let length = 0,
     visited = 0,
+    detectedFrameCount = 0,
     limited = false;
   const append = (text: string) => {
     const remaining = maxText - length;
@@ -130,6 +137,10 @@ export function extractPageText(options: ReadPageOptions = {}) {
       style.visibility === 'collapse'
     )
       return;
+    if (node.tagName === 'IFRAME' || node.tagName === 'FRAME') {
+      detectedFrameCount++;
+      return;
+    }
     const block = blocks.has(node.tagName);
     if (block) append('\n');
     const textStart = chunks.length;
@@ -444,6 +455,11 @@ export function extractPageText(options: ReadPageOptions = {}) {
     contentVersion: `${text.length}-${(hash >>> 0).toString(16)}`,
     truncated: end < text.length || limited,
     limited,
+    coverage: {
+      scope: 'main-frame' as const,
+      frameContents: 'not-read' as const,
+      detectedFrameCount,
+    },
     textLength: text.length,
     ...(viewport ? { viewport, outline } : {}),
   };

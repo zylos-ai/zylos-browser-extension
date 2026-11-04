@@ -274,3 +274,23 @@ test('Agent read-page requests cannot ask for a viewport digest', async () => {
     expect.objectContaining({ args: [{ offset: 0, limit: undefined, contentVersion: undefined }] }),
   );
 });
+
+test('carries structural iframe coverage into initial context and reads without entering control', async () => {
+  const coverage = {
+    scope: 'main-frame' as const,
+    frameContents: 'not-read' as const,
+    detectedFrameCount: 2,
+  };
+  vi.mocked(chrome.scripting.executeScript).mockImplementation(async () => [
+    { documentId, frameId: 0, result: { ...page(), coverage } },
+  ]);
+  const { context } = await captureCurrentPage(id, 2, 7);
+  expect(context).toMatchObject({ limited: false, coverage });
+  expect(context.scope).toContain('frames and find with frameId');
+  expect(context).not.toHaveProperty('text');
+  const read = await readPageContext(id, {}, () => {});
+  expect(read).toMatchObject({ limited: false, coverage });
+  expect(read.scope).toContain('limited=false and nextOffset=null do not prove');
+  expect(executor.useExistingTab).not.toHaveBeenCalled();
+  expect(chrome.debugger.attach).not.toHaveBeenCalled();
+});

@@ -69,6 +69,7 @@ export type PageContext = {
   contentVersion?: string;
   textLength?: number;
   limited?: boolean;
+  coverage?: import('./page-reader').PageReadCoverage;
   viewport?: {
     text: string;
     truncated: boolean;

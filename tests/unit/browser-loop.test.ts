@@ -47,6 +47,20 @@ const recoveryDescriptor = () => ({
   reason: 'target_closed' as const,
   cause: 'unknown' as const,
 });
+it('advertises the iframe and requested-operation entry paths before control tools are available', () => {
+  const { loop, requests } = setup();
+  const { instructions, tools } = requests[0]!.execution;
+  expect(tools?.map((tool) => (tool as { name: string }).name)).toEqual([
+    'read-page',
+    'use-current-tab',
+    'open',
+  ]);
+  expect(instructions).toContain('use-current-tab, then frames and find(selector, frameId)');
+  expect(instructions).toContain('Do not stop at manual instructions');
+  expect(instructions).toContain('limited=false, nextOffset=null');
+  expect(instructions).toContain('A denied read does not authorize');
+  loop.cancel();
+});
 it('recovery exposes only one recovery tool and rejects normal or mismatched actions', () => {
   const { loop, requests } = setup();
   const old = requests[0]!.id;
