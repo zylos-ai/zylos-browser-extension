@@ -1,6 +1,34 @@
 import type zh from './zh-CN';
 
 export default {
+  siteAccess: 'Site permissions',
+  siteAccessScope:
+    'Restricted pages remain blocked unless you grant access. Each permission covers one exact site, including its scheme and port; it excludes subdomains.',
+  siteAccessOrigin: 'Site address',
+  siteAccessMode: 'Access',
+  siteAccessReadOnly: 'Read only',
+  siteAccessInteractive: 'Allow actions',
+  siteAccessDuration: 'Valid for',
+  siteAccess15Minutes: '15 minutes',
+  siteAccess1Hour: '1 hour',
+  siteAccess24Hours: '24 hours',
+  siteAccessReadOnlyHint:
+    'Allows opening, reading, screenshots and scrolling. Clicks, typing and submissions are blocked throughout this site.',
+  siteAccessInteractiveHint:
+    'Allows reading and actions on this site, including sensitive pages. Password and verification-code protections still apply.',
+  siteAccessGrant: 'Grant site access',
+  siteAccessGrants: 'Granted sites',
+  siteAccessEmpty: 'No site permissions granted.',
+  siteAccessExpires: 'Expires',
+  siteAccessExpired: 'Expired',
+  siteAccessRevoke: 'Revoke',
+  siteAccessRevokeOrigin: 'Revoke access to {origin}',
+  siteAccessHistory: 'Recent site access',
+  siteAccessHistoryScope:
+    'Local access records show the site, action and decision. Page content and full page addresses are not recorded.',
+  siteAccessNoHistory: 'No site access recorded.',
+  siteAccessAllowed: 'Allowed',
+  siteAccessDenied: 'Denied',
   taskCompatibilityPermission: 'Extension compatibility mode',
   compatibilityHint:
     "Allow active browser tasks to remove other extensions' inline UI. Saved across tasks and restarts; cleared when the connection address or key changes.",

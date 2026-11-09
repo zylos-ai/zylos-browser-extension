@@ -48,6 +48,13 @@ import {
   refreshCdpDiagnostics,
 } from '../../utils/automation/cdp-diagnostics';
 import { safeError } from '../../utils/diagnostics-schema';
+import {
+  initializeSiteAccess,
+  siteAccessState,
+  grantSiteAccess,
+  revokeSiteAccess,
+  clearSiteAccess,
+} from '../../utils/site-access';
 // Extension-owned conversations: request Agent decisions, execute locally, and
 // return observations over the authenticated Remote connection.
 import { captureCurrentPage, clearPageContexts, forgetPageContext } from '../../utils/page-context';
@@ -133,6 +140,8 @@ export function startRemoteBackground() {
   const preview = new LivePreview();
   const state: RemoteState = { ...initialRemoteState, chat: [] };
   let config: RemoteConfig = remoteConfigSchema.parse({});
+  let siteExpiryTimer: ReturnType<typeof setTimeout> | undefined;
+  let siteExpiry = 0;
   let socket: WebSocket | null = null;
   let generation = 0; // bumps on every (re)connect so stale socket handlers go inert
   let backoff = BACKOFF_MIN_MS;
@@ -374,6 +383,30 @@ export function startRemoteBackground() {
     void chrome.runtime.sendMessage({ type: 'remote-updated', state: snapshot() }).catch(() => {});
   };
   function snapshot(): RemoteState {
+    state.siteAccess = siteAccessState();
+    const nextExpiry = Math.min(
+      ...state.siteAccess.grants
+        .filter((grant) => grant.expiresAt > Date.now())
+        .map((grant) => grant.expiresAt),
+    );
+    if (nextExpiry !== siteExpiry) {
+      clearTimeout(siteExpiryTimer);
+      siteExpiry = nextExpiry;
+      if (Number.isFinite(nextExpiry))
+        siteExpiryTimer = setTimeout(
+          () => {
+            siteExpiry = 0;
+            idem.cancel();
+            clearPageContexts();
+            void release(true, false, 'consent_changed')
+              .catch((error) =>
+                recordLifecycle('runtime-error', { level: 'error', ...safeError(error) }),
+              )
+              .finally(publish);
+          },
+          Math.max(0, nextExpiry - Date.now()),
+        );
+    }
     state.agentStartEnabled = agentStartEnabled;
     state.compatibilityEnabled = config.compatibilityEnabled;
     state.detailedDiagnostics = detailed.state();
@@ -1524,6 +1557,7 @@ export function startRemoteBackground() {
     await persistChat();
     if (activity.recover()) await persistChat();
     await applyConfig(cfg.success ? cfg.data : remoteConfigSchema.parse({}));
+    await initializeSiteAccess(`${config.relayUrl}|${await keyIdOf(config.key)}`);
     if (config.enabled && state.configured) void connect();
     publish();
   })();
@@ -1563,6 +1597,28 @@ export function startRemoteBackground() {
       checkTransportFreshness();
       const m = parsed.data;
       switch (m.type) {
+        case 'remote-site-access-grant':
+          // Stop an in-flight operation before a permission is downgraded.
+          idem.cancel();
+          await release(true, false, 'consent_changed');
+          await grantSiteAccess(m.origin, m.mode, m.durationMinutes);
+          clearPageContexts();
+          publish();
+          return snapshot();
+        case 'remote-site-access-revoke': {
+          const revoked = revokeSiteAccess(m.id);
+          // Persistence may reject before debugger cleanup finishes.
+          void revoked.catch(() => {});
+          idem.cancel();
+          clearPageContexts();
+          try {
+            await release(true, false, 'consent_changed');
+            await revoked;
+          } finally {
+            publish();
+          }
+          return snapshot();
+        }
         case 'remote-detailed-set-enabled':
           if (m.enabled) detailed.enable();
           else detailed.clear();
@@ -1634,14 +1690,16 @@ export function startRemoteBackground() {
             config.compatibilityEnabled = false;
             revokeAutomaticRemoval();
             const stopped = revokeAgentStarts();
+            const siteAccessCleared = clearSiteAccess();
             detailed.clear();
-            await stopped;
+            await Promise.all([stopped, siteAccessCleared]);
             await setDiagnosticsEnabled(false);
           }
           await diagnosticStorage('write', () =>
             chrome.storage.local.set({ [REMOTE_CONFIG_KEY]: next }),
           );
           await applyConfig(next);
+          await initializeSiteAccess(`${config.relayUrl}|${await keyIdOf(config.key)}`);
           return snapshot();
         }
         case 'remote-set-enabled': {
@@ -1794,6 +1852,8 @@ export function startRemoteBackground() {
     // A second panel must not re-enable sharing between recipient revocation
     // and the durable connection update. Serialize these whole transactions.
     const mutatesConsent = [
+      'remote-site-access-grant',
+      'remote-site-access-revoke',
       'remote-agent-start-set-enabled',
       'remote-compatibility-set-enabled',
       'remote-save',

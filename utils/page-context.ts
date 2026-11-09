@@ -9,6 +9,7 @@ import {
 import { useExistingTab } from './automation/executor';
 import type { PageSelection } from './page-selection';
 import type { PageContext } from './agent-message';
+import { recordSiteAccess } from './site-access';
 
 type Context = PageDocument & { expires: number };
 const contexts = new Map<string, Context>();
@@ -41,6 +42,7 @@ export async function captureCurrentPage(
     if (!tab || tab.id === undefined) throw new Error('NO_PAGE');
     if (tab.windowId !== win.id) throw new Error('WRONG_WINDOW');
     if (!canReadPage(tab)) {
+      if (tab.url) await recordSiteAccess(tab.url, 'read-page', false);
       if (selections.length) throw new Error('ui.error.selectionChanged');
       return {
         context: {

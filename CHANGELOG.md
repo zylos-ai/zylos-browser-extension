@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Owner-managed exact-site permissions in Settings, with read-only or interactive
+  access, 15-minute/one-hour/24-hour expiry and immediate revoke controls.
+  Restricted pages remain denied without an active grant. Grants are bound to
+  the configured connection and are cleared when its recipient changes.
+- Origin-only local permission/access history (up to 200 events for seven days).
+  Read-only grants permit navigation, page reading, screenshots and scrolling,
+  while refusing clicks, input, submissions, history navigation and recovery.
+  Frame permissions and parent restrictions are checked during execution.
+- Refuse whole-page screenshots when a known restricted child frame lacks access.
+
 ## [0.17.4] - 2026-11-04
 
 No Remote protocol change required. Remote 0.10.5 provides the companion Agent

@@ -1,7 +1,7 @@
 // Guarded local browser actions used only by the extension-owned loop.
 import { actionParams, commandSchema, type Command } from './commands';
 import { recordDiagnostic } from './diagnostics';
-import { isBlockedUrl } from './guard';
+import { assertSiteAction, recordSiteAccess } from './site-access';
 import { createTask, currentControl, currentGrant, execute } from './automation/executor';
 import { usePageContext, readPageContext } from './page-context';
 import { browserParams as paramSchemas, BROWSER_METHODS, type BrowserMethod } from './tool-catalog';
@@ -225,22 +225,16 @@ async function dispatchNow(
     if (prior !== undefined) return { ...(prior as object), replayed: true };
   }
 
-  if (URL_METHODS.has(method) && isBlockedUrl(params.url)) {
-    fail(
-      'BLOCKED_URL',
-      'refused: target URL is on the blocklist (payment / banking / account-security)',
-      { url: params.url },
-    );
-  }
-  if (GUARDED_METHODS.has(method)) {
-    const here = currentGrant()?.url;
-    if (isBlockedUrl(here)) {
-      fail(
-        'BLOCKED_URL',
-        'refused: task tab is on a blocklisted page; ask the owner to handle it, or open another URL',
-        { url: here },
-      );
+  const target = URL_METHODS.has(method) ? params.url : currentGrant()?.url;
+  if (typeof target === 'string' && (URL_METHODS.has(method) || GUARDED_METHODS.has(method))) {
+    try {
+      assertSiteAction(target, method);
+    } catch (error) {
+      await recordSiteAccess(target, method, false);
+      const denied = error as { code?: string; message?: string };
+      fail(denied.code || 'BLOCKED_URL', denied.message || 'Site access denied', { url: target });
     }
+    await recordSiteAccess(target, method, true);
   }
 
   // Only actual execution may resume a completed preview. Cache replays and

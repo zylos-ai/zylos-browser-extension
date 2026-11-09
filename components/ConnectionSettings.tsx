@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { useI18n } from './LanguageProvider';
 import { languagePreference } from '../utils/i18n';
-import type { RemoteState } from '../utils/remote';
+import type { RemoteRequest, RemoteState } from '../utils/remote';
 import { DetailedDiagnosticsSettings } from './DetailedDiagnosticsSettings';
+import { SiteAccessSettings } from './SiteAccessSettings';
 
 export function ConnectionSettings({
   state,
@@ -14,6 +15,7 @@ export function ConnectionSettings({
   onDetailedToggle,
   onAgentStartToggle,
   onCompatibilityToggle,
+  onSiteAccessChange,
 }: {
   state: RemoteState;
   saving: boolean;
@@ -24,6 +26,7 @@ export function ConnectionSettings({
   onDetailedToggle?: () => void;
   onAgentStartToggle?: () => void;
   onCompatibilityToggle?: () => void;
+  onSiteAccessChange?: (request: RemoteRequest) => void;
 }) {
   const { t, preference, changeLanguage, savingLanguage, languageError } = useI18n();
   const [relayUrl, setRelayUrl] = useState(state.relayUrl || 'ws://127.0.0.1:3802/ext');
@@ -88,6 +91,7 @@ export function ConnectionSettings({
           </button>
         </form>
       </section>
+      <SiteAccessSettings state={state} pending={pending} onChange={onSiteAccessChange} />
       <DetailedDiagnosticsSettings
         state={state}
         pending={pending}

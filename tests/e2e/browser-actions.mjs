@@ -65,6 +65,8 @@ function cdpClient(ws) {
     });
 }
 function fixture(url, port) {
+  if (url.startsWith('/billing-with-restricted-frame'))
+    return `<!doctype html><title>Billing frame boundary</title><h1>Permitted parent</h1><iframe title="Restricted child" src="http://localhost:${port}/billing"></iframe>`;
   if (url.startsWith('/lazy-list'))
     return `<!doctype html><meta charset="utf-8"><title>Delayed 200 app list</title>
     <style>body{margin:0;font:16px system-ui}.row{height:70px;margin:0}#loading{height:20px}</style>
@@ -243,6 +245,7 @@ try {
       '--remote-debugging-port=0',
       '--window-size=1280,1400',
       '--site-per-process',
+      ...(process.env.E2E_NO_SANDBOX ? ['--no-sandbox'] : []),
       'about:blank',
     ],
     { stdio: ['ignore', 'ignore', 'pipe'] },
@@ -487,6 +490,156 @@ try {
     );
     assert.equal((await panelState()).task, null);
   };
+  await check(
+    'site access: panel grants read-only and interactive access, audits and revokes',
+    async () => {
+      const origin = new URL(url).origin;
+      const billing = url + 'billing';
+      let request = await askLoop('Site access: default blocked');
+      const action = async (method, params = {}) => {
+        await decision(request, { kind: 'actions', actions: [{ method, params }] });
+        request = await nextRound(request);
+        return request.request.execution;
+      };
+      const denied = await action('open', { url: billing });
+      assert.equal(denied.failed, true);
+      assert.ok(denied.results.some((result) => result.error?.code === 'BLOCKED_URL'));
+      await decision(request, { kind: 'done', text: 'Default restriction verified' });
+      await eventually(async () => !(await panelState()).chatBusy);
+      await previewPanel("document.querySelector('.settings-button').click()");
+      await eventually(() => previewPanel("!!document.querySelector('#site-access-origin')"));
+      await cdp(
+        'Runtime.evaluate',
+        { expression: "document.querySelector('#site-access-origin').focus()" },
+        sessionId,
+      );
+      await cdp('Input.insertText', { text: origin }, sessionId);
+      await previewPanel("document.querySelector('.site-access-settings form').requestSubmit()");
+      await eventually(async () => (await panelState()).siteAccess?.grants.length === 1);
+      const grant = (await panelState()).siteAccess.grants[0];
+      assert.equal(grant.origin, origin);
+      assert.equal(grant.mode, 'read-only');
+      for (const width of [320, 500]) {
+        await cdp(
+          'Emulation.setDeviceMetricsOverride',
+          { width, height: 1000, deviceScaleFactor: 1, mobile: false },
+          sessionId,
+        );
+        await previewPanel(
+          "document.querySelector('.site-access-settings').scrollIntoView({block:'start'})",
+        );
+        const layout = await previewPanel(`(() => {
+        const section = document.querySelector('.site-access-settings');
+        return {overflow: document.documentElement.scrollWidth > innerWidth || section.scrollWidth > section.clientWidth,
+          fits: [...section.querySelectorAll('input,select,button')].every(el => { const r=el.getBoundingClientRect(); return r.left>=0 && r.right<=innerWidth; })};
+      })()`);
+        assert.equal(layout.overflow, false, JSON.stringify(layout));
+        assert.equal(layout.fits, true, JSON.stringify(layout));
+        if (process.env.E2E_SCREENSHOT_DIR) {
+          await fs.mkdir(process.env.E2E_SCREENSHOT_DIR, { recursive: true });
+          const shot = await cdp('Page.captureScreenshot', { format: 'png' }, sessionId);
+          await fs.writeFile(
+            path.join(process.env.E2E_SCREENSHOT_DIR, `site-access-${width}.png`),
+            Buffer.from(shot.data, 'base64'),
+          );
+        }
+      }
+      await cdp('Emulation.clearDeviceMetricsOverride', {}, sessionId);
+      await previewPanel("document.querySelector('.settings-button').click()");
+      const tab = await previewPanel(
+        `chrome.tabs.create({url:${JSON.stringify(billing)},active:true})`,
+      );
+      await eventually(
+        async () => (await previewPanel(`chrome.tabs.get(${tab.id})`)).status === 'complete',
+      );
+      request = await askLoop('Site access: read-only billing', tab);
+      const context = request.request.context.pages[0];
+      assert.ok(context.contextId, JSON.stringify(context));
+      const read = await action('read-page', { contextId: context.contextId, offset: 0 });
+      assert.equal(read.failed, false, JSON.stringify(read));
+      assert.equal(
+        (await action('use-current-tab', { contextId: context.contextId })).failed,
+        false,
+      );
+      let found = await action('find', { selector: '#input' });
+      const input = found.observation.page.matches[0].ref;
+      const fill = await action('fill', { ref: input, text: 'must stay blocked' });
+      assert.equal(fill.failed, true);
+      assert.ok(fill.results.some((result) => result.error?.code === 'SITE_READ_ONLY'));
+      const click = await action('click', { x: 100, y: 100 });
+      assert.equal(click.failed, true);
+      assert.ok(click.results.some((result) => result.error?.code === 'SITE_READ_ONLY'));
+      assert.equal(
+        (await action('scroll', { x: 100, y: 100, direction: 'down', pixels: 120 })).failed,
+        false,
+      );
+      const observation = await action('observe');
+      assert.equal(observation.failed, false, JSON.stringify(observation));
+      assert.ok(observation.observation.page.screenshot);
+      await decision(request, { kind: 'done', text: 'Read-only verified' });
+      await eventually(async () => !(await panelState()).chatBusy);
+      const framed = await previewPanel(
+        `chrome.tabs.create({url:${JSON.stringify(url + 'billing-with-restricted-frame')},active:true})`,
+      );
+      await eventually(
+        async () => (await previewPanel(`chrome.tabs.get(${framed.id})`)).status === 'complete',
+      );
+      request = await askLoop('Site access: restricted child screenshots', framed);
+      assert.equal(
+        (await action('use-current-tab', { contextId: request.request.context.pages[0].contextId }))
+          .failed,
+        false,
+      );
+      const hiddenFrame = await action('observe');
+      assert.equal(hiddenFrame.failed, true);
+      assert.ok(hiddenFrame.results.some((result) => result.error?.code === 'BLOCKED_FRAME'));
+      assert.equal(hiddenFrame.observation?.page?.screenshot, undefined);
+      await decision(request, { kind: 'done', text: 'Restricted frame capture denied' });
+      await eventually(async () => !(await panelState()).chatBusy);
+      await previewPanel(`chrome.tabs.remove(${framed.id})`);
+      const interactive = await previewPanel(
+        `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-site-access-grant', origin, mode: 'interactive', durationMinutes: 15 })})`,
+      );
+      assert.equal(interactive.ok, true, JSON.stringify(interactive));
+      request = await askLoop('Site access: interactive billing', tab);
+      assert.equal(
+        (await action('use-current-tab', { contextId: request.request.context.pages[0].contextId }))
+          .failed,
+        false,
+      );
+      found = await action('find', { selector: '#input' });
+      assert.equal(
+        (
+          await action('fill', {
+            ref: found.observation.page.matches[0].ref,
+            text: 'Authorized draft',
+          })
+        ).failed,
+        false,
+      );
+      await decision(request, { kind: 'done', text: 'Interactive verified' });
+      await eventually(async () => !(await panelState()).chatBusy);
+      const id = (await panelState()).siteAccess.grants[0].id;
+      const revoke = await previewPanel(
+        `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-site-access-revoke', id })})`,
+      );
+      assert.equal(revoke.ok, true);
+      const state = await panelState();
+      assert.equal(state.siteAccess.grants.length, 0);
+      assert.ok(state.siteAccess.audit.some((entry) => entry.action === 'fill' && !entry.allowed));
+      assert.ok(
+        state.siteAccess.audit.some((entry) => entry.action === 'read-page' && entry.allowed),
+      );
+      assert.ok(state.siteAccess.audit.every((entry) => entry.origin === origin));
+      request = await askLoop('Site access: revoked billing', tab);
+      assert.equal(request.request.context.pages[0].contextId, undefined);
+      assert.equal((await action('open', { url: billing })).failed, true);
+      await decision(request, { kind: 'done', text: 'Revocation verified' });
+      await eventually(async () => !(await panelState()).chatBusy);
+      await previewPanel(`chrome.tabs.remove(${tab.id})`);
+      await workerEval('globalThis.debuggerCalls = []');
+    },
+  );
   await check(
     'mixed attachments support picker, paste, drop, persistent previews and task cleanup',
     async () => {
@@ -2280,11 +2433,11 @@ try {
           return {overflow:document.documentElement.scrollWidth>innerWidth || main.scrollWidth>main.clientWidth,
             fits:boxes.every(box=>box.x>=0 && box.right<=innerWidth), font:getComputedStyle(input).fontSize,
             inputHeight:input.getBoundingClientRect().height, clearInHeader:header.contains(clear),
-            controlsFit:boxes.every(box=>box.bottom<=innerHeight)};
+            scrollable:main.scrollHeight >= main.clientHeight};
         })()`);
           assert.equal(layout.overflow, false, JSON.stringify(layout));
           assert.equal(layout.fits, true, JSON.stringify(layout));
-          assert.equal(layout.controlsFit, true, JSON.stringify(layout));
+          assert.equal(layout.scrollable, true, JSON.stringify(layout));
           assert.equal(layout.font, '13px');
           assert.equal(layout.inputHeight, 44);
           assert.equal(layout.clearInHeader, true);

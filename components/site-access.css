@@ -1,0 +1,58 @@
+.site-access-settings {
+  padding-top: 24px;
+  border-top: 1px solid var(--color-border);
+}
+.site-access-settings > div > .settings-hint {
+  margin-top: 4px;
+}
+.site-access-options {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+.site-access-list,
+.site-access-history ol {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.site-access-list h3 {
+  font-size: var(--text-label);
+  font-weight: 500;
+}
+.site-access-grant,
+.site-access-event {
+  padding-block: 10px;
+  border-bottom: 1px solid var(--color-border);
+  min-width: 0;
+}
+.site-access-origin,
+.site-access-settings time,
+.site-access-event span {
+  overflow-wrap: anywhere;
+}
+.site-access-origin {
+  font-size: var(--text-label);
+}
+.site-access-revoke {
+  flex-shrink: 0;
+  min-height: 40px;
+  padding-inline: 10px;
+}
+.site-access-history summary {
+  cursor: pointer;
+  font-size: var(--text-label);
+}
+.site-access-history > .settings-hint,
+.site-access-history ol {
+  margin-top: 10px;
+}
+.site-access-history ol {
+  list-style: none;
+  padding: 0;
+}
+.site-access-event {
+  display: grid;
+  gap: 4px;
+}

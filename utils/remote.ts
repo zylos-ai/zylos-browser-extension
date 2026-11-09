@@ -14,6 +14,7 @@ import { storedAttachmentsSchema, selectionAttachment, imagePreviewsSchema } fro
 import { userMessageSchema } from './agent-message';
 import { taskNoticeSchema } from './task-notice';
 import { panelDiagnosticSchema } from './diagnostics-schema';
+import { siteAccessStateSchema } from './site-access';
 
 export const REMOTE_SUBPROTOCOL = 'zylos-browser-remote.v3';
 export const REMOTE_KEY_PROTO_PREFIX = 'key.';
@@ -113,6 +114,7 @@ export const chatEntrySchema = z
 export type ChatEntry = z.infer<typeof chatEntrySchema>;
 
 export const remoteStateSchema = z.object({
+  siteAccess: siteAccessStateSchema.optional(),
   detailedSharing: z
     .object({
       phase: z.enum(['idle', 'prepared', 'authorized', 'consumed', 'expired', 'revoked']),
@@ -172,6 +174,15 @@ export const initialRemoteState: RemoteState = {
 
 // Panel -> background. Only the bundled sidepanel may send these.
 export const remoteRequestSchema = z.discriminatedUnion('type', [
+  z
+    .object({
+      type: z.literal('remote-site-access-grant'),
+      origin: z.string().max(2048),
+      mode: z.enum(['read-only', 'interactive']),
+      durationMinutes: z.number().int().min(5).max(1440),
+    })
+    .strict(),
+  z.object({ type: z.literal('remote-site-access-revoke'), id: z.string().uuid() }).strict(),
   z.object({ type: z.literal('remote-agent-start-set-enabled'), enabled: z.boolean() }).strict(),
   z
     .object({

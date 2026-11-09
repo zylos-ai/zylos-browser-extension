@@ -1,4 +1,4 @@
-import { isBlockedUrl } from '../guard';
+import { isSiteUrlBlocked } from '../site-access';
 import { diagnosticSend, recordDebuggerEvent } from './cdp-diagnostics';
 
 export type Frame = { id: string; parentId?: string; url?: string; sessionId?: string };
@@ -74,7 +74,8 @@ export function frameEvent(
 }
 export function frameAllowed(frame: Frame) {
   return (
-    (!frame.url || /^https?:|^about:(blank|srcdoc)$/.test(frame.url)) && !isBlockedUrl(frame.url)
+    (!frame.url || /^https?:|^about:(blank|srcdoc)$/.test(frame.url)) &&
+    !isSiteUrlBlocked(frame.url)
   );
 }
 export async function collectFrames(

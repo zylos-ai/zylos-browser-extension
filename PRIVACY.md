@@ -32,6 +32,25 @@ The extension does not include a mechanism that sells user data or sends it to a
 
 ## Storage, retention, and deletion
 
+**Site permissions.** Restricted pages remain blocked unless you grant an exact
+HTTP(S) origin access in extension Settings. Grants include mode, creation time
+and expiry (at most 24 hours), persist locally across worker restarts, and are
+bound to your configured Relay/Key recipient. Changing that recipient clears
+the grants and their access history. You can revoke any grant in the panel.
+Read-only access permits page reads, screenshots and scrolling but denies clicks,
+typing and submissions; interactive access permits actions, while password/OTP
+field protections remain. Authorized page content can reach your Relay and Agent
+through the usual task observations. Only the local panel can change permissions.
+
+The extension keeps at most 200 permission/access records for seven days in
+local extension storage. They contain the exact origin (scheme, host and port),
+action, permission identifier, mode, timestamp and allowed/denied decision. They
+do not contain full paths, query strings, page contents or input values. This
+history is available in local Settings, not the Agent diagnostics API. An allowed
+decision does not establish that the action completed. Revocation stops current
+access before persistence; if storing it fails, the panel reports the failure,
+and the old saved grant may reappear after worker restart until its expiry.
+
 **Detailed local diagnostics is a separate opt-in.** It captures bounded console strings and Error messages/stacks from the extension background and sidepanel, plus handled browser-operation errors. It does not subscribe to webpage consoles or DevTools logs. Ordinary objects, functions, symbols and bigints are omitted and marked incomplete. Error string data fields are read directly; Chrome's cached native stack getter is allowed only for known native Error prototypes with default formatting and no name/message accessors. Custom getters, custom stack formatters and toJSON methods are not deliberately invoked. Prototype/descriptor inspection can trigger Proxy reflection traps, so this is best-effort diagnostic instrumentation, not a sandbox for hostile JavaScript objects.
 
 While enabled, detailed capture also records CDP method names, call IDs, elapsed time, success/error status, debugger attach/detach and bounded target presence checks. Target identifiers are replaced with capture-local opaque numbers. This metadata excludes command arguments and result values. Native errors still pass through the text rules below and may contain private information.

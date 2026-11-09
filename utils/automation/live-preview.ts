@@ -2,6 +2,7 @@ import { isPanelSender } from '../messages';
 import { diagnosticSend } from './cdp-diagnostics';
 import { PREVIEW_PORT, type PreviewFrame, type PreviewState } from '../live-preview';
 import type { GrantedTab, Scope } from './types';
+import { isSiteUrlBlocked } from '../site-access';
 
 type Client = { port: chrome.runtime.Port; visible: boolean; pending: number | null; sent: number };
 type Capture = { key: string; tabId: number };
@@ -321,7 +322,12 @@ export class LivePreview {
         void this.command(stream.tabId, 'Page.screencastFrameAck', {
           sessionId: p.sessionId,
         }).catch(() => {});
-      if (this.desired()?.key !== stream.key || this.state?.targetKey !== stream.key) return;
+      if (
+        this.desired()?.key !== stream.key ||
+        this.state?.targetKey !== stream.key ||
+        isSiteUrlBlocked(this.state.url)
+      )
+        return;
       if (!p?.data || p.data.length > 490_000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(p.data)) return;
       clearTimeout(this.firstFrameTimer);
       this.setAvailability('live');

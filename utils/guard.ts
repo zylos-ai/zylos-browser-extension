@@ -1,7 +1,7 @@
 // URL blocklist. Ported from zylos-browser-remote/extension/guard.js (the
 // adversarially reviewed cdp-bridge original). The relay no longer carries a
-// copy: this is the ONLY gate, and it runs against live tab URLs, hrefs and
-// navigation targets -- things a relay-side cache could never see.
+// copy. site-access.ts applies the owner's expiring exact-origin overrides;
+// callers must check that policy against live document and navigation URLs.
 
 // Hosts/paths that must never be driven without a per-case go-ahead from the owner.
 // Matching is intentionally broad: a false refusal is cheap, a wrong click is not.
