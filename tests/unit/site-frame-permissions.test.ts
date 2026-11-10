@@ -156,6 +156,64 @@ test('child navigation between ref preparation and commit cannot inherit the old
   expect(send.mock.calls.some(([method]) => method === 'Input.insertText')).toBe(false);
 });
 
+test.each(['denied', 'read-only'] as const)(
+  'text for an allowed parent cannot be inserted while a sibling child is %s',
+  async (mode) => {
+    await grantSiteAccess('https://finance.example', mode, 15);
+    const { actions, send } = setup();
+    vi.spyOn(actions, 'resolve').mockResolvedValue({ objectId: 'parent-input', frame: top });
+    await expect(
+      actions.commitInput({ op: 'fill', ref, text: 'private draft' }),
+    ).rejects.toMatchObject({ code: mode === 'denied' ? 'BLOCKED_URL' : 'SITE_READ_ONLY' });
+    expect(send.mock.calls.some(([method]) => method === 'Input.insertText')).toBe(false);
+    expect(send.mock.calls.some(([method]) => method === 'Runtime.callFunctionOn')).toBe(false);
+  },
+);
+
+test('text commit rechecks all frames after DOM focus validation', async () => {
+  const { actions, send, navigate } = setup();
+  navigate('https://ordinary.example/');
+  vi.spyOn(actions, 'resolve').mockResolvedValue({ objectId: 'parent-input', frame: top });
+  const original = send.getMockImplementation()!;
+  send.mockImplementation(async (method, params) => {
+    const result = await original(method, params);
+    if (method === 'Runtime.callFunctionOn' && params?.arguments?.[0]?.value === 'commit-input')
+      navigate(child.url);
+    return result;
+  });
+  await expect(
+    actions.commitInput({ op: 'type', ref, text: 'private draft' }),
+  ).rejects.toMatchObject({ code: 'BLOCKED_URL' });
+  expect(send.mock.calls.some(([method]) => method === 'Input.insertText')).toBe(false);
+});
+
+test.each(['denied', 'read-only'] as const)(
+  'keypress rejects a %s sibling before querying the permitted parent focus',
+  async (mode) => {
+    await grantSiteAccess('https://finance.example', mode, 15);
+    const { actions, send } = setup();
+    const query = vi.spyOn(actions, 'query').mockResolvedValue({ focused: false });
+    await expect(actions.keypress({ op: 'keypress', key: 'a' })).rejects.toMatchObject({
+      code: mode === 'denied' ? 'BLOCKED_URL' : 'SITE_READ_ONLY',
+    });
+    expect(query).not.toHaveBeenCalled();
+    expect(send.mock.calls.some(([method]) => method.startsWith('Input.'))).toBe(false);
+  },
+);
+
+test('keypress rechecks all frames when a child navigates during focus probing', async () => {
+  const { actions, send, navigate } = setup();
+  navigate('https://ordinary.example/');
+  vi.spyOn(actions, 'query').mockImplementation(async () => {
+    navigate(child.url);
+    return { focused: false };
+  });
+  await expect(actions.keypress({ op: 'keypress', key: 'a' })).rejects.toMatchObject({
+    code: 'BLOCKED_URL',
+  });
+  expect(send.mock.calls.some(([method]) => method.startsWith('Input.'))).toBe(false);
+});
+
 test('an interactive grant permits an iframe click without widening its parent policy', async () => {
   await grantSiteAccess('https://finance.example', 'interactive', 15);
   const { actions, mouse } = setup();

@@ -16,6 +16,8 @@
   while refusing clicks, input, submissions, history navigation and recovery.
   Frame permissions and parent restrictions are checked during execution.
 - Refuse whole-page screenshots when a known restricted child frame lacks access.
+- Refuse text insertion when any known frame restricts input, including a sibling
+  of the target. Screen canonical navigation URLs as well as raw URL strings.
 - Resolve cross-process iframe hits before coordinate input and check the embedded
   subtree. Normalize trailing DNS dots for access-rule matching. Require a label
   boundary after regex wildcard prefixes.

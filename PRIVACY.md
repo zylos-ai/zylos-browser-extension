@@ -53,6 +53,13 @@ records are handled individually. Damaged restrictions pause automation and show
 a panel warning; the explicit reset removes custom rules and restores defaults.
 Clock rollback keeps deny/read-only rules active and does not activate future
 interactive grants.
+Text insertion and keypress check every known frame before native dispatch. A
+restricted sibling therefore prevents typing even into an allowed parent, to
+prevent focus redirection into that sibling. Default rules screen both raw and
+parsed canonical URLs before navigation. These browser checks and native events
+are not atomic: a malicious page can still insert or navigate a frame after the
+last check, particularly during coordinate pointer input. This residual timing
+window cannot be ruled out by the permission checks.
 Read-only access permits page reads, screenshots and scrolling but denies clicks,
 typing and submissions; interactive access permits actions, while password/OTP
 field protections remain. Authorized page content can reach your Relay and Agent

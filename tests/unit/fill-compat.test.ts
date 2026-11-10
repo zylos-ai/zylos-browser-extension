@@ -15,6 +15,7 @@ function setup(preview: (input: HTMLInputElement) => void = () => {}) {
   document.body.append(input);
   const frame = { id: 'main', url: 'https://example.test/' };
   const send = vi.fn(async (method: string, params: any) => {
+    if (method === 'Page.getFrameTree') return { frameTree: { frame } };
     if (method === 'DOM.resolveNode') return { object: { objectId: 'original' } };
     if (method === 'Runtime.callFunctionOn') {
       try {

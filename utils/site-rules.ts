@@ -256,15 +256,21 @@ export function matchingDefaultRule(
   rules: readonly DefaultSiteRule[],
 ): DefaultSiteRule | undefined {
   if (typeof value !== 'string' || !value) return;
+  // Chrome canonicalizes controls, backslashes and internationalized hostnames
+  // before navigation. Screen both representations before any GET is issued.
+  const variants = new Set(decodeVariants(value));
+  try {
+    for (const decoded of decodeVariants(new URL(value).href)) variants.add(decoded);
+  } catch {
+    // Invalid URLs still receive the existing raw-string screening.
+  }
   const rank = { interactive: 0, 'read-only': 1, denied: 2 };
   let found: DefaultSiteRule | undefined;
   for (const rule of rules) {
     if (!rule.enabled) continue;
     const regex = new RegExp(rule.pattern, 'i');
     if (
-      decodeVariants(value).some((url) =>
-        regex.test(rule.kind === 'host-regex' ? hostOf(url) : url),
-      ) &&
+      [...variants].some((url) => regex.test(rule.kind === 'host-regex' ? hostOf(url) : url)) &&
       (!found || rank[rule.mode] > rank[found.mode])
     )
       found = rule;

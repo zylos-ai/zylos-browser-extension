@@ -355,6 +355,34 @@ async function observationSetup() {
   return { ...s, methods };
 }
 
+test.each(['open', 'new-tab'])(
+  '%s refuses canonical restricted URLs before invoking navigation APIs',
+  async (op) => {
+    const s = await observationSetup();
+    chrome.tabs.create = vi.fn();
+    chrome.tabs.update = vi.fn();
+    try {
+      for (const url of [
+        'https://shop.example/check\tout',
+        'https://example.com/oauth/author\nize',
+        'https://ch\nase.com',
+        'https://chase。com',
+        'https://gemini.com\\x',
+      ]) {
+        await assert.rejects(
+          s.executor.execute({ op, url }, Date.now() + 10000),
+          (error) => error.code === 'BLOCKED_URL',
+        );
+      }
+      assert.equal(chrome.tabs.create.mock.calls.length, 0);
+      assert.equal(chrome.tabs.update.mock.calls.length, 0);
+      assert.equal(s.methods.includes('Page.navigate'), false);
+    } finally {
+      await s.executor.release();
+    }
+  },
+);
+
 async function recoverySetup() {
   const s = await observationSetup();
   const suspended = vi.fn(),

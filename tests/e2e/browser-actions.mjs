@@ -66,7 +66,7 @@ function cdpClient(ws) {
 }
 function fixture(url, port) {
   if (url.startsWith('/access-pointer-parent'))
-    return `<!doctype html><title>OOPIF pointer parent</title><script>window.childClicks=0;addEventListener('message',e=>{if(e.data==='clicked')window.childClicks++})</script><iframe style="position:absolute;left:0;top:100px;width:500px;height:300px;border:0" src="http://localhost:${port}/billing-pointer-child"></iframe>`;
+    return `<!doctype html><title>OOPIF pointer parent</title><input id="parent-input"><script>window.childClicks=0;addEventListener('message',e=>{if(e.data==='clicked')window.childClicks++})</script><iframe style="position:absolute;left:0;top:100px;width:500px;height:300px;border:0" src="http://localhost:${port}/billing-pointer-child"></iframe>`;
   if (url.startsWith('/billing-pointer-child'))
     return `<!doctype html><title>OOPIF pointer child</title><button style="position:absolute;left:20px;top:20px;width:200px;height:80px" onclick="parent.postMessage('clicked','*')">Restricted child button</button><div style="height:1500px"></div>`;
   if (url.startsWith('/billing-with-restricted-frame'))
@@ -824,6 +824,26 @@ try {
           `chrome.debugger.sendCommand({tabId:${tab.id}},'Runtime.evaluate',{expression:'window.childClicks',returnByValue:true})`,
         );
         assert.equal(proof.result.value, 0);
+      }
+      if (mode === 'read-only') {
+        const found = await action('find', { selector: '#parent-input' });
+        const fill = await action('fill', {
+          ref: found.observation.page.matches[0].ref,
+          text: 'must not enter any frame',
+        });
+        assert.ok(
+          fill.results.some((result) => result.error?.code === 'SITE_READ_ONLY'),
+          JSON.stringify(fill),
+        );
+        const key = await action('keypress', { key: 'a' });
+        assert.ok(
+          key.results.some((result) => result.error?.code === 'SITE_READ_ONLY'),
+          JSON.stringify(key),
+        );
+        const proof = await workerEval(
+          `chrome.debugger.sendCommand({tabId:${tab.id}},'Runtime.evaluate',{expression:'document.querySelector("#parent-input").value',returnByValue:true})`,
+        );
+        assert.equal(proof.result.value, '');
       }
       assert.ok(
         (await cdp('Target.getTargets')).targetInfos.some(

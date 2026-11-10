@@ -2028,6 +2028,10 @@ async function executeInternal(
     assertSiteAction(tab.url, command.op);
     if (sessionId && frameSessions().get(sessionId)?.tabId !== lease.id) fail('FRAME_UNAVAILABLE');
     if (dialog) fail('DIALOG_OPEN', `${dialog.type}: ${dialog.message}; use dialog`);
+    if (method === 'Input.insertText') {
+      for (const frame of await collectFrames(actionCdp)) assertSiteAction(frame.url, command.op);
+      check();
+    }
     const target = { tabId: lease.id, ...(sessionId ? { sessionId } : {}) };
     const result = await boundedCdp(async () => {
       if (method === 'Input.insertText') {

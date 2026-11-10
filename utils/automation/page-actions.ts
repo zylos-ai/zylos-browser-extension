@@ -125,6 +125,8 @@ export class PageActions {
   async commitInput(command: InputCommand, prepared?: Element, expectedState?: unknown) {
     const element = prepared ?? (await this.resolve(command.ref));
     await this.assertCurrentFrameAction(element.frame, command.op);
+    // Native text follows page focus, which can move away from the target ref.
+    for (const frame of await this.frames()) this.assertFrameAction(frame, command.op);
     // Commit deliberately does not focus again after a recovery checkpoint.
     await this.call(
       element,
@@ -135,6 +137,7 @@ export class PageActions {
     );
     this.io.beforeInput?.();
     await this.assertCurrentFrameAction(element.frame, command.op);
+    for (const frame of await this.frames()) this.assertFrameAction(frame, command.op);
     await this.io.send('Input.insertText', { text: command.text });
     return { done: true };
   }

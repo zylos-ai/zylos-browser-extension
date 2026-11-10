@@ -106,6 +106,19 @@ describe('site rule patterns', () => {
     expect(matchingDefaultRule('https://example.com/payment-guide', rules)).toBeUndefined();
   });
 
+  it.each([
+    ['https://shop.example/check\tout', 'billing'],
+    ['https://example.com/oauth/author\nize', 'credentials'],
+    ['https://ch\nase.com', 'banks'],
+    ['https://chase。com', 'banks'],
+    ['https://gemini.com\\x', 'exact-finance'],
+  ])('screens canonical navigation URL %s before navigating', (url, id) => {
+    const rules = defaultSiteRules();
+    expect(matchingDefaultRule(url, rules)?.id).toBe(id);
+    rules.find((rule) => rule.id === id)!.enabled = false;
+    expect(matchingDefaultRule(url, rules)).toBeUndefined();
+  });
+
   it('disabled defaults have no hidden fallback and overlap uses the most restrictive mode', () => {
     const rules = defaultSiteRules();
     rules.find((rule) => rule.id === 'billing')!.enabled = false;
