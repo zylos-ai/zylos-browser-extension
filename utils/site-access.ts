@@ -125,8 +125,8 @@ function serial<T>(work: () => Promise<T>): Promise<T> {
   queue = pending;
   return pending;
 }
-function fail(code: string): never {
-  throw Object.assign(new Error(code), { code });
+function fail(code: string, message = code): never {
+  throw Object.assign(new Error(message), { code });
 }
 function pruneAudit(events = audit) {
   const now = Date.now();
@@ -343,8 +343,16 @@ export function isSiteUrlBlocked(url: unknown): boolean {
 
 export function assertSiteAction(url: unknown, action: string): void {
   const result = decision(url);
-  if (result.mode === 'denied') fail('BLOCKED_URL');
-  if (result.mode === 'read-only' && !READ_ACTIONS.has(action)) fail('SITE_READ_ONLY');
+  const code =
+    result.mode === 'denied'
+      ? 'BLOCKED_URL'
+      : result.mode === 'read-only' && !READ_ACTIONS.has(action)
+        ? 'SITE_READ_ONLY'
+        : undefined;
+  if (code) {
+    const origin = originOf(url);
+    fail(code, origin ? `${code}: restricted origin ${origin}` : code);
+  }
 }
 
 export function recordSiteAccess(url: string, action: string, allowed: boolean): Promise<void> {

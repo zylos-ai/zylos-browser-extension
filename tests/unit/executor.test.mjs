@@ -1578,6 +1578,83 @@ test('oversized screenshot is rejected locally without disconnecting or leaving 
 });
 
 test.each(['denied', 'read-only'])(
+  'native text insertion rejects a child becoming %s after the last PageActions check',
+  async (mode) => {
+    const s = await observationSetup();
+    const { initializeSiteAccess, grantSiteAccess } = await import('../../utils/site-access');
+    const { PageActions } = await import('../../utils/automation/page-actions');
+    await initializeSiteAccess('native-text-race');
+    await grantSiteAccess('https://child.example', mode, 15);
+    const main = { id: 'main', url: s.tab.url };
+    const originalSend = chrome.debugger.sendCommand;
+    const originalGet = chrome.tabs.get;
+    const originalFrames = PageActions.prototype.frames;
+    let frameChecks = 0,
+      insertPending = false,
+      restricted = false,
+      inserts = 0;
+    const prepare = vi
+      .spyOn(PageActions.prototype, 'prepareInput')
+      .mockResolvedValue({ objectId: 'parent-input', frame: main });
+    const frames = vi.spyOn(PageActions.prototype, 'frames').mockImplementation(async function (
+      ...args
+    ) {
+      const snapshot = await originalFrames.apply(this, args);
+      if (++frameChecks === 2) insertPending = true;
+      return snapshot;
+    });
+    chrome.tabs.get = async (id) => {
+      // The last PageActions snapshot was already returned with only the parent.
+      if (insertPending) restricted = true;
+      return originalGet(id);
+    };
+    chrome.debugger.sendCommand = async (target, method, params) => {
+      if (method === 'Page.getFrameTree')
+        return {
+          frameTree: {
+            frame: main,
+            childFrames: restricted
+              ? [
+                  {
+                    frame: {
+                      id: 'child',
+                      parentId: 'main',
+                      url: 'https://child.example/private?secret=value#fragment',
+                    },
+                  },
+                ]
+              : [],
+          },
+        };
+      if (method === 'Runtime.callFunctionOn') return { result: { value: true } };
+      if (method === 'Input.insertText') inserts++;
+      return originalSend(target, method, params);
+    };
+    try {
+      await assert.rejects(
+        s.executor.execute(
+          { op: 'fill', ref: '@12345678-e1', text: 'private draft' },
+          Date.now() + 10000,
+        ),
+        (error) => {
+          assert.equal(error.code, mode === 'denied' ? 'BLOCKED_URL' : 'SITE_READ_ONLY');
+          assert.match(error.message, /restricted origin https:\/\/child\.example$/);
+          assert.equal(error.message.includes('private?secret'), false);
+          return true;
+        },
+      );
+      assert.equal(frameChecks, 2);
+      assert.equal(restricted, true);
+      assert.equal(inserts, 0, 'The final executor guard must reject before native insertion');
+    } finally {
+      prepare.mockRestore();
+      frames.mockRestore();
+      await s.executor.release();
+    }
+  },
+);
+
+test.each(['denied', 'read-only'])(
   'native pointer dispatch rechecks a cross-site iframe that becomes %s after preflight',
   async (mode) => {
     const s = await observationSetup();

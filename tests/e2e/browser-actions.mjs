@@ -835,10 +835,20 @@ try {
           fill.results.some((result) => result.error?.code === 'SITE_READ_ONLY'),
           JSON.stringify(fill),
         );
+        assert.ok(
+          fill.results
+            .find((result) => result.error?.code === 'SITE_READ_ONLY')
+            .error.message.includes(childOrigin),
+        );
         const key = await action('keypress', { key: 'a' });
         assert.ok(
           key.results.some((result) => result.error?.code === 'SITE_READ_ONLY'),
           JSON.stringify(key),
+        );
+        assert.ok(
+          key.results
+            .find((result) => result.error?.code === 'SITE_READ_ONLY')
+            .error.message.includes(childOrigin),
         );
         const proof = await workerEval(
           `chrome.debugger.sendCommand({tabId:${tab.id}},'Runtime.evaluate',{expression:'document.querySelector("#parent-input").value',returnByValue:true})`,
