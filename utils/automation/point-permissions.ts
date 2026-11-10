@@ -1,21 +1,42 @@
 import type { Frame, Send } from './frames';
 import { collectFrames } from './frames';
+import type { CdpResults, Point } from './types';
 
 function unavailable(): never {
   throw Object.assign(new Error('Frame target unavailable'), { code: 'FRAME_UNAVAILABLE' });
 }
 
+export async function hitTestPoint(
+  send: (
+    method: 'Page.getLayoutMetrics' | 'DOM.getNodeForLocation',
+    params: Record<string, unknown>,
+  ) => Promise<unknown>,
+  point: Point,
+  options: { includeUserAgentShadowDOM: boolean; ignorePointerEventsNone?: boolean },
+): Promise<CdpResults['DOM.getNodeForLocation']> {
+  if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) unavailable();
+  const metrics = (await send('Page.getLayoutMetrics', {})) as CdpResults['Page.getLayoutMetrics'];
+  const viewport = metrics?.cssVisualViewport ?? metrics?.cssLayoutViewport;
+  if (!Number.isFinite(viewport?.pageX) || !Number.isFinite(viewport?.pageY)) unavailable();
+  // Input uses viewport CSS coordinates; DOM hit testing uses document CSS coordinates.
+  const x = Math.floor(point.x + viewport.pageX);
+  const y = Math.floor(point.y + viewport.pageY);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) unavailable();
+  return (await send('DOM.getNodeForLocation', {
+    ...options,
+    x,
+    y,
+  })) as CdpResults['DOM.getNodeForLocation'];
+}
+
 // OOPIF hit tests return the embedding element and its parent's frameId. Check
-// the whole embedded subtree, so permissions never depend on coordinate transforms.
+// the whole embedded subtree without translating points into child-local coordinates.
 export async function assertPointPermissions(
   send: Send,
   point: { x: number; y: number },
   assertFrame: (frame: Frame) => void,
 ) {
-  if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) unavailable();
-  const hit = await send('DOM.getNodeForLocation', {
-    x: Math.floor(point.x),
-    y: Math.floor(point.y),
+  const hit = await hitTestPoint(send, point, {
     includeUserAgentShadowDOM: true,
   });
   if (!hit.backendNodeId || !hit.frameId) unavailable();

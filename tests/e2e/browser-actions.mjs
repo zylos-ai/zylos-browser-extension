@@ -66,9 +66,9 @@ function cdpClient(ws) {
 }
 function fixture(url, port) {
   if (url.startsWith('/access-pointer-parent'))
-    return `<!doctype html><title>OOPIF pointer parent</title><input id="parent-input"><script>window.childClicks=0;addEventListener('message',e=>{if(e.data==='clicked')window.childClicks++})</script><iframe style="position:absolute;left:0;top:100px;width:500px;height:300px;border:0" src="http://localhost:${port}/billing-pointer-child"></iframe>`;
+    return `<!doctype html><title>OOPIF pointer parent</title><input id="parent-input">${url.startsWith('/access-pointer-parent-scrolled') ? '<div style="height:4000px"></div>' : ''}<script>window.childClicks=0;addEventListener('message',e=>{if(e.data==='clicked')window.childClicks++;if(e.data?.type==='click-point')window.childClickPoint=e.data.point})</script><iframe style="position:absolute;left:0;top:${url.startsWith('/access-pointer-parent-scrolled') ? 2000 : 100}px;width:500px;height:300px;border:0" src="http://localhost:${port}/billing-pointer-child"></iframe>`;
   if (url.startsWith('/billing-pointer-child'))
-    return `<!doctype html><title>OOPIF pointer child</title><button style="position:absolute;left:20px;top:20px;width:200px;height:80px" onclick="parent.postMessage('clicked','*')">Restricted child button</button><div style="height:1500px"></div>`;
+    return `<!doctype html><title>OOPIF pointer child</title><button style="position:absolute;left:20px;top:20px;width:200px;height:80px" onclick="parent.postMessage('clicked','*');parent.postMessage({type:'click-point',point:{x:event.clientX,y:event.clientY}},'*')">Restricted child button</button><div style="height:1500px"></div>`;
   if (url.startsWith('/billing-with-restricted-frame'))
     return `<!doctype html><title>Billing frame boundary</title><h1>Permitted parent</h1><iframe title="Restricted child" src="http://localhost:${port}/billing"></iframe>`;
   if (url.startsWith('/lazy-list'))
@@ -766,9 +766,9 @@ try {
       await workerEval('globalThis.debuggerCalls = []');
     },
   );
-  await check('site access: coordinate actions enforce cross-process child rules', async () => {
+  async function checkCoordinateChildRules(scrolled) {
     const tab = await previewPanel(
-      `chrome.tabs.create({url:${JSON.stringify(url + 'access-pointer-parent')},active:true})`,
+      `chrome.tabs.create({url:${JSON.stringify(url + 'access-pointer-parent' + (scrolled ? '-scrolled' : ''))},active:true})`,
     );
     await eventually(
       async () => (await previewPanel(`chrome.tabs.get(${tab.id})`)).status === 'complete',
@@ -783,24 +783,38 @@ try {
         ).ok,
         true,
       );
-      let request = await askLoop('OOPIF pointer: ' + mode, tab);
+      let request = await askLoop(
+        `OOPIF pointer${scrolled ? ' after page scroll' : ''}: ${mode}`,
+        tab,
+      );
       const action = async (method, params = {}) => {
         await decision(request, { kind: 'actions', actions: [{ method, params }] });
         request = await nextRound(request);
         return request.request.execution;
       };
       assert.equal(
-        (await action('use-current-tab', { contextId: request.request.context.pages[0].contextId }))
-          .failed,
+        (
+          await action('use-current-tab', {
+            contextId: request.request.context.pages[0].contextId,
+          })
+        ).failed,
         false,
       );
+      if (scrolled) {
+        const position = await workerEval(
+          `chrome.debugger.sendCommand({tabId:${tab.id}},'Runtime.evaluate',{expression:'scrollTo(0,1900);scrollY',returnByValue:true})`,
+        );
+        assert.equal(position.result.value, 1900);
+      }
       const click = await action('click', { x: 60, y: 150 });
       if (mode === 'interactive') {
         assert.equal(click.failed, false, JSON.stringify(click));
         const proof = await workerEval(
-          `chrome.debugger.sendCommand({tabId:${tab.id}},'Runtime.evaluate',{expression:'window.childClicks',returnByValue:true})`,
+          `chrome.debugger.sendCommand({tabId:${tab.id}},'Runtime.evaluate',{expression:'({count:window.childClicks,point:window.childClickPoint,scrollY})',returnByValue:true})`,
         );
-        assert.equal(proof.result.value, 1);
+        assert.equal(proof.result.value.count, 1);
+        assert.deepEqual(proof.result.value.point, { x: 60, y: 50 });
+        assert.equal(proof.result.value.scrollY, scrolled ? 1900 : 0);
       } else {
         const code = mode === 'denied' ? 'BLOCKED_URL' : 'SITE_READ_ONLY';
         assert.ok(
@@ -875,7 +889,12 @@ try {
       true,
     );
     await previewPanel(`chrome.tabs.remove(${tab.id})`);
-  });
+  }
+  for (const scrolled of [false, true])
+    await check(
+      `site access: coordinate actions enforce cross-process child rules${scrolled ? ' after page scroll' : ''}`,
+      () => checkCoordinateChildRules(scrolled),
+    );
   await check(
     'mixed attachments support picker, paste, drop, persistent previews and task cleanup',
     async () => {

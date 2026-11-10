@@ -16,6 +16,8 @@
   while refusing clicks, input, submissions, history navigation and recovery.
   Frame permissions and parent restrictions are checked during execution.
 - Refuse whole-page screenshots when a known restricted child frame lacks access.
+- Convert viewport points to document CSS coordinates for node hit tests after
+  scrolling, while keeping native pointer events in viewport coordinates.
 - Refuse text insertion when any known frame restricts input, including a sibling
   of the target. Screen canonical navigation URLs as well as raw URL strings.
 - Resolve cross-process iframe hits before coordinate input and check the embedded

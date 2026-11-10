@@ -17,6 +17,7 @@ async function setup(mode: 'denied' | 'read-only' | 'interactive', nested = fals
     ...(nested ? { childFrames: [{ frame: { id: 'nested', url: 'https://paypal.com' } }] } : {}),
   };
   const send = vi.fn(async (method: string, _params: any = {}, session?: string): Promise<any> => {
+    if (method === 'Page.getLayoutMetrics') return { cssLayoutViewport: { pageX: 0, pageY: 0 } };
     if (method === 'DOM.getNodeForLocation') return { backendNodeId: 42, frameId: 'main' };
     if (method === 'DOM.describeNode') return { node: { nodeName: 'IFRAME', frameId: 'child' } };
     if (method === 'Page.getFrameTree')
@@ -80,3 +81,27 @@ test('missing embedded frame identity fails closed', async () => {
   clearFrameSessions();
   vi.unstubAllGlobals();
 });
+
+test.each(['denied', 'read-only'] as const)(
+  'a scrolled viewport hit still checks the %s cross-process child',
+  async (mode) => {
+    const send = await setup(mode);
+    const original = send.getMockImplementation()!;
+    send.mockImplementation(async (method, params, session) => {
+      if (method === 'Page.getLayoutMetrics')
+        return { cssVisualViewport: { pageX: 100, pageY: 1900 } };
+      if (method === 'DOM.getNodeForLocation') {
+        expect(params).toMatchObject({ x: 160, y: 2050 });
+        return original(method, params, session);
+      }
+      return original(method, params, session);
+    });
+    await expect(
+      assertPointPermissions(send, { x: 60, y: 150 }, (frame) =>
+        assertSiteAction(frame.url, 'click'),
+      ),
+    ).rejects.toMatchObject({ code: mode === 'denied' ? 'BLOCKED_URL' : 'SITE_READ_ONLY' });
+    clearFrameSessions();
+    vi.unstubAllGlobals();
+  },
+);

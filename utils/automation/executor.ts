@@ -26,7 +26,7 @@ import {
 import { cursorExpression } from './cursor';
 import { cleanupTask, recordTask } from './task-lifecycle';
 import { PointerMotion } from './pointer-motion';
-import { assertPointPermissions } from './point-permissions';
+import { assertPointPermissions, hitTestPoint } from './point-permissions';
 import type { Command } from '../commands';
 import type { CdpResults, Cursor, GrantedTab, Point, Scope } from './types';
 import {
@@ -966,12 +966,10 @@ async function dispatchPointer(
       return result.result.value;
     },
     hit: async (point) =>
-      (await send('DOM.getNodeForLocation', {
-        x: Math.floor(point.x),
-        y: Math.floor(point.y),
+      hitTestPoint(send, point, {
         includeUserAgentShadowDOM: false,
         ignorePointerEventsNone: false,
-      })) as { backendNodeId: number; frameId: string },
+      }),
   });
 }
 

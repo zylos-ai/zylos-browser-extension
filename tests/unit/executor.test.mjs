@@ -1577,6 +1577,42 @@ test('oversized screenshot is rejected locally without disconnecting or leaving 
   await s.executor.release();
 });
 
+test('scrolled click hit tests use document coordinates while native input stays in the viewport', async () => {
+  const s = await observationSetup();
+  const original = chrome.debugger.sendCommand;
+  const hits = [],
+    inputs = [];
+  chrome.debugger.sendCommand = async (target, method, params) => {
+    if (method === 'Page.getLayoutMetrics')
+      return {
+        cssLayoutViewport: { clientWidth: 800, clientHeight: 600, pageX: 100, pageY: 1000 },
+        cssVisualViewport: { pageX: 120, pageY: 1068 },
+        cssContentSize: { width: 1600, height: 3000 },
+      };
+    if (method === 'DOM.getNodeForLocation') hits.push(params);
+    if (method === 'Input.dispatchMouseEvent') inputs.push(params);
+    return original(target, method, params);
+  };
+  try {
+    await s.executor.execute({ op: 'click', x: 100, y: 100 }, Date.now() + 10000);
+    const pressHits = hits.filter((params) => params.includeUserAgentShadowDOM === false);
+    assert.equal(pressHits.length, 2);
+    for (const params of pressHits)
+      assert.deepEqual({ x: params.x, y: params.y }, { x: 220, y: 1168 });
+    const press = inputs.find((params) => params.type === 'mousePressed');
+    assert.deepEqual({ x: press.x, y: press.y }, { x: 100, y: 100 });
+    assert.ok(
+      hits
+        .filter((params) => params.includeUserAgentShadowDOM === true)
+        .some((params) => params.x === 220 && params.y === 1168),
+    );
+    assert.equal(inputs.at(-1).type, 'mouseReleased');
+    assert.deepEqual({ x: inputs.at(-1).x, y: inputs.at(-1).y }, { x: 100, y: 100 });
+  } finally {
+    await s.executor.release();
+  }
+});
+
 test.each(['denied', 'read-only'])(
   'native text insertion rejects a child becoming %s after the last PageActions check',
   async (mode) => {

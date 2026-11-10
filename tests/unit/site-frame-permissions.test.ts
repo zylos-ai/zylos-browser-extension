@@ -36,6 +36,7 @@ afterEach(() => {
 function setup() {
   let currentChild = { ...child };
   const send = vi.fn(async (method: string, params: any = {}) => {
+    if (method === 'Page.getLayoutMetrics') return { cssLayoutViewport: { pageX: 0, pageY: 0 } };
     if (method === 'Page.getFrameTree')
       return {
         frameTree: { frame: top, childFrames: [{ frame: currentChild }] },
