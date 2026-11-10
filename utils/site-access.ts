@@ -342,6 +342,8 @@ export function isSiteUrlBlocked(url: unknown): boolean {
 }
 
 export function assertSiteAction(url: unknown, action: string): void {
+  if (recoveryRequired)
+    fail('BLOCKED_URL', 'BLOCKED_URL: access rules need owner reset in the extension panel');
   const result = decision(url);
   const code =
     result.mode === 'denied'

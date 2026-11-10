@@ -243,6 +243,33 @@ describe('owner-managed site access', () => {
     expect(p.siteAccessState().recoveryRequired).toBeUndefined();
   });
 
+  it('identifies recovery as a panel reset requirement without blaming any origin', async () => {
+    const p = await ready();
+    saved[p.SITE_ACCESS_KEY] = { binding: 'recipient-a', grants: [{ mode: 'denied' }], audit: [] };
+    await p.initializeSiteAccess('recipient-a');
+    for (const url of [
+      'https://ordinary.test/private?secret=value#fragment',
+      'https://example.com/billing',
+      'data:text/plain,private',
+    ]) {
+      let failure: unknown;
+      try {
+        p.assertSiteAction(url, 'open');
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toMatchObject({
+        code: 'BLOCKED_URL',
+        message: 'BLOCKED_URL: access rules need owner reset in the extension panel',
+      });
+    }
+    await p.clearSiteAccess();
+    expect(() => p.assertSiteAction('https://ordinary.test', 'open')).not.toThrow();
+    expect(() => p.assertSiteAction('https://example.com/billing', 'open')).toThrow(
+      'restricted origin https://example.com',
+    );
+  });
+
   it('revokes immediately before persistence and does not revive grants on storage failure', async () => {
     const p = await ready();
     await p.grantSiteAccess('https://example.com', 'interactive', 60);
