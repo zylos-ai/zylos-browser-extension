@@ -40,10 +40,12 @@ hostname-only regex subset. Domain matches span HTTP(S) schemes and ports;
 exact origins retain scheme/port isolation. Newest matching custom rules override
 older/default rules; matching defaults use the most restrictive mode. No matching
 rule retains normal page behavior. Custom rules include mode, creation time
-and expiry (at most 24 hours), persist locally across worker restarts, and are
+and expiry (1, 7 or 30 days, or permanent), persist locally across worker restarts, and are
 bound to your configured Relay/Key recipient. Changing that recipient clears
 the custom rules and history and restores default settings. You can revoke custom
 rules or edit default modes/enabled state in the panel.
+New rules default to one day. Permanent rules have no expiry and remain until
+revoked or the connection recipient changes. Existing rules keep their original expiry.
 Trailing DNS dots are normalized before matching. Regex wildcard prefixes must
 end at a label boundary before their fixed domain suffix. A coordinate hit on a
 cross-process iframe checks its whole known subtree; a restricted descendant can

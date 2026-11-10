@@ -17,7 +17,14 @@ export const SITE_ACCESS_KEY = 'siteAccess';
 const MAX_GRANTS = 100;
 const MAX_EVENTS = 200;
 const AUDIT_TTL = 7 * 24 * 60 * 60_000;
-const MAX_GRANT_MS = 24 * 60 * 60_000;
+const MAX_GRANT_MS = 30 * 24 * 60 * 60_000;
+// Keep minute-based requests compatible with previously bundled panels.
+export const siteDurationSchema = z
+  .number()
+  .int()
+  .min(5)
+  .max(30 * 24 * 60)
+  .nullable();
 const timestamp = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 
 function originOf(value: unknown): string | undefined {
@@ -43,13 +50,13 @@ export const siteGrantSchema = z
     matchType: siteMatchTypeSchema.optional(),
     mode: siteModeSchema,
     createdAt: timestamp,
-    expiresAt: timestamp,
+    expiresAt: timestamp.nullable(),
   })
   .strict()
   .refine(
     (grant) =>
-      grant.expiresAt > grant.createdAt &&
-      grant.expiresAt - grant.createdAt <= MAX_GRANT_MS &&
+      (grant.expiresAt === null ||
+        (grant.expiresAt > grant.createdAt && grant.expiresAt - grant.createdAt <= MAX_GRANT_MS)) &&
       validSitePattern(grant.origin, grant.matchType || 'origin'),
     'Invalid authorization lifetime',
   );
@@ -139,7 +146,7 @@ function liveGrant(url: unknown) {
     (grant) =>
       matchesSitePattern(url, grant.origin, grant.matchType || 'origin') &&
       (grant.createdAt <= now || grant.mode !== 'interactive') &&
-      grant.expiresAt > now,
+      (grant.expiresAt === null || grant.expiresAt > now),
   );
 }
 function decision(url: unknown) {
@@ -247,7 +254,7 @@ export function initializeSiteAccess(recipient: string): Promise<void> {
 export function grantSiteAccess(
   origin: string,
   mode: SiteGrant['mode'],
-  durationMinutes: number,
+  durationMinutes: number | null,
   matchType: SiteMatchType = 'origin',
 ): Promise<void> {
   const epoch = generation;
@@ -256,7 +263,7 @@ export function grantSiteAccess(
     if (recoveryRequired) fail('SITE_ACCESS_RECOVERY_REQUIRED');
     siteMatchTypeSchema.parse(matchType);
     if (!validSitePattern(origin, matchType)) fail('SITE_PATTERN_INVALID');
-    z.number().int().min(5).max(1440).parse(durationMinutes);
+    siteDurationSchema.parse(durationMinutes);
     const now = Date.now();
     const grant = siteGrantSchema.parse({
       id: crypto.randomUUID(),
@@ -264,13 +271,13 @@ export function grantSiteAccess(
       ...(matchType === 'origin' ? {} : { matchType }),
       mode,
       createdAt: now,
-      expiresAt: now + durationMinutes * 60_000,
+      expiresAt: durationMinutes === null ? null : now + durationMinutes * 60_000,
     });
     const next = [
       ...grants.filter(
         (value) =>
           (value.origin !== origin || (value.matchType || 'origin') !== matchType) &&
-          value.expiresAt > now,
+          (value.expiresAt === null || value.expiresAt > now),
       ),
       grant,
     ];

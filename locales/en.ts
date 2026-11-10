@@ -46,9 +46,10 @@ export default {
   siteAccessReadOnly: 'Read only',
   siteAccessInteractive: 'Allow actions',
   siteAccessDuration: 'Valid for',
-  siteAccess15Minutes: '15 minutes',
-  siteAccess1Hour: '1 hour',
-  siteAccess24Hours: '24 hours',
+  siteAccess1Day: '1 day',
+  siteAccess7Days: '7 days',
+  siteAccess30Days: '30 days',
+  siteAccessPermanent: 'Permanent',
   siteAccessReadOnlyHint:
     'Allows opening, reading, screenshots and scrolling. Clicks, typing and submissions are blocked throughout this site.',
   siteAccessInteractiveHint:

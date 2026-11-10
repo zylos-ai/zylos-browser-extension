@@ -536,6 +536,13 @@ try {
       const grant = (await panelState()).siteAccess.grants[0];
       assert.equal(grant.origin, origin);
       assert.equal(grant.mode, 'read-only');
+      assert.equal(grant.expiresAt - grant.createdAt, 86400_000);
+      assert.deepEqual(
+        await previewPanel(
+          "[...document.querySelector('#site-access-duration').options].map(o=>o.value)",
+        ),
+        ['1', '7', '30', 'permanent'],
+      );
       assert.equal(await previewPanel("document.querySelector('.site-access-list').open"), false);
       await previewPanel("document.querySelector('.site-access-add summary').click()");
       assert.equal(await previewPanel("document.querySelector('.site-access-add').open"), false);
@@ -654,9 +661,10 @@ try {
       await eventually(async () => !(await panelState()).chatBusy);
       await previewPanel(`chrome.tabs.remove(${framed.id})`);
       const interactive = await previewPanel(
-        `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-site-access-grant', origin, mode: 'interactive', durationMinutes: 15 })})`,
+        `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-site-access-grant', origin, mode: 'interactive', durationMinutes: null })})`,
       );
       assert.equal(interactive.ok, true, JSON.stringify(interactive));
+      assert.equal((await panelState()).siteAccess.grants[0].expiresAt, null);
       request = await askLoop('Site access: interactive billing', tab);
       assert.equal(
         (await action('use-current-tab', { contextId: request.request.context.pages[0].contextId }))

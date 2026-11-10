@@ -71,10 +71,57 @@ describe('owner-managed site access', () => {
     expect(p.siteAccessState().grants).toEqual([]);
   });
 
-  it.each([0, 4, 1441, 5.5, NaN, Infinity])('rejects invalid duration %s', async (duration) => {
+  it.each([0, 4, 43201, 5.5, NaN, Infinity])('rejects invalid duration %s', async (duration) => {
     const p = await ready();
     await expect(p.grantSiteAccess('https://example.com', 'read-only', duration)).rejects.toThrow();
     expect(set).not.toHaveBeenCalled();
+  });
+
+  it.each([1, 7, 30])('keeps a %s-day rule until its exact expiry after restart', async (days) => {
+    const p = await ready();
+    const start = Date.now();
+    await p.grantSiteAccess('https://example.com', 'interactive', days * 1440);
+    const expiry = start + days * 86400_000;
+    expect(p.siteAccessState().grants[0]!.expiresAt).toBe(expiry);
+    vi.setSystemTime(expiry - 1);
+    await p.initializeSiteAccess('recipient-a');
+    expect(p.isSiteUrlBlocked('https://example.com/billing')).toBe(false);
+    vi.setSystemTime(expiry);
+    expect(p.isSiteUrlBlocked('https://example.com/billing')).toBe(true);
+  });
+
+  it.each(['denied', 'read-only', 'interactive'] as const)(
+    'persists a permanent %s rule until revoke',
+    async (mode) => {
+      const p = await ready();
+      await p.grantSiteAccess('https://example.com', mode, null);
+      const id = p.siteAccessState().grants[0]!.id;
+      expect(p.siteAccessState().grants[0]!.expiresAt).toBeNull();
+      vi.setSystemTime(Date.now() + 365 * 86400_000);
+      await p.initializeSiteAccess('recipient-a');
+      expect(p.siteAccessState().grants[0]!.expiresAt).toBeNull();
+      if (mode === 'interactive')
+        expect(() => p.assertSiteAction('https://example.com/billing', 'click')).not.toThrow();
+      else
+        expect(() => p.assertSiteAction('https://example.com/article', 'click')).toThrow(
+          mode === 'denied' ? 'BLOCKED_URL' : 'SITE_READ_ONLY',
+        );
+      // Adding another rule must not prune the permanent rule.
+      await p.grantSiteAccess('https://other.test', 'read-only', 1440);
+      expect(p.siteAccessState().grants.some((grant) => grant.id === id)).toBe(true);
+      await p.revokeSiteAccess(id);
+      expect(p.isSiteUrlBlocked('https://example.com/billing')).toBe(true);
+      await p.initializeSiteAccess('recipient-a');
+      expect(p.siteAccessState().grants.some((grant) => grant.id === id)).toBe(false);
+    },
+  );
+
+  it('clears permanent grants when the recipient changes', async () => {
+    const p = await ready();
+    await p.grantSiteAccess('https://example.com', 'interactive', null);
+    await p.initializeSiteAccess('recipient-b');
+    expect(p.siteAccessState().grants).toEqual([]);
+    expect(p.isSiteUrlBlocked('https://example.com/billing')).toBe(true);
   });
 
   it('allows only explicit read actions under a read-only grant, on every page at the origin', async () => {

@@ -57,7 +57,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-it('requires an explicit site and defaults to read-only access for fifteen minutes', async () => {
+it('requires an explicit site and defaults to read-only access for one day', async () => {
   await render();
   expect(container.querySelector<HTMLDetailsElement>('.site-access-add')!.open).toBe(false);
   expect(container.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(true);
@@ -70,7 +70,7 @@ it('requires an explicit site and defaults to read-only access for fifteen minut
     origin: 'https://example.com',
     matchType: 'origin',
     mode: 'read-only',
-    durationMinutes: 15,
+    durationMinutes: 1440,
   });
   expect(container.textContent).toContain('siteAccessReadOnlyHint');
   const form = container.querySelector<HTMLDetailsElement>('.site-access-add')!;
@@ -94,16 +94,51 @@ it('makes action permission and duration explicit in the grant request', async (
   await render();
   await setValue('#site-access-origin', 'https://example.com:8443');
   await setValue('#site-access-mode', 'interactive');
-  await setValue('#site-access-duration', '60');
+  await setValue('#site-access-duration', '7');
   await submit();
   expect(change).toHaveBeenCalledExactlyOnceWith({
     type: 'remote-site-access-grant',
     origin: 'https://example.com:8443',
     matchType: 'origin',
     mode: 'interactive',
-    durationMinutes: 60,
+    durationMinutes: 10080,
   });
   expect(container.textContent).toContain('siteAccessInteractiveHint');
+});
+
+it('offers day durations and submits explicit permanent access without an expiry date', async () => {
+  await render();
+  expect(
+    [...container.querySelectorAll('#site-access-duration option')].map(
+      (option) => (option as HTMLOptionElement).value,
+    ),
+  ).toEqual(['1', '7', '30', 'permanent']);
+  await setValue('#site-access-origin', 'https://example.com');
+  await setValue('#site-access-duration', 'permanent');
+  await submit();
+  expect(change).toHaveBeenCalledExactlyOnceWith({
+    type: 'remote-site-access-grant',
+    origin: 'https://example.com',
+    matchType: 'origin',
+    mode: 'read-only',
+    durationMinutes: null,
+  });
+  state.siteAccess!.grants = [
+    {
+      id: 'permanent',
+      origin: 'https://example.com',
+      mode: 'read-only',
+      createdAt: Date.now(),
+      expiresAt: null,
+    },
+  ];
+  await render();
+  const row = container.querySelector('.site-access-grant')!;
+  expect(row.textContent).toContain('siteAccessPermanent');
+  expect(row.querySelector('time')).toBeNull();
+  expect(row.textContent).not.toContain('siteAccessExpired');
+  await act(async () => row.querySelector<HTMLButtonElement>('button')!.click());
+  expect(change).toHaveBeenLastCalledWith({ type: 'remote-site-access-revoke', id: 'permanent' });
 });
 
 it('shows scope, current expiry and revoke for an existing grant', async () => {
@@ -195,7 +230,7 @@ it.each([
       origin: pattern,
       matchType,
       mode: 'denied',
-      durationMinutes: 15,
+      durationMinutes: 1440,
     });
     expect(container.textContent).toContain(hint);
     expect(container.textContent).toContain('siteAccessBlockedHint');
