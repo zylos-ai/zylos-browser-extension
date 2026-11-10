@@ -32,6 +32,48 @@ The extension does not include a mechanism that sells user data or sends it to a
 
 ## Storage, retention, and deletion
 
+**Site permissions.** Settings manages one configurable access-rule system.
+Former billing, financial and security blocks are default-deny rules that you can
+disable or change to read-only/interactive; they are not a second immutable gate.
+Custom rules match exact HTTP(S) origins, domains, subdomain wildcards or a bounded
+hostname-only regex subset. Domain matches span HTTP(S) schemes and ports;
+exact origins retain scheme/port isolation. Newest matching custom rules override
+older/default rules; matching defaults use the most restrictive mode. No matching
+rule retains normal page behavior. Custom rules include mode, creation time
+and expiry (at most 24 hours), persist locally across worker restarts, and are
+bound to your configured Relay/Key recipient. Changing that recipient clears
+the custom rules and history and restores default settings. You can revoke custom
+rules or edit default modes/enabled state in the panel.
+Trailing DNS dots are normalized before matching. Regex wildcard prefixes must
+end at a label boundary before their fixed domain suffix. A coordinate hit on a
+cross-process iframe checks its whole known subtree; a restricted descendant can
+therefore prevent input elsewhere in that iframe. Unresolved targets fail closed.
+Default settings store only stable ids, modes and enabled states. Invalid saved
+records are handled individually. Damaged restrictions pause automation and show
+a panel warning; the explicit reset removes custom rules and restores defaults.
+Clock rollback keeps deny/read-only rules active and does not activate future
+interactive grants.
+Text insertion and keypress check every known frame before native dispatch. A
+restricted sibling therefore prevents typing even into an allowed parent, to
+prevent focus redirection into that sibling. Default rules screen both raw and
+parsed canonical URLs before navigation. These browser checks and native events
+are not atomic: a malicious page can still insert or navigate a frame after the
+last check, particularly during coordinate pointer input. This residual timing
+window cannot be ruled out by the permission checks.
+Read-only access permits page reads, screenshots and scrolling but denies clicks,
+typing and submissions; interactive access permits actions, while password/OTP
+field protections remain. Authorized page content can reach your Relay and Agent
+through the usual task observations. Only the local panel can change permissions.
+
+The extension keeps at most 200 permission/access records for seven days in
+local extension storage. They contain the exact origin (scheme, host and port),
+action, permission identifier, mode, timestamp and allowed/denied decision. They
+do not contain full paths, query strings, page contents or input values. This
+history is available in local Settings, not the Agent diagnostics API. An allowed
+decision does not establish that the action completed. Revocation stops current
+access before persistence; if storing it fails, the panel reports the failure,
+and the old saved grant may reappear after worker restart until its expiry.
+
 **Detailed local diagnostics is a separate opt-in.** It captures bounded console strings and Error messages/stacks from the extension background and sidepanel, plus handled browser-operation errors. It does not subscribe to webpage consoles or DevTools logs. Ordinary objects, functions, symbols and bigints are omitted and marked incomplete. Error string data fields are read directly; Chrome's cached native stack getter is allowed only for known native Error prototypes with default formatting and no name/message accessors. Custom getters, custom stack formatters and toJSON methods are not deliberately invoked. Prototype/descriptor inspection can trigger Proxy reflection traps, so this is best-effort diagnostic instrumentation, not a sandbox for hostile JavaScript objects.
 
 While enabled, detailed capture also records CDP method names, call IDs, elapsed time, success/error status, debugger attach/detach and bounded target presence checks. Target identifiers are replaced with capture-local opaque numbers. This metadata excludes command arguments and result values. Native errors still pass through the text rules below and may contain private information.

@@ -333,6 +333,7 @@ async function observationSetup() {
       return { frameTree: { frame: { id: 'main', loaderId: 'document-1' } } };
     if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 };
     if (method === 'DOM.getNodeForLocation') return { backendNodeId: 1, frameId: 'main' };
+    if (method === 'DOM.describeNode') return { node: { nodeName: 'DIV' } };
     if (method === 'Runtime.evaluate')
       return {
         result: {
@@ -353,6 +354,34 @@ async function observationSetup() {
   await s.start();
   return { ...s, methods };
 }
+
+test.each(['open', 'new-tab'])(
+  '%s refuses canonical restricted URLs before invoking navigation APIs',
+  async (op) => {
+    const s = await observationSetup();
+    chrome.tabs.create = vi.fn();
+    chrome.tabs.update = vi.fn();
+    try {
+      for (const url of [
+        'https://shop.example/check\tout',
+        'https://example.com/oauth/author\nize',
+        'https://ch\nase.com',
+        'https://chase。com',
+        'https://gemini.com\\x',
+      ]) {
+        await assert.rejects(
+          s.executor.execute({ op, url }, Date.now() + 10000),
+          (error) => error.code === 'BLOCKED_URL',
+        );
+      }
+      assert.equal(chrome.tabs.create.mock.calls.length, 0);
+      assert.equal(chrome.tabs.update.mock.calls.length, 0);
+      assert.equal(s.methods.includes('Page.navigate'), false);
+    } finally {
+      await s.executor.release();
+    }
+  },
+);
 
 async function recoverySetup() {
   const s = await observationSetup();
@@ -1385,6 +1414,77 @@ test('loading pages do not produce a falsely ready observation', async () => {
   assert.equal(s.methods.includes('Page.captureScreenshot'), false);
   await s.executor.release();
 });
+test.each(['screenshot', 'observe'])(
+  '%s never captures pixels when a child frame is denied before capture',
+  async (op) => {
+    const s = await observationSetup();
+    const original = chrome.debugger.sendCommand;
+    let captures = 0;
+    chrome.debugger.sendCommand = async (target, method, params) => {
+      if (method === 'Page.getFrameTree')
+        return {
+          frameTree: {
+            frame: { id: 'main', url: s.tab.url, loaderId: 'document-1' },
+            childFrames: [
+              {
+                frame: {
+                  id: 'restricted-child',
+                  parentId: 'main',
+                  url: 'https://finance.example/billing',
+                },
+              },
+            ],
+          },
+        };
+      if (method === 'Page.captureScreenshot') captures++;
+      return original(target, method, params);
+    };
+    try {
+      await assert.rejects(
+        s.executor.execute({ op }, Date.now() + 10000),
+        (e) => e.code === 'BLOCKED_FRAME',
+      );
+      assert.equal(captures, 0, 'A denied child must prevent capture itself');
+    } finally {
+      await s.executor.release();
+    }
+  },
+);
+test.each(['screenshot', 'observe'])(
+  '%s discards captured pixels when a denied child appears during capture',
+  async (op) => {
+    const s = await observationSetup();
+    const original = chrome.debugger.sendCommand;
+    let childUrl;
+    let captures = 0;
+    chrome.debugger.sendCommand = async (target, method, params) => {
+      if (method === 'Page.getFrameTree')
+        return {
+          frameTree: {
+            frame: { id: 'main', url: s.tab.url, loaderId: 'document-1' },
+            childFrames: childUrl
+              ? [{ frame: { id: 'child', parentId: 'main', url: childUrl } }]
+              : [],
+          },
+        };
+      if (method === 'Page.captureScreenshot') {
+        captures++;
+        childUrl = 'https://finance.example/billing';
+        return { data: 'PRIVATE-CHILD-PIXELS' };
+      }
+      return original(target, method, params);
+    };
+    try {
+      await assert.rejects(
+        s.executor.execute({ op }, Date.now() + 10000),
+        (e) => e.code === 'BLOCKED_FRAME',
+      );
+      assert.equal(captures, 1, 'The child restriction appears only after capture starts');
+    } finally {
+      await s.executor.release();
+    }
+  },
+);
 test.each(['complete', 'stop'])(
   'a slow screenshot waits without a deadline until %s',
   async (outcome) => {
@@ -1477,6 +1577,177 @@ test('oversized screenshot is rejected locally without disconnecting or leaving 
   await s.executor.release();
 });
 
+test('scrolled click hit tests use document coordinates while native input stays in the viewport', async () => {
+  const s = await observationSetup();
+  const original = chrome.debugger.sendCommand;
+  const hits = [],
+    inputs = [];
+  chrome.debugger.sendCommand = async (target, method, params) => {
+    if (method === 'Page.getLayoutMetrics')
+      return {
+        cssLayoutViewport: { clientWidth: 800, clientHeight: 600, pageX: 100, pageY: 1000 },
+        cssVisualViewport: { pageX: 120, pageY: 1068 },
+        cssContentSize: { width: 1600, height: 3000 },
+      };
+    if (method === 'DOM.getNodeForLocation') hits.push(params);
+    if (method === 'Input.dispatchMouseEvent') inputs.push(params);
+    return original(target, method, params);
+  };
+  try {
+    await s.executor.execute({ op: 'click', x: 100, y: 100 }, Date.now() + 10000);
+    const pressHits = hits.filter((params) => params.includeUserAgentShadowDOM === false);
+    assert.equal(pressHits.length, 2);
+    for (const params of pressHits)
+      assert.deepEqual({ x: params.x, y: params.y }, { x: 220, y: 1168 });
+    const press = inputs.find((params) => params.type === 'mousePressed');
+    assert.deepEqual({ x: press.x, y: press.y }, { x: 100, y: 100 });
+    assert.ok(
+      hits
+        .filter((params) => params.includeUserAgentShadowDOM === true)
+        .some((params) => params.x === 220 && params.y === 1168),
+    );
+    assert.equal(inputs.at(-1).type, 'mouseReleased');
+    assert.deepEqual({ x: inputs.at(-1).x, y: inputs.at(-1).y }, { x: 100, y: 100 });
+  } finally {
+    await s.executor.release();
+  }
+});
+
+test.each(['denied', 'read-only'])(
+  'native text insertion rejects a child becoming %s after the last PageActions check',
+  async (mode) => {
+    const s = await observationSetup();
+    const { initializeSiteAccess, grantSiteAccess } = await import('../../utils/site-access');
+    const { PageActions } = await import('../../utils/automation/page-actions');
+    await initializeSiteAccess('native-text-race');
+    await grantSiteAccess('https://child.example', mode, 15);
+    const main = { id: 'main', url: s.tab.url };
+    const originalSend = chrome.debugger.sendCommand;
+    const originalGet = chrome.tabs.get;
+    const originalFrames = PageActions.prototype.frames;
+    let frameChecks = 0,
+      insertPending = false,
+      restricted = false,
+      inserts = 0;
+    const prepare = vi
+      .spyOn(PageActions.prototype, 'prepareInput')
+      .mockResolvedValue({ objectId: 'parent-input', frame: main });
+    const frames = vi.spyOn(PageActions.prototype, 'frames').mockImplementation(async function (
+      ...args
+    ) {
+      const snapshot = await originalFrames.apply(this, args);
+      if (++frameChecks === 2) insertPending = true;
+      return snapshot;
+    });
+    chrome.tabs.get = async (id) => {
+      // The last PageActions snapshot was already returned with only the parent.
+      if (insertPending) restricted = true;
+      return originalGet(id);
+    };
+    chrome.debugger.sendCommand = async (target, method, params) => {
+      if (method === 'Page.getFrameTree')
+        return {
+          frameTree: {
+            frame: main,
+            childFrames: restricted
+              ? [
+                  {
+                    frame: {
+                      id: 'child',
+                      parentId: 'main',
+                      url: 'https://child.example/private?secret=value#fragment',
+                    },
+                  },
+                ]
+              : [],
+          },
+        };
+      if (method === 'Runtime.callFunctionOn') return { result: { value: true } };
+      if (method === 'Input.insertText') inserts++;
+      return originalSend(target, method, params);
+    };
+    try {
+      await assert.rejects(
+        s.executor.execute(
+          { op: 'fill', ref: '@12345678-e1', text: 'private draft' },
+          Date.now() + 10000,
+        ),
+        (error) => {
+          assert.equal(error.code, mode === 'denied' ? 'BLOCKED_URL' : 'SITE_READ_ONLY');
+          assert.match(error.message, /restricted origin https:\/\/child\.example$/);
+          assert.equal(error.message.includes('private?secret'), false);
+          return true;
+        },
+      );
+      assert.equal(frameChecks, 2);
+      assert.equal(restricted, true);
+      assert.equal(inserts, 0, 'The final executor guard must reject before native insertion');
+    } finally {
+      prepare.mockRestore();
+      frames.mockRestore();
+      await s.executor.release();
+    }
+  },
+);
+
+test.each(['denied', 'read-only'])(
+  'native pointer dispatch rechecks a cross-site iframe that becomes %s after preflight',
+  async (mode) => {
+    const s = await observationSetup();
+    const { initializeSiteAccess, grantSiteAccess } = await import('../../utils/site-access');
+    const { frameSessions } = await import('../../utils/automation/frames');
+    await initializeSiteAccess('pointer-race');
+    await grantSiteAccess('https://child.example', mode, 15);
+    frameSessions().set('child-session', { tabId: s.tab.id, frameId: 'child' });
+    const original = chrome.debugger.sendCommand;
+    let overChild = false;
+    const inputs = [];
+    chrome.debugger.sendCommand = async (target, method, params) => {
+      if (method === 'Page.getFrameTree') {
+        const child = { id: 'child', parentId: 'main', url: 'https://child.example/' };
+        return {
+          frameTree:
+            target.sessionId === 'child-session'
+              ? { frame: child }
+              : {
+                  frame: { id: 'main', url: s.tab.url, loaderId: 'document-1' },
+                  childFrames: [{ frame: child }],
+                },
+        };
+      }
+      if (method === 'DOM.getNodeForLocation')
+        return { backendNodeId: overChild ? 2 : 1, frameId: 'main' };
+      if (method === 'DOM.describeNode')
+        return {
+          node:
+            params.backendNodeId === 2
+              ? { nodeName: 'IFRAME', frameId: 'child' }
+              : { nodeName: 'DIV' },
+        };
+      if (method === 'Runtime.evaluate' && params.expression.includes('reducedMotion:')) {
+        overChild = true;
+        return { result: { value: { width: 800, height: 600, reducedMotion: true } } };
+      }
+      if (method.startsWith('Input.')) inputs.push(params);
+      return original(target, method, params);
+    };
+    try {
+      await assert.rejects(
+        s.executor.execute({ op: 'hover', x: 100, y: 100 }, Date.now() + 10000),
+        (e) => e.code === (mode === 'denied' ? 'BLOCKED_URL' : 'SITE_READ_ONLY'),
+      );
+      assert.equal(
+        overChild,
+        true,
+        'The page-action preflight completed before the target changed',
+      );
+      assert.deepEqual(inputs, [], 'The final dispatch must reject the cross-site child');
+    } finally {
+      await s.executor.release();
+    }
+  },
+);
+
 test('stop during native cursor movement prevents the pending click', async () => {
   const s = await setup();
   const entered = deferred(),
@@ -1494,6 +1765,7 @@ test('stop during native cursor movement prevents the pending click', async () =
     if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main' } } };
     if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 };
     if (method === 'DOM.getNodeForLocation') return { backendNodeId: 1, frameId: 'main' };
+    if (method === 'DOM.describeNode') return { node: { nodeName: 'DIV' } };
     if (method === 'Runtime.evaluate' && params.expression.includes('width:innerWidth'))
       return { result: { value: { width: 800, height: 600 } } };
     if (method === 'Runtime.evaluate' && params.expression.includes('"nativePoint":true')) {

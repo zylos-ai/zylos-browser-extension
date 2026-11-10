@@ -1,4 +1,4 @@
-import { isBlockedUrl } from './guard';
+import { isSiteUrlBlocked, assertSiteAction, recordSiteAccess } from './site-access';
 
 export function canReadPage(tab: chrome.tabs.Tab) {
   try {
@@ -11,7 +11,7 @@ export function canReadPage(tab: chrome.tabs.Tab) {
       !url.username &&
       !url.password &&
       !['chromewebstore.google.com', 'chrome.google.com'].includes(url.hostname) &&
-      !isBlockedUrl(url.href)
+      !isSiteUrlBlocked(url.href)
     );
   } catch {
     return false;
@@ -480,6 +480,8 @@ export async function readPageDocument(
   };
   const read = async () => {
     check();
+    assertSiteAction(expected.url, 'read-page');
+    await recordSiteAccess(expected.url, 'read-page', true);
     await assertPageDocument(expected);
     check();
     const [result] = await chrome.scripting.executeScript({

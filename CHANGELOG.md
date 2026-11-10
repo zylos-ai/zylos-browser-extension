@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Added
+
+- Owner-managed site rules in Settings, with denied, read-only or interactive
+  access, 15-minute/one-hour/24-hour expiry and immediate revoke controls.
+  Former billing/security blocks become editable default-deny settings, with no
+  separate hardcoded runtime block. Custom exact-origin, domain, subdomain
+  wildcard and bounded domain-regex rules override defaults newest-first.
+  Multiple matching defaults use the most restrictive mode. Rules are bound to
+  the configured connection and are cleared when its recipient changes.
+- Origin-only local permission/access history (up to 200 events for seven days).
+  Read-only grants permit navigation, page reading, screenshots and scrolling,
+  while refusing clicks, input, submissions, history navigation and recovery.
+  Frame permissions and parent restrictions are checked during execution.
+- Refuse whole-page screenshots when a known restricted child frame lacks access.
+- Convert viewport points to document CSS coordinates for node hit tests after
+  scrolling, while keeping native pointer events in viewport coordinates.
+- Refuse text insertion when any known frame restricts input, including a sibling
+  of the target. Screen canonical navigation URLs as well as raw URL strings.
+- Resolve cross-process iframe hits before coordinate input and check the embedded
+  subtree. Normalize trailing DNS dots for access-rule matching. Require a label
+  boundary after regex wildcard prefixes.
+- Restore saved rules independently and merge default settings by stable id.
+  Clock rollback preserves restrictions; damaged restrictions pause automation
+  until the owner explicitly resets access rules in the panel.
+
 ## [0.17.4] - 2026-11-04
 
 No Remote protocol change required. Remote 0.10.5 provides the companion Agent

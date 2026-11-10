@@ -1,6 +1,8 @@
 import type { Command } from '../commands';
 import type { Point } from './types';
 import { collectFrames, frameAllowed, type Frame, type Send } from './frames';
+import { assertPointPermissions } from './point-permissions';
+import { assertSiteAction, recordSiteAccess, siteAccessRevision } from '../site-access';
 import domAction from './injected/dom-action.js?raw';
 import pageQuery from './injected/page-query.js?raw';
 import pageReadiness from './injected/page-readiness.js?raw';
@@ -41,9 +43,66 @@ function fail(code: string, message = code): never {
 const mask = (values: string[] = []) =>
   values.reduce((n, v) => n | ({ Alt: 1, Control: 2, Meta: 4, Shift: 8 }[v] || 0), 0);
 export class PageActions {
+  private frameParents = new Map<string, Frame>();
+  private audited = new Set<string>();
   constructor(private io: ActionsIO) {}
+  private auditFrame(frame: Frame, action: string, allowed: boolean) {
+    if (!frame.url) return;
+    let origin: string;
+    try {
+      origin = new URL(frame.url).origin;
+    } catch {
+      return;
+    }
+    const key = `${siteAccessRevision()}:${action}:${allowed}:${origin}`;
+    if (this.audited.has(key)) return;
+    this.audited.add(key);
+    // The policy module stores origins only, never frame paths or page contents.
+    void recordSiteAccess(frame.url, action, allowed).catch(() => {});
+  }
+  private assertFrameAction(frame: Frame, action: string) {
+    this.io.check();
+    const seen = new Set<string>();
+    let current: Frame | undefined = frame;
+    while (current && !seen.has(current.id)) {
+      seen.add(current.id);
+      try {
+        assertSiteAction(current.url, action);
+        this.auditFrame(current, action, true);
+      } catch (error) {
+        this.auditFrame(current, action, false);
+        throw error;
+      }
+      current = current.parentId ? this.frameParents.get(current.parentId) : undefined;
+    }
+  }
+  private async assertCurrentFrameAction(frame: Frame, action: string) {
+    // Child navigation does not necessarily invalidate the top-level document.
+    if (frame.parentId) {
+      const current = (await this.safeFrames()).find(
+        (candidate) =>
+          candidate.id === frame.id &&
+          candidate.url === frame.url &&
+          candidate.sessionId === frame.sessionId,
+      );
+      if (!current) fail('FRAME_UNAVAILABLE');
+      frame = current;
+    }
+    this.assertFrameAction(frame, action);
+  }
+  private async assertTargetAction(target: Target, action: string) {
+    if (target.ref) {
+      const element = await this.resolve(target.ref);
+      this.assertFrameAction(element.frame, action);
+      return;
+    }
+    await assertPointPermissions(this.io.send, { x: target.x!, y: target.y! }, (frame) =>
+      this.assertFrameAction(frame, action),
+    );
+  }
   async prepareInput(command: InputCommand): Promise<Element> {
     const element = await this.resolve(command.ref);
+    await this.assertCurrentFrameAction(element.frame, command.op);
     let initialState: { value: unknown } | undefined;
     if (this.io.onInputPrepared) {
       const state = await this.call(element, 'read-input-state');
@@ -65,6 +124,9 @@ export class PageActions {
   }
   async commitInput(command: InputCommand, prepared?: Element, expectedState?: unknown) {
     const element = prepared ?? (await this.resolve(command.ref));
+    await this.assertCurrentFrameAction(element.frame, command.op);
+    // Native text follows page focus, which can move away from the target ref.
+    for (const frame of await this.frames()) this.assertFrameAction(frame, command.op);
     // Commit deliberately does not focus again after a recovery checkpoint.
     await this.call(
       element,
@@ -74,11 +136,15 @@ export class PageActions {
         : { replace: command.op === 'fill', expected: expectedState },
     );
     this.io.beforeInput?.();
+    await this.assertCurrentFrameAction(element.frame, command.op);
+    for (const frame of await this.frames()) this.assertFrameAction(frame, command.op);
     await this.io.send('Input.insertText', { text: command.text });
     return { done: true };
   }
   async frames(onUnavailable?: (frame: Frame) => void) {
-    return collectFrames(this.io.send, onUnavailable);
+    const frames = await collectFrames(this.io.send, onUnavailable);
+    this.frameParents = new Map(frames.map((frame) => [frame.id, frame]));
+    return frames;
   }
   async safeFrames(onUnavailable?: (frame: Frame) => void) {
     const frames = await this.frames(onUnavailable);
@@ -87,6 +153,16 @@ export class PageActions {
     return frames.filter(allowed);
   }
   private async call(element: Element, action: string, option?: unknown): Promise<any> {
+    const operation = ['focus', 'prepare-input', 'commit-input'].includes(action)
+      ? 'fill'
+      : action === 'select'
+        ? 'select'
+        : action === 'scroll'
+          ? 'scroll'
+          : 'inspect';
+    if (operation === 'fill' || operation === 'select')
+      await this.assertCurrentFrameAction(element.frame, operation);
+    else this.assertFrameAction(element.frame, operation);
     const response = await this.io.send(
       'Runtime.callFunctionOn',
       {
@@ -97,6 +173,7 @@ export class PageActions {
       },
       element.frame.sessionId,
     );
+    this.assertFrameAction(element.frame, operation);
     if (response.exceptionDetails) {
       const message =
         response.exceptionDetails.exception?.description?.split('\n')[0] ||
@@ -106,11 +183,13 @@ export class PageActions {
     return response.result?.value;
   }
   async query(frame: Frame, action: string, value?: unknown, byValue = true): Promise<any> {
+    this.assertFrameAction(frame, 'find');
     const world = await this.io.send(
       'Page.createIsolatedWorld',
       { frameId: frame.id, worldName: 'coco-actions' },
       frame.sessionId,
     );
+    this.assertFrameAction(frame, 'find');
     const response = await this.io.send(
       'Runtime.callFunctionOn',
       {
@@ -122,6 +201,7 @@ export class PageActions {
       },
       frame.sessionId,
     );
+    this.assertFrameAction(frame, 'find');
     if (response.exceptionDetails)
       fail(
         'INVALID_SELECTOR',
@@ -270,6 +350,7 @@ export class PageActions {
       scroll: PageProbe['scroll'];
     }[] = [];
     for (const frame of frames.slice(0, 12)) {
+      this.assertFrameAction(frame, 'snapshot');
       const viewport = await this.frameViewport(frame, frames, cache);
       if (!hasArea(viewport)) continue;
       const world = await this.io.send(
@@ -290,6 +371,7 @@ export class PageActions {
         },
         frame.sessionId,
       );
+      this.assertFrameAction(frame, 'snapshot');
       if (response.exceptionDetails || !response.result?.value?.signature)
         fail('OBSERVATION_UNAVAILABLE');
       samples.push({ frame: frame.id, ...response.result.value });
@@ -347,6 +429,7 @@ export class PageActions {
       partial: warnings.length > 0,
     });
     for (const frame of frames) {
+      this.assertFrameAction(frame, 'snapshot');
       let missingLayout = false;
       const firstLine = lines.length,
         firstCount = count,
@@ -383,6 +466,7 @@ export class PageActions {
           { frameId: frame.id },
           frame.sessionId,
         );
+        this.assertFrameAction(frame, 'snapshot');
         const sensitiveNodes = new Set<string>();
         const hiddenNodes = new Set<string>();
         const byId = new Map<string, any>((nodes || []).map((node: any) => [node.nodeId, node]));
@@ -517,10 +601,12 @@ export class PageActions {
     if (ref && (await this.inspect(ref))?.disabled) fail('ELEMENT_DISABLED');
   }
   async click(target: Target, button = 'left', count = 1, modifiers?: string[]) {
+    await this.assertTargetAction(target, 'click');
     await this.assertEnabled(target.ref);
     for (let n = 1; n <= count; n++) {
       for (let attempt = 0; ; attempt++) {
         const point = await this.point(target);
+        await this.assertTargetAction(target, 'click');
         const fields = { ...point, button, modifiers: mask(modifiers) };
         try {
           await this.io.mouse({ ...fields, type: 'mousePressed', clickCount: n });
@@ -536,6 +622,7 @@ export class PageActions {
             continue;
           throw error;
         }
+        await this.assertTargetAction(target, 'click');
         await this.io.mouse({ ...fields, type: 'mouseReleased', clickCount: n });
         break;
       }
@@ -543,6 +630,9 @@ export class PageActions {
     return { done: true };
   }
   async keypress(command: Extract<Command, { op: 'keypress' }>) {
+    // Keyboard input follows focus, which may be held by an inaccessible frame.
+    // Fail closed if any frame's permission does not allow keyboard interaction.
+    for (const frame of await this.frames()) this.assertFrameAction(frame, 'keypress');
     if (command.ref) await this.call(await this.resolve(command.ref), 'focus');
     for (const frame of await this.safeFrames()) {
       const focus = await this.query(frame, 'focus');
@@ -645,6 +735,7 @@ export class PageActions {
     const held: string[] = [];
     let pressed = false;
     try {
+      for (const frame of await this.frames()) this.assertFrameAction(frame, 'keypress');
       for (const modifier of new Set(command.modifiers || [])) {
         held.push(modifier);
         await this.io.send('Input.dispatchKeyEvent', {
@@ -692,6 +783,7 @@ export class PageActions {
       case 'right-click':
         return this.click(command, 'right', 1, command.modifiers);
       case 'hover':
+        await this.assertTargetAction(command, 'hover');
         await this.io.mouse({ type: 'mouseMoved', ...(await this.point(command)) });
         return { done: true };
       case 'keypress':
@@ -728,6 +820,10 @@ export class PageActions {
         if (command.ref)
           return this.call(await this.resolve(command.ref), 'scroll', { deltaX, deltaY });
         const { cssLayoutViewport: v } = await this.io.send('Page.getLayoutMetrics');
+        await this.assertTargetAction(
+          { x: command.x ?? v.clientWidth / 2, y: command.y ?? v.clientHeight / 2 },
+          'scroll',
+        );
         await this.io.mouse({
           type: 'mouseWheel',
           x: command.x ?? v.clientWidth / 2,
@@ -738,6 +834,8 @@ export class PageActions {
         return { done: true };
       }
       case 'drag': {
+        await this.assertTargetAction(command.from, 'drag');
+        await this.assertTargetAction(command.to, 'drag');
         // Resolve the destination first; scrollIntoView may move the source too.
         await this.point(command.to);
         const from = await this.point(command.from),
@@ -747,6 +845,8 @@ export class PageActions {
         let pressed = false,
           last = from;
         try {
+          await this.assertTargetAction(command.from, 'drag');
+          await this.assertTargetAction(command.to, 'drag');
           await this.io.mouse({
             type: 'mousePressed',
             ...from,

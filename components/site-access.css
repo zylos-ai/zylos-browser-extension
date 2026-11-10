@@ -1,0 +1,129 @@
+.site-access-settings {
+  padding-top: 16px;
+  border-top: 1px solid var(--color-border);
+  gap: 12px;
+}
+.site-access-settings .settings-form {
+  gap: 12px;
+}
+.site-access-add-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 10px;
+}
+.site-access-options {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+.site-access-grants-body,
+.site-access-history ol {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.site-access-grants-body {
+  margin-top: 8px;
+}
+.site-access-count {
+  color: var(--color-muted);
+}
+.site-access-grant,
+.site-access-event {
+  padding-block: 10px;
+  border-bottom: 1px solid var(--color-border);
+  min-width: 0;
+}
+.site-access-origin,
+.site-access-settings time,
+.site-access-event span {
+  overflow-wrap: anywhere;
+}
+.site-access-origin {
+  font-size: var(--text-label);
+}
+.site-access-revoke {
+  flex-shrink: 0;
+  min-height: 40px;
+  padding-inline: 10px;
+}
+.site-access-history summary,
+.site-access-list summary,
+.site-access-add summary,
+.site-access-defaults summary {
+  cursor: pointer;
+  font-size: var(--text-label);
+  min-height: 24px;
+  line-height: 24px;
+}
+.site-access-history > .settings-hint,
+.site-access-defaults > .settings-hint,
+.site-access-history ol {
+  margin-top: 10px;
+}
+.site-access-history ol {
+  list-style: none;
+  padding: 0;
+}
+.site-access-event {
+  display: grid;
+  gap: 4px;
+}
+.site-access-defaults-body {
+  display: grid;
+  gap: 12px;
+  margin-top: 10px;
+}
+.site-access-default {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 128px;
+  gap: 6px 12px;
+  padding-block: 10px;
+  border-bottom: 1px solid var(--color-border);
+}
+.site-access-default-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: var(--text-label);
+  min-width: 0;
+}
+.site-access-default-toggle input {
+  flex: 0 0 auto;
+  margin-top: 3px;
+}
+.site-access-default-toggle span {
+  overflow-wrap: anywhere;
+}
+.site-access-pattern {
+  grid-column: 1;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-muted);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.site-default-pattern {
+  grid-column: 1;
+  min-width: 0;
+}
+.site-default-pattern summary {
+  color: var(--color-muted);
+  font-size: var(--text-label);
+  cursor: pointer;
+}
+.site-default-pattern code {
+  display: block;
+  margin-top: 6px;
+}
+.site-access-default > .form-field {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: start;
+}
+.site-access-default-mode-label {
+  font-size: 11px;
+  color: var(--color-muted);
+}

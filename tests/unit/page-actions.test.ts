@@ -38,6 +38,7 @@ test.each(['fill', 'type'] as const)(
     const calls: string[] = [];
     const send = vi.fn(async (method: string, params?: Record<string, any>) => {
       calls.push(method === 'Runtime.callFunctionOn' ? params!.arguments[0].value : method);
+      if (method === 'Page.getFrameTree') return { frameTree: { frame } };
       return { result: { value: null } };
     });
     const preview = vi.fn();
@@ -57,8 +58,17 @@ test.each(['fill', 'type'] as const)(
     expect(await actions.commitInput({ op, ref: '@1a2b3c4d-e1', text: 'fixture' })).toEqual({
       done: true,
     });
-    expect(calls).toEqual(['commit-input', 'consume', 'Input.insertText']);
-    expect(send.mock.calls[0]![1]!.arguments[1].value).toBe(op === 'fill');
+    expect(calls).toEqual([
+      'Page.getFrameTree',
+      'commit-input',
+      'consume',
+      'Page.getFrameTree',
+      'Input.insertText',
+    ]);
+    expect(
+      send.mock.calls.find(([method]) => method === 'Runtime.callFunctionOn')![1]!.arguments[1]
+        .value,
+    ).toBe(op === 'fill');
     expect(preview).not.toHaveBeenCalled();
   },
 );
@@ -68,6 +78,7 @@ test.each(['focus-changed', 'revoked', 'native-rejected'])(
   async (failure) => {
     let inserts = 0;
     const send = vi.fn(async (method: string) => {
+      if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main' } } };
       if (method === 'Runtime.callFunctionOn' && failure === 'focus-changed')
         return { exceptionDetails: { text: 'Focus changed during input preview' } };
       if (method === 'Input.insertText') {

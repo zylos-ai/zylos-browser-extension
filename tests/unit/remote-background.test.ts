@@ -234,6 +234,101 @@ const respond = async (
 };
 
 describe('decision transport background', () => {
+  it('resets access rules only through the panel mutation path and releases control', async () => {
+    await bootConnected();
+    await ask({
+      type: 'remote-site-access-grant',
+      origin: 'https://example.com',
+      mode: 'denied',
+      durationMinutes: 15,
+    });
+    await ask({
+      type: 'remote-site-access-default',
+      id: 'billing',
+      enabled: false,
+      mode: 'denied',
+    });
+    const result = await ask({ type: 'remote-site-access-reset' });
+    expect(result.ok).toBe(true);
+    expect((result.value!.siteAccess as any).grants).toEqual([]);
+    expect(
+      (result.value!.siteAccess as any).defaults.find((rule: any) => rule.id === 'billing').enabled,
+    ).toBe(true);
+    expect(executor.release).toHaveBeenCalled();
+  });
+  it('configures default access rules from the panel and resets them on recipient change', async () => {
+    await bootConnected();
+    const current = (await state()).siteAccess as any;
+    const billing = current.defaults.find(
+      (rule: any) => rule.kind === 'url-regex' && rule.pattern.includes('billing'),
+    );
+    expect(billing).toBeDefined();
+    const changed = await ask({
+      type: 'remote-site-access-default',
+      id: billing.id,
+      enabled: false,
+      mode: 'denied',
+    });
+    expect(changed.ok).toBe(true);
+    expect(
+      (changed.value!.siteAccess as any).defaults.find((rule: any) => rule.id === billing.id)
+        .enabled,
+    ).toBe(false);
+    await ask({ type: 'remote-save', relayUrl: 'wss://other.example/ext', key: KEY });
+    expect(
+      ((await state()).siteAccess as any).defaults.find((rule: any) => rule.id === billing.id)
+        .enabled,
+    ).toBe(true);
+  });
+
+  it('stores panel site grants, expires control and denies remote grant requests', async () => {
+    const ws = await bootConnected();
+    const grant = await ask({
+      type: 'remote-site-access-grant',
+      origin: 'https://example.com',
+      mode: 'read-only',
+      durationMinutes: 5,
+    });
+    expect(grant.ok).toBe(true);
+    expect((grant.value!.siteAccess as any).grants).toMatchObject([
+      { origin: 'https://example.com', mode: 'read-only' },
+    ]);
+    ws.receive({
+      type: 'req',
+      id: 970,
+      method: 'remote-site-access-grant',
+      params: { origin: 'https://other.example', mode: 'interactive', durationMinutes: 60 },
+    });
+    await flush();
+    expect(ws.frames.findLast((frame) => frame.id === 970)).toMatchObject({
+      type: 'error',
+      code: 'UNKNOWN_METHOD',
+    });
+    const releases = executor.release.mock.calls.length;
+    executor.release.mockRejectedValueOnce(new Error('fixture detach failure'));
+    await vi.advanceTimersByTimeAsync(300001);
+    expect(executor.release.mock.calls.length).toBeGreaterThan(releases);
+    expect(((await state()).siteAccess as any).grants[0].expiresAt).toBeLessThan(Date.now());
+  });
+
+  it('revokes site permissions before a recipient change and retains them for unchanged settings', async () => {
+    await bootConnected();
+    await ask({
+      type: 'remote-site-access-grant',
+      origin: 'https://example.com',
+      mode: 'interactive',
+      durationMinutes: 15,
+    });
+    await ask({
+      type: 'remote-save',
+      relayUrl: 'wss://agent.example/browser-remote/ext',
+      key: KEY,
+    });
+    expect(((await state()).siteAccess as any).grants).toHaveLength(1);
+    await ask({ type: 'remote-save', relayUrl: 'wss://other.example/ext', key: KEY });
+    expect(((await state()).siteAccess as any).grants).toEqual([]);
+  });
+
   it('retains consented transport fault evidence after collection expires and clears it explicitly', async () => {
     const ws = await bootConnected();
     await ask({ type: 'remote-detailed-set-enabled', enabled: true });

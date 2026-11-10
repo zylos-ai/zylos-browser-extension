@@ -1,6 +1,71 @@
 import type zh from './zh-CN';
 
 export default {
+  siteAccess: 'Site permissions',
+  siteAccessRecoveryRequired:
+    'Saved access rules are damaged. Automation is paused. Reset removes all custom rules and restores the default restrictions.',
+  siteAccessReset: 'Reset access rules',
+  siteAccessAdd: 'Add access rule',
+  siteAccessScope:
+    'The newest matching custom rule takes priority. Otherwise, enabled default rules apply; the most restrictive matching default wins.',
+  siteAccessMatchType: 'Match by',
+  siteAccessExactOrigin: 'Exact site',
+  siteAccessDomain: 'Domain or wildcard',
+  siteAccessDomainRegex: 'Domain regex (limited)',
+  siteAccessPattern: 'Domain pattern',
+  siteAccessOriginHint:
+    'Includes scheme and port. Covers every path at this origin, but not subdomains.',
+  siteAccessDomainHint:
+    'Matches HTTP and HTTPS on all ports. *.example.com matches subdomains, not example.com itself.',
+  siteAccessRegexHint:
+    'Matches the whole hostname, not the URL path. Use ^ and $; a wildcard prefix must end at a dot before the fixed domain. Groups, lookarounds and backreferences are not supported.',
+  siteAccessBlocked: 'Deny access',
+  siteAccessBlockedHint:
+    'Blocks reading and actions on every matching page while this rule is active.',
+  siteAccessDefaults: 'Default access rules',
+  siteAccessPatternDetails: 'Match expression',
+  siteAccessDefaultsHint:
+    'Billing and other restricted pages are denied by these default rules. Disable a rule or change its access here; custom rules override defaults.',
+  siteAccessDefaultMode: 'Access for {rule}',
+  siteDefaultBilling: 'Billing and checkout',
+  siteDefaultPaymentProviders: 'Payment providers',
+  siteDefaultBanking: 'Banking URLs',
+  siteDefaultAccountSecurity: 'Account security',
+  siteDefaultAccountAccess: 'Account access management',
+  siteDefaultPasswordReset: 'Password reset',
+  siteDefaultSecuritySettings: 'Security and privacy settings',
+  siteDefaultCredentials: 'API keys and credentials',
+  siteDefaultAccountRemoval: 'Account removal',
+  siteDefaultBanks: 'Bank domains',
+  siteDefaultFinancialServices: 'Financial service domains',
+  siteDefaultRegionalFinance: 'Regional finance domains',
+  siteDefaultCustodialServices: 'Custodial service domains',
+  siteDefaultExactFinance: 'Other financial domains',
+  siteAccessOrigin: 'Site address',
+  siteAccessMode: 'Access',
+  siteAccessReadOnly: 'Read only',
+  siteAccessInteractive: 'Allow actions',
+  siteAccessDuration: 'Valid for',
+  siteAccess15Minutes: '15 minutes',
+  siteAccess1Hour: '1 hour',
+  siteAccess24Hours: '24 hours',
+  siteAccessReadOnlyHint:
+    'Allows opening, reading, screenshots and scrolling. Clicks, typing and submissions are blocked throughout this site.',
+  siteAccessInteractiveHint:
+    'Allows reading and actions on this site, including sensitive pages. Password and verification-code protections still apply.',
+  siteAccessGrant: 'Add rule',
+  siteAccessGrants: 'Custom rules',
+  siteAccessEmpty: 'No custom access rules.',
+  siteAccessExpires: 'Expires',
+  siteAccessExpired: 'Expired',
+  siteAccessRevoke: 'Revoke',
+  siteAccessRevokeOrigin: 'Revoke access to {origin}',
+  siteAccessHistory: 'Recent site access',
+  siteAccessHistoryScope:
+    'Local access records show the site, action and decision. Page content and full page addresses are not recorded.',
+  siteAccessNoHistory: 'No site access recorded.',
+  siteAccessAllowed: 'Allowed',
+  siteAccessDenied: 'Denied',
   taskCompatibilityPermission: 'Extension compatibility mode',
   compatibilityHint:
     "Allow active browser tasks to remove other extensions' inline UI. Saved across tasks and restarts; cleared when the connection address or key changes.",

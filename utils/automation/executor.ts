@@ -10,11 +10,23 @@ import {
   recordGroupDiagnostic,
 } from './cdp-diagnostics';
 import { NetworkActivity, waitForStablePage } from './page-stability';
-import { frameEvent, frameSessions, enableFrames, clearFrameSessions } from './frames';
-import { isBlockedUrl } from '../guard';
+import {
+  frameEvent,
+  frameSessions,
+  enableFrames,
+  clearFrameSessions,
+  collectFrames,
+  frameAllowed,
+} from './frames';
+import {
+  isSiteUrlBlocked as isBlockedUrl,
+  assertSiteAction,
+  recordSiteAccess,
+} from '../site-access';
 import { cursorExpression } from './cursor';
 import { cleanupTask, recordTask } from './task-lifecycle';
 import { PointerMotion } from './pointer-motion';
+import { assertPointPermissions, hitTestPoint } from './point-permissions';
 import type { Command } from '../commands';
 import type { CdpResults, Cursor, GrantedTab, Point, Scope } from './types';
 import {
@@ -324,6 +336,9 @@ export async function useExistingTab(
   assertActive();
   if (!tab || tab.windowId !== expected.windowId || !canReadPage(tab))
     fail('TAB_NOT_GRANTED', 'The shared page is closed, restricted or unavailable');
+  assertSiteAction(tab.url, 'use-current-tab');
+  await recordSiteAccess(tab.url!, 'use-current-tab', true);
+  assertActive();
   if (tab.url !== expected.url)
     fail('PAGE_CHANGED', 'The shared page navigated; ask for a new message from the current page');
   if (expected.documentId)
@@ -512,6 +527,8 @@ export async function createTask(initial: {
 }) {
   if (recovery) fail('CONTROL_SUSPENDED');
   if (!allowed(initial.url)) fail('INVALID_URL');
+  assertSiteAction(initial.url, 'open');
+  await recordSiteAccess(initial.url, 'open', true);
   const releasing = release();
   const revision = consentRevision;
   await releasing;
@@ -519,6 +536,7 @@ export async function createTask(initial: {
   if (revision !== consentRevision) stopped('consent_changed');
   if (source.incognito) fail('UNSUPPORTED_WINDOW', '不支持无痕窗口');
   if (source.windowId !== initial.windowId) fail('INVALID_TASK_SOURCE');
+  assertSiteAction(initial.url, 'open');
   const taskId = initial.taskId;
   const tab = await chrome.tabs.create({
     windowId: source.windowId,
@@ -948,12 +966,10 @@ async function dispatchPointer(
       return result.result.value;
     },
     hit: async (point) =>
-      (await send('DOM.getNodeForLocation', {
-        x: Math.floor(point.x),
-        y: Math.floor(point.y),
+      hitTestPoint(send, point, {
         includeUserAgentShadowDOM: false,
         ignorePointerEventsNone: false,
-      })) as { backendNodeId: number; frameId: string },
+      }),
   });
 }
 
@@ -1550,6 +1566,10 @@ export async function execute(
   deadline: number,
   options?: ExecutionOptions,
 ): Promise<any> {
+  const action = command.op === 'dialog' && command.action === 'get' ? 'dialog-get' : command.op;
+  const target = command.op === 'open' || command.op === 'new-tab' ? command.url : grant?.url;
+  if (target && !['finish', 'pause', 'stop', 'close-tab', 'finalize'].includes(command.op))
+    assertSiteAction(target, action);
   if (
     !['fill', 'type'].includes(command.op) ||
     !('ref' in command) ||
@@ -1680,6 +1700,23 @@ async function executeInternal(
     if (operationRevision !== startedOperationRevision) stopped('operation_changed');
     if (control !== session) stopped('control_changed');
     if (Date.now() > deadline) fail('COMMAND_EXPIRED');
+    if (
+      grant &&
+      ![
+        'finish',
+        'pause',
+        'stop',
+        'close-tab',
+        'finalize',
+        'open',
+        'new-tab',
+        'switch-tab',
+      ].includes(command.op)
+    )
+      assertSiteAction(
+        grant.url,
+        command.op === 'dialog' && command.action === 'get' ? 'dialog-get' : command.op,
+      );
   };
   if (command.op === 'tabs') {
     await popupQueue;
@@ -1872,6 +1909,7 @@ async function executeInternal(
     checkSession();
     if (command.op !== 'switch-tab' && !allowed(command.url))
       fail('UNSUPPORTED_PAGE', '只允许普通 HTTP/HTTPS 网页');
+    if (command.op !== 'switch-tab') assertSiteAction(command.url, command.op);
     parked = false;
     let target;
     if (command.op === 'new-tab') {
@@ -1902,6 +1940,7 @@ async function executeInternal(
       if (!tab || tab.id === undefined || !inScope(tab, session))
         fail('TAB_NOT_GRANTED', '只能操作当前任务的 Agent 工作标签');
       if (command.op === 'switch-tab' && !inspectable(tab)) fail('UNSUPPORTED_PAGE');
+      assertSiteAction(command.op === 'open' ? command.url : tab.url, command.op);
       target = command.op === 'open' ? await chrome.tabs.update(tab.id, { url: command.url }) : tab;
     }
     if (!target) fail('TAB_UNAVAILABLE');
@@ -1962,6 +2001,15 @@ async function executeInternal(
       invalidate();
       fail('PAGE_CHANGED', '页面已变化，请重新 snapshot');
     }
+    if (method === 'Input.dispatchMouseEvent') {
+      await assertPointPermissions(
+        actionCdp,
+        { x: Number(params.x), y: Number(params.y) },
+        (frame) =>
+          assertSiteAction(frame.url, params.type === 'mouseWheel' ? 'scroll' : command.op),
+      );
+      check();
+    }
     const result = await actionCdp(method, params);
     check();
     return result as CdpResults[M];
@@ -1975,9 +2023,13 @@ async function executeInternal(
     const tab = await chrome.tabs.get(lease.id);
     check();
     if (!inScope(tab, session) || !inspectable(tab) || tab.url !== lease.url) fail('PAGE_CHANGED');
-    if (isBlockedUrl(tab.url)) fail('BLOCKED_URL');
+    assertSiteAction(tab.url, command.op);
     if (sessionId && frameSessions().get(sessionId)?.tabId !== lease.id) fail('FRAME_UNAVAILABLE');
     if (dialog) fail('DIALOG_OPEN', `${dialog.type}: ${dialog.message}; use dialog`);
+    if (method === 'Input.insertText') {
+      for (const frame of await collectFrames(actionCdp)) assertSiteAction(frame.url, command.op);
+      check();
+    }
     const target = { tabId: lease.id, ...(sessionId ? { sessionId } : {}) };
     const result = await boundedCdp(async () => {
       if (method === 'Input.insertText') {
@@ -2125,6 +2177,13 @@ async function executeInternal(
   async function screenshot() {
     try {
       if (cursor) await showCursor('hide');
+      const frames = await collectFrames(actionCdp);
+      check();
+      if (frames.some((frame) => !frameAllowed(frame)))
+        fail(
+          'BLOCKED_FRAME',
+          'A restricted frame is visible; a whole-page screenshot is not permitted',
+        );
       const result = await cdp('Page.captureScreenshot', {
         format: 'png',
         captureBeyondViewport: false,
@@ -2134,6 +2193,8 @@ async function executeInternal(
         fail('SCREENSHOT_TOO_LARGE', '截图过大，请缩小浏览器窗口后重新观察');
       // Also validate the active target after capture; never return a different tab's pixels.
       const layout = await cdp('Page.getLayoutMetrics');
+      if ((await collectFrames(actionCdp)).some((frame) => !frameAllowed(frame)))
+        fail('BLOCKED_FRAME');
       return { ...result, layout };
     } finally {
       if (cursor && control === session && grant === lease)

@@ -29,6 +29,7 @@ export type CdpResults = {
   'Page.captureScreenshot': { data: string };
   'Page.getLayoutMetrics': {
     cssLayoutViewport: { clientWidth: number; clientHeight: number; pageX: number; pageY: number };
+    cssVisualViewport?: { pageX: number; pageY: number };
     cssContentSize: { width: number; height: number };
   };
   'Accessibility.getFullAXTree': {
