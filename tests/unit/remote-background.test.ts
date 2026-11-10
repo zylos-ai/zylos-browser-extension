@@ -234,6 +234,31 @@ const respond = async (
 };
 
 describe('decision transport background', () => {
+  it('configures default access rules from the panel and resets them on recipient change', async () => {
+    await bootConnected();
+    const current = (await state()).siteAccess as any;
+    const billing = current.defaults.find(
+      (rule: any) => rule.kind === 'url-regex' && rule.pattern.includes('billing'),
+    );
+    expect(billing).toBeDefined();
+    const changed = await ask({
+      type: 'remote-site-access-default',
+      id: billing.id,
+      enabled: false,
+      mode: 'denied',
+    });
+    expect(changed.ok).toBe(true);
+    expect(
+      (changed.value!.siteAccess as any).defaults.find((rule: any) => rule.id === billing.id)
+        .enabled,
+    ).toBe(false);
+    await ask({ type: 'remote-save', relayUrl: 'wss://other.example/ext', key: KEY });
+    expect(
+      ((await state()).siteAccess as any).defaults.find((rule: any) => rule.id === billing.id)
+        .enabled,
+    ).toBe(true);
+  });
+
   it('stores panel site grants, expires control and denies remote grant requests', async () => {
     const ws = await bootConnected();
     const grant = await ask({

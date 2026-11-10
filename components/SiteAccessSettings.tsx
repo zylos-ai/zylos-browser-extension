@@ -1,7 +1,25 @@
 import { useEffect, useState } from 'react';
 import type { RemoteRequest, RemoteState } from '../utils/remote';
 import { useI18n } from './LanguageProvider';
+import type { TranslationKey } from '../utils/i18n';
 import './site-access.css';
+
+const defaultLabels: Record<string, TranslationKey> = {
+  billing: 'siteDefaultBilling',
+  'payment-providers': 'siteDefaultPaymentProviders',
+  banking: 'siteDefaultBanking',
+  'account-security': 'siteDefaultAccountSecurity',
+  'account-access': 'siteDefaultAccountAccess',
+  'password-reset': 'siteDefaultPasswordReset',
+  'security-settings': 'siteDefaultSecuritySettings',
+  credentials: 'siteDefaultCredentials',
+  'account-removal': 'siteDefaultAccountRemoval',
+  banks: 'siteDefaultBanks',
+  'financial-services': 'siteDefaultFinancialServices',
+  'regional-finance': 'siteDefaultRegionalFinance',
+  'custodial-services': 'siteDefaultCustodialServices',
+  'exact-finance': 'siteDefaultExactFinance',
+};
 
 export function SiteAccessSettings({
   state,
@@ -14,17 +32,31 @@ export function SiteAccessSettings({
 }) {
   const { t, locale } = useI18n();
   const [origin, setOrigin] = useState('');
-  const [mode, setMode] = useState<'read-only' | 'interactive'>('read-only');
+  const [matchType, setMatchType] = useState<'origin' | 'domain' | 'domain-regex'>('origin');
+  const [mode, setMode] = useState<'denied' | 'read-only' | 'interactive'>('read-only');
   const [duration, setDuration] = useState(15);
   const [now, setNow] = useState(Date.now);
   const grants = state.siteAccess?.grants ?? [];
   const audit = state.siteAccess?.audit ?? [];
+  const defaults = state.siteAccess?.defaults ?? [];
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
   const time = (at: number) => new Date(at).toLocaleString(locale);
   const disabled = pending || !onChange;
+  const modeKey = (value: string): TranslationKey =>
+    value === 'denied'
+      ? 'siteAccessBlocked'
+      : value === 'read-only'
+        ? 'siteAccessReadOnly'
+        : 'siteAccessInteractive';
+  const matchKey = (value: string): TranslationKey =>
+    value === 'domain'
+      ? 'siteAccessDomain'
+      : value === 'domain-regex'
+        ? 'siteAccessDomainRegex'
+        : 'siteAccessExactOrigin';
   return (
     <section
       className="settings-section site-access-settings"
@@ -43,26 +75,58 @@ export function SiteAccessSettings({
               onChange?.({
                 type: 'remote-site-access-grant',
                 origin: origin.trim(),
+                matchType,
                 mode,
                 durationMinutes: duration,
               });
             }}
           >
+            <label className="form-field" htmlFor="site-access-match-type">
+              <span>{t('siteAccessMatchType')}</span>
+              <select
+                id="site-access-match-type"
+                className="select"
+                value={matchType}
+                disabled={disabled}
+                onChange={(event) => setMatchType(event.target.value as typeof matchType)}
+                aria-describedby="site-access-match-hint"
+              >
+                <option value="origin">{t('siteAccessExactOrigin')}</option>
+                <option value="domain">{t('siteAccessDomain')}</option>
+                <option value="domain-regex">{t('siteAccessDomainRegex')}</option>
+              </select>
+            </label>
             <label className="form-field" htmlFor="site-access-origin">
-              <span>{t('siteAccessOrigin')}</span>
+              <span>{t(matchType === 'origin' ? 'siteAccessOrigin' : 'siteAccessPattern')}</span>
               <input
                 id="site-access-origin"
                 className="input"
-                type="url"
+                type="text"
                 value={origin}
                 onChange={(event) => setOrigin(event.target.value)}
-                placeholder="https://example.com"
+                placeholder={
+                  matchType === 'origin'
+                    ? 'https://example.com'
+                    : matchType === 'domain'
+                      ? '*.example.com'
+                      : '^.*\\.example\\.com$'
+                }
+                aria-describedby="site-access-match-hint"
                 autoComplete="off"
                 spellCheck={false}
                 required
                 disabled={disabled}
               />
             </label>
+            <p id="site-access-match-hint" className="settings-hint">
+              {t(
+                matchType === 'origin'
+                  ? 'siteAccessOriginHint'
+                  : matchType === 'domain'
+                    ? 'siteAccessDomainHint'
+                    : 'siteAccessRegexHint',
+              )}
+            </p>
             <div className="site-access-options">
               <label className="form-field" htmlFor="site-access-mode">
                 <span>{t('siteAccessMode')}</span>
@@ -74,6 +138,7 @@ export function SiteAccessSettings({
                   aria-describedby="site-access-consequence"
                   onChange={(event) => setMode(event.target.value as typeof mode)}
                 >
+                  <option value="denied">{t('siteAccessBlocked')}</option>
                   <option value="read-only">{t('siteAccessReadOnly')}</option>
                   <option value="interactive">{t('siteAccessInteractive')}</option>
                 </select>
@@ -94,7 +159,13 @@ export function SiteAccessSettings({
               </label>
             </div>
             <p id="site-access-consequence" className="settings-hint">
-              {t(mode === 'read-only' ? 'siteAccessReadOnlyHint' : 'siteAccessInteractiveHint')}
+              {t(
+                mode === 'denied'
+                  ? 'siteAccessBlockedHint'
+                  : mode === 'read-only'
+                    ? 'siteAccessReadOnlyHint'
+                    : 'siteAccessInteractiveHint',
+              )}
             </p>
             <button
               className="btn btn-primary save-button"
@@ -117,7 +188,9 @@ export function SiteAccessSettings({
               <div className="settings-copy">
                 <div className="site-access-origin">{grant.origin}</div>
                 <p className="settings-hint">
-                  {t(grant.mode === 'read-only' ? 'siteAccessReadOnly' : 'siteAccessInteractive')}
+                  {t(matchKey(grant.matchType ?? 'origin'))}
+                  {' · '}
+                  {t(modeKey(grant.mode))}
                   {' · '}
                   {grant.expiresAt <= now ? t('siteAccessExpired') : t('siteAccessExpires')}{' '}
                   <time dateTime={new Date(grant.expiresAt).toISOString()}>
@@ -138,6 +211,62 @@ export function SiteAccessSettings({
           ))}
         </div>
       </details>
+      <details className="site-access-defaults">
+        <summary>
+          {t('siteAccessDefaults')} <span className="site-access-count">({defaults.length})</span>
+        </summary>
+        <p className="settings-hint">{t('siteAccessDefaultsHint')}</p>
+        <div className="site-access-defaults-body">
+          {defaults.map((rule) => {
+            const label = defaultLabels[rule.id] ? t(defaultLabels[rule.id]!) : rule.label;
+            return (
+              <div className="site-access-default" key={rule.id}>
+                <label className="site-access-default-toggle">
+                  <input
+                    type="checkbox"
+                    checked={rule.enabled}
+                    disabled={disabled}
+                    onChange={(event) =>
+                      onChange?.({
+                        type: 'remote-site-access-default',
+                        id: rule.id,
+                        enabled: event.target.checked,
+                        mode: rule.mode,
+                      })
+                    }
+                  />
+                  <span>{label}</span>
+                </label>
+                <details className="site-default-pattern">
+                  <summary>{t('siteAccessPatternDetails')}</summary>
+                  <code className="site-access-pattern">{rule.pattern}</code>
+                </details>
+                <label className="form-field">
+                  <span className="site-access-default-mode-label">{t('siteAccessMode')}</span>
+                  <select
+                    className="select"
+                    value={rule.mode}
+                    disabled={disabled}
+                    aria-label={t('siteAccessDefaultMode', { rule: label })}
+                    onChange={(event) =>
+                      onChange?.({
+                        type: 'remote-site-access-default',
+                        id: rule.id,
+                        enabled: rule.enabled,
+                        mode: event.target.value as 'denied' | 'read-only' | 'interactive',
+                      })
+                    }
+                  >
+                    <option value="denied">{t('siteAccessBlocked')}</option>
+                    <option value="read-only">{t('siteAccessReadOnly')}</option>
+                    <option value="interactive">{t('siteAccessInteractive')}</option>
+                  </select>
+                </label>
+              </div>
+            );
+          })}
+        </div>
+      </details>
       <details className="site-access-history">
         <summary>{t('siteAccessHistory')}</summary>
         <p className="settings-hint">{t('siteAccessHistoryScope')}</p>
@@ -153,15 +282,7 @@ export function SiteAccessSettings({
                   <span>{entry.action}</span>
                   {' · '}
                   <span>{t(entry.allowed ? 'siteAccessAllowed' : 'siteAccessDenied')}</span>
-                  {entry.mode && (
-                    <>
-                      {' '}
-                      ·{' '}
-                      {t(
-                        entry.mode === 'read-only' ? 'siteAccessReadOnly' : 'siteAccessInteractive',
-                      )}
-                    </>
-                  )}
+                  {entry.mode && <> · {t(modeKey(entry.mode))}</>}
                 </div>
                 <time className="settings-hint" dateTime={new Date(entry.at).toISOString()}>
                   {time(entry.at)}

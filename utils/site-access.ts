@@ -1,5 +1,17 @@
 import { z } from 'zod';
-import { isBlockedUrl } from './guard';
+import {
+  defaultRulesSchema,
+  defaultSiteRules,
+  matchingDefaultRule,
+  matchesSitePattern,
+  pageUrl,
+  siteMatchTypeSchema,
+  siteModeSchema,
+  validSitePattern,
+  type DefaultSiteRule,
+  type SiteMatchType,
+} from './site-rules';
+export { defaultRuleSchema } from './site-rules';
 
 export const SITE_ACCESS_KEY = 'siteAccess';
 const MAX_GRANTS = 100;
@@ -11,16 +23,7 @@ const timestamp = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 function originOf(value: unknown): string | undefined {
   if (typeof value !== 'string') return;
   try {
-    const url = new URL(value);
-    if (
-      !['http:', 'https:'].includes(url.protocol) ||
-      url.username ||
-      url.password ||
-      url.hostname.includes('*') ||
-      url.origin === 'null'
-    )
-      return;
-    return url.origin;
+    return pageUrl(value)?.origin;
   } catch {
     return;
   }
@@ -36,15 +39,18 @@ const originSchema = z
 export const siteGrantSchema = z
   .object({
     id: z.string().uuid(),
-    origin: originSchema,
-    mode: z.enum(['read-only', 'interactive']),
+    origin: z.string().min(1).max(2048),
+    matchType: siteMatchTypeSchema.optional(),
+    mode: siteModeSchema,
     createdAt: timestamp,
     expiresAt: timestamp,
   })
   .strict()
   .refine(
     (grant) =>
-      grant.expiresAt > grant.createdAt && grant.expiresAt - grant.createdAt <= MAX_GRANT_MS,
+      grant.expiresAt > grant.createdAt &&
+      grant.expiresAt - grant.createdAt <= MAX_GRANT_MS &&
+      validSitePattern(grant.origin, grant.matchType || 'origin'),
     'Invalid authorization lifetime',
   );
 export const siteAccessEventSchema = z
@@ -53,7 +59,7 @@ export const siteAccessEventSchema = z
     at: timestamp,
     origin: originSchema,
     action: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
-    mode: z.enum(['read-only', 'interactive']).optional(),
+    mode: siteModeSchema.optional(),
     allowed: z.boolean(),
     grantId: z.string().uuid().optional(),
   })
@@ -62,6 +68,7 @@ export const siteAccessStateSchema = z
   .object({
     grants: z.array(siteGrantSchema).max(MAX_GRANTS),
     audit: z.array(siteAccessEventSchema).max(MAX_EVENTS),
+    defaults: defaultRulesSchema,
   })
   .strict();
 export type SiteGrant = z.infer<typeof siteGrantSchema>;
@@ -70,6 +77,7 @@ const savedSchema = siteAccessStateSchema.extend({ binding: z.string().min(1).ma
 
 let grants: SiteGrant[] = [];
 let audit: SiteAccessEvent[] = [];
+let defaults: DefaultSiteRule[] = defaultSiteRules();
 let binding = '';
 let initialized = false;
 let revision = 0;
@@ -113,18 +121,31 @@ function pruneAudit(events = audit) {
 }
 function liveGrant(url: unknown) {
   if (!initialized) return;
-  const origin = originOf(url);
   const now = Date.now();
-  return grants.find(
-    (grant) => grant.origin === origin && grant.createdAt <= now && grant.expiresAt > now,
+  return grants.findLast(
+    (grant) =>
+      matchesSitePattern(url, grant.origin, grant.matchType || 'origin') &&
+      grant.createdAt <= now &&
+      grant.expiresAt > now,
   );
 }
-async function persist(nextGrants: SiteGrant[], nextAudit: SiteAccessEvent[]) {
+function decision(url: unknown) {
+  const grant = liveGrant(url);
+  if (grant) return { mode: grant.mode, grant };
+  const rule = matchingDefaultRule(url, defaults);
+  return { mode: rule?.mode || 'interactive', rule } as const;
+}
+async function persist(
+  nextGrants: SiteGrant[],
+  nextAudit: SiteAccessEvent[],
+  nextDefaults = defaults,
+) {
   await chrome.storage.local.set({
     [SITE_ACCESS_KEY]: {
       binding,
       grants: nextGrants,
       audit: nextAudit,
+      defaults: nextDefaults,
     },
   });
 }
@@ -136,6 +157,7 @@ export function siteAccessState(): z.infer<typeof siteAccessStateSchema> {
   return {
     grants: grants.map((grant) => ({ ...grant })),
     audit: audit.map((event) => ({ ...event })),
+    defaults: defaults.map((rule) => ({ ...rule })),
   };
 }
 
@@ -145,6 +167,7 @@ export function initializeSiteAccess(recipient: string): Promise<void> {
   initialized = false;
   grants = [];
   audit = [];
+  defaults = defaultSiteRules();
   binding = recipient;
   return serial(async () => {
     if (!recipient || recipient.length > 512) fail('SITE_ACCESS_BINDING_REQUIRED');
@@ -155,10 +178,12 @@ export function initializeSiteAccess(recipient: string): Promise<void> {
       parsed.success &&
       parsed.data.binding === recipient &&
       parsed.data.grants.every((grant) => grant.createdAt <= Date.now()) &&
-      new Set(parsed.data.grants.map((grant) => grant.origin)).size === parsed.data.grants.length
+      new Set(parsed.data.grants.map((grant) => `${grant.matchType || 'origin'}:${grant.origin}`))
+        .size === parsed.data.grants.length
     ) {
       grants = parsed.data.grants;
       audit = pruneAudit(parsed.data.audit);
+      defaults = parsed.data.defaults;
     }
     initialized = true;
   });
@@ -168,37 +193,46 @@ export function grantSiteAccess(
   origin: string,
   mode: SiteGrant['mode'],
   durationMinutes: number,
+  matchType: SiteMatchType = 'origin',
 ): Promise<void> {
   const epoch = generation;
   return serial(async () => {
     if (!initialized || !binding || epoch !== generation) fail('SITE_ACCESS_NOT_READY');
-    originSchema.parse(origin);
+    siteMatchTypeSchema.parse(matchType);
+    if (!validSitePattern(origin, matchType)) fail('SITE_PATTERN_INVALID');
     z.number().int().min(5).max(1440).parse(durationMinutes);
     const now = Date.now();
     const grant = siteGrantSchema.parse({
       id: crypto.randomUUID(),
       origin,
+      ...(matchType === 'origin' ? {} : { matchType }),
       mode,
       createdAt: now,
       expiresAt: now + durationMinutes * 60_000,
     });
     const next = [
-      ...grants.filter((value) => value.origin !== origin && value.expiresAt > now),
+      ...grants.filter(
+        (value) =>
+          (value.origin !== origin || (value.matchType || 'origin') !== matchType) &&
+          value.expiresAt > now,
+      ),
       grant,
     ];
     if (next.length > MAX_GRANTS) fail('SITE_ACCESS_LIMIT');
-    const events = pruneAudit([
-      ...audit,
-      {
-        id: crypto.randomUUID(),
-        at: now,
-        origin,
-        action: 'grant',
-        allowed: true,
-        mode,
-        grantId: grant.id,
-      },
-    ]);
+    const events = originOf(origin)
+      ? pruneAudit([
+          ...audit,
+          {
+            id: crypto.randomUUID(),
+            at: now,
+            origin,
+            action: 'grant',
+            allowed: mode !== 'denied',
+            mode,
+            grantId: grant.id,
+          },
+        ])
+      : pruneAudit();
     await persist(next, events);
     if (epoch !== generation) {
       // A revoke during the storage write wins over the pending grant.
@@ -217,7 +251,7 @@ export function revokeSiteAccess(id: string): Promise<void> {
   revision++;
   generation++;
   grants = grants.filter((grant) => grant.id !== id);
-  if (revoked)
+  if (revoked && originOf(revoked.origin))
     audit = pruneAudit([
       ...audit,
       {
@@ -240,37 +274,74 @@ export function clearSiteAccess(): Promise<void> {
   generation++;
   grants = [];
   audit = [];
+  defaults = defaultSiteRules();
   return serial(async () => {
     if (binding) await persist([], []);
   });
 }
 
 export function isSiteUrlBlocked(url: unknown): boolean {
-  return isBlockedUrl(url) && !liveGrant(url);
+  return decision(url).mode === 'denied';
 }
 
 export function assertSiteAction(url: unknown, action: string): void {
-  const grant = liveGrant(url);
-  if (!grant && isBlockedUrl(url)) fail('BLOCKED_URL');
-  if (grant?.mode === 'read-only' && !READ_ACTIONS.has(action)) fail('SITE_READ_ONLY');
+  const result = decision(url);
+  if (result.mode === 'denied') fail('BLOCKED_URL');
+  if (result.mode === 'read-only' && !READ_ACTIONS.has(action)) fail('SITE_READ_ONLY');
 }
 
 export function recordSiteAccess(url: string, action: string, allowed: boolean): Promise<void> {
   const origin = originOf(url);
-  const grant = liveGrant(url);
-  if (!initialized || !origin || (!isBlockedUrl(url) && !grant)) return Promise.resolve();
+  const result = decision(url);
+  const grant = result.grant;
+  if (!initialized || !origin || (!result.rule && !grant)) return Promise.resolve();
   const event = siteAccessEventSchema.parse({
     id: crypto.randomUUID(),
     at: Date.now(),
     origin,
     action,
     allowed,
-    ...(grant ? { mode: grant.mode, grantId: grant.id } : {}),
+    mode: result.mode,
+    ...(grant ? { grantId: grant.id } : {}),
   });
   const epoch = generation;
   return serial(async () => {
     if (!initialized || epoch !== generation) return;
     audit = pruneAudit([...audit, event]);
     await persist(grants, audit);
+  });
+}
+
+/** Default bans are editable settings and use the same evaluator as custom rules. */
+export function updateDefaultSiteRule(
+  id: string,
+  enabled: boolean,
+  mode: SiteGrant['mode'],
+): Promise<void> {
+  siteModeSchema.parse(mode);
+  z.boolean().parse(enabled);
+  if (!initialized || !binding)
+    return Promise.reject(
+      Object.assign(new Error('SITE_ACCESS_NOT_READY'), { code: 'SITE_ACCESS_NOT_READY' }),
+    );
+  if (!defaults.some((rule) => rule.id === id))
+    return Promise.reject(
+      Object.assign(new Error('SITE_RULE_NOT_FOUND'), { code: 'SITE_RULE_NOT_FOUND' }),
+    );
+  revision++;
+  generation++;
+  const epoch = generation;
+  // Restrictive changes are immediate; broadening takes effect only after save.
+  const next = defaults.map((rule) => (rule.id === id ? { ...rule, enabled, mode } : rule));
+  const previous = defaults.find((rule) => rule.id === id)!;
+  const rank = { interactive: 0, 'read-only': 1, denied: 2 };
+  if (enabled && (!previous.enabled || rank[mode] > rank[previous.mode])) defaults = next;
+  return serial(async () => {
+    await persist(grants, pruneAudit(), next);
+    if (epoch !== generation) {
+      await persist(grants, pruneAudit());
+      fail('SITE_ACCESS_CHANGED');
+    }
+    defaults = next;
   });
 }

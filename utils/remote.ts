@@ -178,11 +178,20 @@ export const remoteRequestSchema = z.discriminatedUnion('type', [
     .object({
       type: z.literal('remote-site-access-grant'),
       origin: z.string().max(2048),
-      mode: z.enum(['read-only', 'interactive']),
+      mode: z.enum(['denied', 'read-only', 'interactive']),
+      matchType: z.enum(['origin', 'domain', 'domain-regex']).optional(),
       durationMinutes: z.number().int().min(5).max(1440),
     })
     .strict(),
   z.object({ type: z.literal('remote-site-access-revoke'), id: z.string().uuid() }).strict(),
+  z
+    .object({
+      type: z.literal('remote-site-access-default'),
+      id: z.string().min(1).max(100),
+      enabled: z.boolean(),
+      mode: z.enum(['denied', 'read-only', 'interactive']),
+    })
+    .strict(),
   z.object({ type: z.literal('remote-agent-start-set-enabled'), enabled: z.boolean() }).strict(),
   z
     .object({

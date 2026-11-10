@@ -43,7 +43,7 @@ const submit = () =>
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
-  state = { ...initialRemoteState, siteAccess: { grants: [], audit: [] } };
+  state = { ...initialRemoteState, siteAccess: { grants: [], audit: [], defaults: [] } };
   pending = false;
   change = vi.fn();
   container = document.createElement('div');
@@ -68,6 +68,7 @@ it('requires an explicit site and defaults to read-only access for fifteen minut
   expect(change).toHaveBeenCalledExactlyOnceWith({
     type: 'remote-site-access-grant',
     origin: 'https://example.com',
+    matchType: 'origin',
     mode: 'read-only',
     durationMinutes: 15,
   });
@@ -87,6 +88,7 @@ it('makes action permission and duration explicit in the grant request', async (
   expect(change).toHaveBeenCalledExactlyOnceWith({
     type: 'remote-site-access-grant',
     origin: 'https://example.com:8443',
+    matchType: 'origin',
     mode: 'interactive',
     durationMinutes: 60,
   });
@@ -164,4 +166,89 @@ it('shows recent audit events newest first and disables mutation while pending',
   expect(container.querySelector<HTMLInputElement>('#site-access-origin')!.disabled).toBe(true);
   await submit();
   expect(change).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['domain', '*.example.com', 'siteAccessDomainHint'],
+  ['domain-regex', '^.*\\.example\\.com$', 'siteAccessRegexHint'],
+])(
+  'sends explicit %s matching and deny mode without interpreting the pattern in the panel',
+  async (matchType, pattern, hint) => {
+    await render();
+    await setValue('#site-access-match-type', matchType);
+    await setValue('#site-access-origin', pattern);
+    await setValue('#site-access-mode', 'denied');
+    await submit();
+    expect(change).toHaveBeenCalledExactlyOnceWith({
+      type: 'remote-site-access-grant',
+      origin: pattern,
+      matchType,
+      mode: 'denied',
+      durationMinutes: 15,
+    });
+    expect(container.textContent).toContain(hint);
+    expect(container.textContent).toContain('siteAccessBlockedHint');
+    expect(container.querySelector<HTMLInputElement>('#site-access-origin')!.type).toBe('text');
+  },
+);
+
+it('keeps default rules collapsed and sends explicit enabled and mode changes', async () => {
+  state.siteAccess!.defaults = [
+    {
+      id: 'billing',
+      label: 'Billing and checkout',
+      kind: 'url-regex',
+      pattern: '/billing',
+      enabled: true,
+      mode: 'denied',
+    },
+  ];
+  await render();
+  const list = container.querySelector<HTMLDetailsElement>('.site-access-defaults')!;
+  expect(list.open).toBe(false);
+  await act(async () => list.querySelector('summary')!.click());
+  expect(list.open).toBe(true);
+  expect(list.textContent).toContain('siteDefaultBilling');
+  const checkbox = list.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+  await act(async () => checkbox.click());
+  expect(change).toHaveBeenLastCalledWith({
+    type: 'remote-site-access-default',
+    id: 'billing',
+    enabled: false,
+    mode: 'denied',
+  });
+  state.siteAccess!.defaults[0]!.enabled = false;
+  await render();
+  expect(checkbox.checked).toBe(false);
+  await setValue('.site-access-default select', 'read-only');
+  expect(change).toHaveBeenLastCalledWith({
+    type: 'remote-site-access-default',
+    id: 'billing',
+    enabled: false,
+    mode: 'read-only',
+  });
+  state.siteAccess!.defaults[0]!.mode = 'read-only';
+  await render();
+  expect(list.querySelector<HTMLSelectElement>('select')!.value).toBe('read-only');
+});
+
+it('disables default-rule controls while a mutation is pending', async () => {
+  state.siteAccess!.defaults = [
+    {
+      id: 'billing',
+      label: 'Billing and checkout',
+      kind: 'url-regex',
+      pattern: '/billing',
+      enabled: true,
+      mode: 'denied',
+    },
+  ];
+  pending = true;
+  await render();
+  expect(container.querySelector<HTMLInputElement>('.site-access-default input')!.disabled).toBe(
+    true,
+  );
+  expect(container.querySelector<HTMLSelectElement>('.site-access-default select')!.disabled).toBe(
+    true,
+  );
 });

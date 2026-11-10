@@ -54,6 +54,7 @@ import {
   grantSiteAccess,
   revokeSiteAccess,
   clearSiteAccess,
+  updateDefaultSiteRule,
 } from '../../utils/site-access';
 // Extension-owned conversations: request Agent decisions, execute locally, and
 // return observations over the authenticated Remote connection.
@@ -1601,7 +1602,7 @@ export function startRemoteBackground() {
           // Stop an in-flight operation before a permission is downgraded.
           idem.cancel();
           await release(true, false, 'consent_changed');
-          await grantSiteAccess(m.origin, m.mode, m.durationMinutes);
+          await grantSiteAccess(m.origin, m.mode, m.durationMinutes, m.matchType ?? 'origin');
           clearPageContexts();
           publish();
           return snapshot();
@@ -1614,6 +1615,19 @@ export function startRemoteBackground() {
           try {
             await release(true, false, 'consent_changed');
             await revoked;
+          } finally {
+            publish();
+          }
+          return snapshot();
+        }
+        case 'remote-site-access-default': {
+          const updated = updateDefaultSiteRule(m.id, m.enabled, m.mode);
+          void updated.catch(() => {});
+          idem.cancel();
+          clearPageContexts();
+          try {
+            await release(true, false, 'consent_changed');
+            await updated;
           } finally {
             publish();
           }
@@ -1854,6 +1868,7 @@ export function startRemoteBackground() {
     const mutatesConsent = [
       'remote-site-access-grant',
       'remote-site-access-revoke',
+      'remote-site-access-default',
       'remote-agent-start-set-enabled',
       'remote-compatibility-set-enabled',
       'remote-save',

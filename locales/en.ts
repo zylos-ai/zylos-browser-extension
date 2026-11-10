@@ -2,9 +2,42 @@ import type zh from './zh-CN';
 
 export default {
   siteAccess: 'Site permissions',
-  siteAccessAdd: 'Add site permission',
+  siteAccessAdd: 'Add access rule',
   siteAccessScope:
-    'Restricted pages remain blocked unless you grant access. Each permission covers one exact site, including its scheme and port; it excludes subdomains.',
+    'The newest matching custom rule takes priority. Otherwise, enabled default rules apply; the most restrictive matching default wins.',
+  siteAccessMatchType: 'Match by',
+  siteAccessExactOrigin: 'Exact site',
+  siteAccessDomain: 'Domain or wildcard',
+  siteAccessDomainRegex: 'Domain regex (limited)',
+  siteAccessPattern: 'Domain pattern',
+  siteAccessOriginHint:
+    'Includes scheme and port. Covers every path at this origin, but not subdomains.',
+  siteAccessDomainHint:
+    'Matches HTTP and HTTPS on all ports. *.example.com matches subdomains, not example.com itself.',
+  siteAccessRegexHint:
+    'Matches the whole hostname, not the URL path. Use ^ and $; groups, lookarounds and backreferences are not supported.',
+  siteAccessBlocked: 'Deny access',
+  siteAccessBlockedHint:
+    'Blocks reading and actions on every matching page while this rule is active.',
+  siteAccessDefaults: 'Default access rules',
+  siteAccessPatternDetails: 'Match expression',
+  siteAccessDefaultsHint:
+    'Billing and other restricted pages are denied by these default rules. Disable a rule or change its access here; custom rules override defaults.',
+  siteAccessDefaultMode: 'Access for {rule}',
+  siteDefaultBilling: 'Billing and checkout',
+  siteDefaultPaymentProviders: 'Payment providers',
+  siteDefaultBanking: 'Banking URLs',
+  siteDefaultAccountSecurity: 'Account security',
+  siteDefaultAccountAccess: 'Account access management',
+  siteDefaultPasswordReset: 'Password reset',
+  siteDefaultSecuritySettings: 'Security and privacy settings',
+  siteDefaultCredentials: 'API keys and credentials',
+  siteDefaultAccountRemoval: 'Account removal',
+  siteDefaultBanks: 'Bank domains',
+  siteDefaultFinancialServices: 'Financial service domains',
+  siteDefaultRegionalFinance: 'Regional finance domains',
+  siteDefaultCustodialServices: 'Custodial service domains',
+  siteDefaultExactFinance: 'Other financial domains',
   siteAccessOrigin: 'Site address',
   siteAccessMode: 'Access',
   siteAccessReadOnly: 'Read only',
@@ -17,9 +50,9 @@ export default {
     'Allows opening, reading, screenshots and scrolling. Clicks, typing and submissions are blocked throughout this site.',
   siteAccessInteractiveHint:
     'Allows reading and actions on this site, including sensitive pages. Password and verification-code protections still apply.',
-  siteAccessGrant: 'Grant site access',
-  siteAccessGrants: 'Granted sites',
-  siteAccessEmpty: 'No site permissions granted.',
+  siteAccessGrant: 'Add rule',
+  siteAccessGrants: 'Custom rules',
+  siteAccessEmpty: 'No custom access rules.',
   siteAccessExpires: 'Expires',
   siteAccessExpired: 'Expired',
   siteAccessRevoke: 'Revoke',

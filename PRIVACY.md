@@ -32,11 +32,18 @@ The extension does not include a mechanism that sells user data or sends it to a
 
 ## Storage, retention, and deletion
 
-**Site permissions.** Restricted pages remain blocked unless you grant an exact
-HTTP(S) origin access in extension Settings. Grants include mode, creation time
+**Site permissions.** Settings manages one configurable access-rule system.
+Former billing, financial and security blocks are default-deny rules that you can
+disable or change to read-only/interactive; they are not a second immutable gate.
+Custom rules match exact HTTP(S) origins, domains, subdomain wildcards or a bounded
+hostname-only regex subset. Domain matches span HTTP(S) schemes and ports;
+exact origins retain scheme/port isolation. Newest matching custom rules override
+older/default rules; matching defaults use the most restrictive mode. No matching
+rule retains normal page behavior. Custom rules include mode, creation time
 and expiry (at most 24 hours), persist locally across worker restarts, and are
 bound to your configured Relay/Key recipient. Changing that recipient clears
-the grants and their access history. You can revoke any grant in the panel.
+the custom rules and history and restores default settings. You can revoke custom
+rules or edit default modes/enabled state in the panel.
 Read-only access permits page reads, screenshots and scrolling but denies clicks,
 typing and submissions; interactive access permits actions, while password/OTP
 field protections remain. Authorized page content can reach your Relay and Agent

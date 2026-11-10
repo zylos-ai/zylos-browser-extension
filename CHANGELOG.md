@@ -4,9 +4,12 @@
 
 ### Added
 
-- Owner-managed exact-site permissions in Settings, with read-only or interactive
+- Owner-managed site rules in Settings, with denied, read-only or interactive
   access, 15-minute/one-hour/24-hour expiry and immediate revoke controls.
-  Restricted pages remain denied without an active grant. Grants are bound to
+  Former billing/security blocks become editable default-deny settings, with no
+  separate hardcoded runtime block. Custom exact-origin, domain, subdomain
+  wildcard and bounded domain-regex rules override defaults newest-first.
+  Multiple matching defaults use the most restrictive mode. Rules are bound to
   the configured connection and are cleared when its recipient changes.
 - Origin-only local permission/access history (up to 200 events for seven days).
   Read-only grants permit navigation, page reading, screenshots and scrolling,

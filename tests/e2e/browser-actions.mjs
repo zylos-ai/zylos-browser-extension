@@ -579,6 +579,22 @@ try {
           );
         }
         await previewPanel("document.querySelector('.site-access-add summary').click()");
+        await previewPanel("document.querySelector('.site-access-defaults summary').click()");
+        const defaultLayout = await previewPanel(`(() => {
+          const section = document.querySelector('.site-access-defaults');
+          return {overflow:section.scrollWidth > section.clientWidth,
+            count:section.querySelectorAll('.site-access-default').length};
+        })()`);
+        assert.equal(defaultLayout.overflow, false);
+        assert.equal(defaultLayout.count, 14);
+        if (process.env.E2E_SCREENSHOT_DIR) {
+          const defaults = await cdp('Page.captureScreenshot', { format: 'png' }, sessionId);
+          await fs.writeFile(
+            path.join(process.env.E2E_SCREENSHOT_DIR, `site-access-defaults-${width}.png`),
+            Buffer.from(defaults.data, 'base64'),
+          );
+        }
+        await previewPanel("document.querySelector('.site-access-defaults summary').click()");
       }
       await cdp('Emulation.clearDeviceMetricsOverride', {}, sessionId);
       await previewPanel("document.querySelector('.settings-button').click()");
@@ -672,6 +688,76 @@ try {
       assert.equal((await action('open', { url: billing })).failed, true);
       await decision(request, { kind: 'done', text: 'Revocation verified' });
       await eventually(async () => !(await panelState()).chatBusy);
+      const defaultBilling = (await panelState()).siteAccess.defaults.find(
+        (rule) => rule.kind === 'url-regex' && rule.pattern.includes('billing'),
+      );
+      assert.ok(defaultBilling);
+      const setDefault = async (enabled, mode) => {
+        const result = await previewPanel(
+          `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-site-access-default', id: defaultBilling.id, enabled, mode })})`,
+        );
+        assert.equal(result.ok, true, JSON.stringify(result));
+      };
+      await setDefault(false, 'denied');
+      request = await askLoop('Site rules: disabled default permits billing', tab);
+      assert.ok(request.request.context.pages[0].contextId);
+      assert.equal(
+        (await action('use-current-tab', { contextId: request.request.context.pages[0].contextId }))
+          .failed,
+        false,
+      );
+      found = await action('find', { selector: '#input' });
+      assert.equal(
+        (
+          await action('fill', {
+            ref: found.observation.page.matches[0].ref,
+            text: 'No hidden billing ban',
+          })
+        ).failed,
+        false,
+      );
+      await decision(request, { kind: 'done', text: 'Configurable default verified' });
+      await eventually(async () => !(await panelState()).chatBusy);
+      await setDefault(true, 'read-only');
+      request = await askLoop('Site rules: readonly default', tab);
+      assert.ok(request.request.context.pages[0].contextId);
+      assert.equal(
+        (await action('use-current-tab', { contextId: request.request.context.pages[0].contextId }))
+          .failed,
+        false,
+      );
+      const defaultDenied = await action('click', { x: 100, y: 100 });
+      assert.ok(defaultDenied.results.some((result) => result.error?.code === 'SITE_READ_ONLY'));
+      await decision(request, { kind: 'done', text: 'Readonly default verified' });
+      await eventually(async () => !(await panelState()).chatBusy);
+      await setDefault(true, 'denied');
+      const hostname = new URL(url).hostname;
+      const regex = '^' + hostname.replace(/\./g, '\\.') + '$';
+      const addRule = async (pattern, matchType, mode) => {
+        const response = await previewPanel(
+          `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-site-access-grant', origin: pattern, matchType, mode, durationMinutes: 15 })})`,
+        );
+        assert.equal(response.ok, true, JSON.stringify(response));
+      };
+      await addRule(regex, 'domain-regex', 'read-only');
+      request = await askLoop('Site rules: hostname regex billing', tab);
+      assert.ok(request.request.context.pages[0].contextId);
+      await decision(request, { kind: 'done', text: 'Regex rule verified' });
+      await eventually(async () => !(await panelState()).chatBusy);
+      await addRule(hostname, 'domain', 'denied');
+      request = await askLoop('Site rules: newest domain denies', tab);
+      assert.equal(request.request.context.pages[0].contextId, undefined);
+      await decision(request, { kind: 'done', text: 'Newest matching deny verified' });
+      await eventually(async () => !(await panelState()).chatBusy);
+      for (const rule of (await panelState()).siteAccess.grants)
+        assert.equal(
+          (
+            await previewPanel(
+              `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-site-access-revoke', id: rule.id })})`,
+            )
+          ).ok,
+          true,
+        );
       await previewPanel(`chrome.tabs.remove(${tab.id})`);
       await workerEval('globalThis.debuggerCalls = []');
     },

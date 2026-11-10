@@ -255,4 +255,81 @@ describe('owner-managed site access', () => {
       'SITE_READ_ONLY',
     );
   });
+
+  it('disables or changes a default through configuration without a hardcoded deny fallback', async () => {
+    const p = await ready();
+    expect(p.siteAccessState().defaults.find((rule) => rule.id === 'billing')!.mode).toBe('denied');
+    await p.updateDefaultSiteRule('billing', false, 'denied');
+    expect(p.isSiteUrlBlocked('https://example.com/billing')).toBe(false);
+    expect(() => p.assertSiteAction('https://example.com/billing', 'click')).not.toThrow();
+    await p.updateDefaultSiteRule('billing', true, 'read-only');
+    expect(p.isSiteUrlBlocked('https://example.com/billing')).toBe(false);
+    expect(() => p.assertSiteAction('https://example.com/billing', 'read-page')).not.toThrow();
+    expect(() => p.assertSiteAction('https://example.com/billing', 'click')).toThrow(
+      'SITE_READ_ONLY',
+    );
+    await p.initializeSiteAccess('recipient-a');
+    expect(() => p.assertSiteAction('https://example.com/billing', 'click')).toThrow(
+      'SITE_READ_ONLY',
+    );
+    await p.clearSiteAccess();
+    expect(p.isSiteUrlBlocked('https://example.com/billing')).toBe(true);
+  });
+
+  it('migrates older saved grants to exact-origin rules and initial default configuration', async () => {
+    const p = await ready();
+    await p.grantSiteAccess('https://example.com', 'interactive', 60);
+    const data = saved[p.SITE_ACCESS_KEY] as { defaults?: unknown };
+    delete data.defaults;
+    await p.initializeSiteAccess('recipient-a');
+    expect(p.isSiteUrlBlocked('https://example.com/billing')).toBe(false);
+    expect(p.siteAccessState().grants[0]!.matchType).toBeUndefined();
+    expect(
+      p.siteAccessState().defaults.every((rule) => rule.enabled && rule.mode === 'denied'),
+    ).toBe(true);
+    expect(p.isSiteUrlBlocked('https://other.test/billing')).toBe(true);
+  });
+
+  it('uses the latest matching custom domain rule ahead of the configured defaults', async () => {
+    const p = await ready();
+    await p.grantSiteAccess('*.example.com', 'read-only', 60, 'domain');
+    expect(p.isSiteUrlBlocked('https://api.example.com/billing')).toBe(false);
+    expect(() => p.assertSiteAction('http://api.example.com:8080/article', 'click')).toThrow(
+      'SITE_READ_ONLY',
+    );
+    expect(p.isSiteUrlBlocked('https://example.com/billing')).toBe(true);
+    await p.grantSiteAccess('^api\\.example\\.com$', 'denied', 60, 'domain-regex');
+    expect(p.isSiteUrlBlocked('https://api.example.com/article')).toBe(true);
+    expect(p.isSiteUrlBlocked('https://other.example.com/billing')).toBe(false);
+    await p.grantSiteAccess('https://api.example.com', 'interactive', 60);
+    expect(() => p.assertSiteAction('https://api.example.com/billing', 'click')).not.toThrow();
+    expect(() => p.assertSiteAction('http://api.example.com/billing', 'click')).toThrow(
+      'BLOCKED_URL',
+    );
+  });
+
+  it('records actual matched origins rather than a domain regex or URL secret', async () => {
+    const p = await ready();
+    await p.grantSiteAccess('*.example.com', 'denied', 5, 'domain');
+    await p.recordSiteAccess('https://a.example.com/billing?token=secret', 'read-page', false);
+    expect(p.siteAccessState().audit).toMatchObject([
+      { origin: 'https://a.example.com', mode: 'denied', allowed: false },
+    ]);
+    expect(JSON.stringify(p.siteAccessState().audit)).not.toMatch(/secret|token|\*|billing/);
+  });
+
+  it('applies restrictive default edits immediately even if persistence fails', async () => {
+    const p = await ready();
+    await p.updateDefaultSiteRule('billing', false, 'denied');
+    set.mockRejectedValueOnce(new Error('disk unavailable'));
+    const changing = p.updateDefaultSiteRule('billing', true, 'denied');
+    expect(p.isSiteUrlBlocked('https://example.com/billing')).toBe(true);
+    await expect(changing).rejects.toThrow('disk unavailable');
+    expect(p.isSiteUrlBlocked('https://example.com/billing')).toBe(true);
+    set.mockRejectedValueOnce(new Error('disk unavailable'));
+    await expect(p.updateDefaultSiteRule('billing', false, 'denied')).rejects.toThrow(
+      'disk unavailable',
+    );
+    expect(p.isSiteUrlBlocked('https://example.com/billing')).toBe(true);
+  });
 });
