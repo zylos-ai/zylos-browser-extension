@@ -1,5 +1,6 @@
 export default {
   siteAccess: '站点权限',
+  siteAccessAdd: '添加站点授权',
   siteAccessScope:
     '受限页面默认拦截，授权后才可访问。每项授权仅覆盖一个站点，包含协议和端口，不包含子域名。',
   siteAccessOrigin: '站点地址',

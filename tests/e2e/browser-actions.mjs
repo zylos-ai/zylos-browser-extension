@@ -518,6 +518,9 @@ try {
       await eventually(async () => !(await panelState()).chatBusy);
       await previewPanel("document.querySelector('.settings-button').click()");
       await eventually(() => previewPanel("!!document.querySelector('#site-access-origin')"));
+      assert.equal(await previewPanel("document.querySelector('.site-access-add').open"), false);
+      await previewPanel("document.querySelector('.site-access-add summary').click()");
+      assert.equal(await previewPanel("document.querySelector('.site-access-add').open"), true);
       await cdp(
         'Runtime.evaluate',
         { expression: "document.querySelector('#site-access-origin').focus()" },
@@ -530,6 +533,8 @@ try {
       assert.equal(grant.origin, origin);
       assert.equal(grant.mode, 'read-only');
       assert.equal(await previewPanel("document.querySelector('.site-access-list').open"), false);
+      await previewPanel("document.querySelector('.site-access-add summary').click()");
+      assert.equal(await previewPanel("document.querySelector('.site-access-add').open"), false);
       for (const width of [320, 500]) {
         await cdp(
           'Emulation.setDeviceMetricsOverride',
@@ -565,6 +570,15 @@ try {
         }
         await previewPanel("document.querySelector('.site-access-list summary').click()");
         assert.equal(await previewPanel("document.querySelector('.site-access-list').open"), false);
+        await previewPanel("document.querySelector('.site-access-add summary').click()");
+        if (process.env.E2E_SCREENSHOT_DIR) {
+          const form = await cdp('Page.captureScreenshot', { format: 'png' }, sessionId);
+          await fs.writeFile(
+            path.join(process.env.E2E_SCREENSHOT_DIR, `site-access-form-${width}.png`),
+            Buffer.from(form.data, 'base64'),
+          );
+        }
+        await previewPanel("document.querySelector('.site-access-add summary').click()");
       }
       await cdp('Emulation.clearDeviceMetricsOverride', {}, sessionId);
       await previewPanel("document.querySelector('.settings-button').click()");

@@ -2,6 +2,7 @@ import type zh from './zh-CN';
 
 export default {
   siteAccess: 'Site permissions',
+  siteAccessAdd: 'Add site permission',
   siteAccessScope:
     'Restricted pages remain blocked unless you grant access. Each permission covers one exact site, including its scheme and port; it excludes subdomains.',
   siteAccessOrigin: 'Site address',

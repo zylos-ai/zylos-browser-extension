@@ -6,8 +6,11 @@
 .site-access-settings .settings-form {
   gap: 12px;
 }
-.site-access-settings > div > .settings-hint {
-  margin-top: 4px;
+.site-access-add-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 10px;
 }
 .site-access-options {
   display: grid;
@@ -47,7 +50,8 @@
   padding-inline: 10px;
 }
 .site-access-history summary,
-.site-access-list summary {
+.site-access-list summary,
+.site-access-add summary {
   cursor: pointer;
   font-size: var(--text-label);
   min-height: 24px;

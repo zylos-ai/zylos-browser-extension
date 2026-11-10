@@ -21,6 +21,8 @@ const render = () =>
   });
 async function setValue(selector: string, value: string) {
   await act(async () => {
+    const form = container.querySelector<HTMLDetailsElement>('.site-access-add')!;
+    if (!form.open) form.querySelector('summary')!.click();
     const element = container.querySelector<HTMLInputElement | HTMLSelectElement>(selector)!;
     const prototype =
       element instanceof HTMLInputElement
@@ -57,6 +59,7 @@ afterEach(async () => {
 
 it('requires an explicit site and defaults to read-only access for fifteen minutes', async () => {
   await render();
+  expect(container.querySelector<HTMLDetailsElement>('.site-access-add')!.open).toBe(false);
   expect(container.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(true);
   await submit();
   expect(change).not.toHaveBeenCalled();
@@ -69,6 +72,10 @@ it('requires an explicit site and defaults to read-only access for fifteen minut
     durationMinutes: 15,
   });
   expect(container.textContent).toContain('siteAccessReadOnlyHint');
+  const form = container.querySelector<HTMLDetailsElement>('.site-access-add')!;
+  expect(form.open).toBe(true);
+  await act(async () => form.querySelector('summary')!.click());
+  expect(form.open).toBe(false);
 });
 
 it('makes action permission and duration explicit in the grant request', async () => {

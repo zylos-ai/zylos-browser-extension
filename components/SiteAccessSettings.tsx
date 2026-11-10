@@ -30,79 +30,82 @@ export function SiteAccessSettings({
       className="settings-section site-access-settings"
       aria-labelledby="site-access-heading"
     >
-      <div>
-        <h2 id="site-access-heading">{t('siteAccess')}</h2>
-        <p className="settings-hint">{t('siteAccessScope')}</p>
-      </div>
-      <form
-        className="settings-form"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (disabled || !origin.trim()) return;
-          onChange?.({
-            type: 'remote-site-access-grant',
-            origin: origin.trim(),
-            mode,
-            durationMinutes: duration,
-          });
-        }}
-      >
-        <label className="form-field" htmlFor="site-access-origin">
-          <span>{t('siteAccessOrigin')}</span>
-          <input
-            id="site-access-origin"
-            className="input"
-            type="url"
-            value={origin}
-            onChange={(event) => setOrigin(event.target.value)}
-            placeholder="https://example.com"
-            autoComplete="off"
-            spellCheck={false}
-            required
-            disabled={disabled}
-          />
-        </label>
-        <div className="site-access-options">
-          <label className="form-field" htmlFor="site-access-mode">
-            <span>{t('siteAccessMode')}</span>
-            <select
-              id="site-access-mode"
-              className="select"
-              value={mode}
-              disabled={disabled}
-              aria-describedby="site-access-consequence"
-              onChange={(event) => setMode(event.target.value as typeof mode)}
+      <h2 id="site-access-heading">{t('siteAccess')}</h2>
+      <details className="site-access-add">
+        <summary>{t('siteAccessAdd')}</summary>
+        <div className="site-access-add-body">
+          <p className="settings-hint">{t('siteAccessScope')}</p>
+          <form
+            className="settings-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (disabled || !origin.trim()) return;
+              onChange?.({
+                type: 'remote-site-access-grant',
+                origin: origin.trim(),
+                mode,
+                durationMinutes: duration,
+              });
+            }}
+          >
+            <label className="form-field" htmlFor="site-access-origin">
+              <span>{t('siteAccessOrigin')}</span>
+              <input
+                id="site-access-origin"
+                className="input"
+                type="url"
+                value={origin}
+                onChange={(event) => setOrigin(event.target.value)}
+                placeholder="https://example.com"
+                autoComplete="off"
+                spellCheck={false}
+                required
+                disabled={disabled}
+              />
+            </label>
+            <div className="site-access-options">
+              <label className="form-field" htmlFor="site-access-mode">
+                <span>{t('siteAccessMode')}</span>
+                <select
+                  id="site-access-mode"
+                  className="select"
+                  value={mode}
+                  disabled={disabled}
+                  aria-describedby="site-access-consequence"
+                  onChange={(event) => setMode(event.target.value as typeof mode)}
+                >
+                  <option value="read-only">{t('siteAccessReadOnly')}</option>
+                  <option value="interactive">{t('siteAccessInteractive')}</option>
+                </select>
+              </label>
+              <label className="form-field" htmlFor="site-access-duration">
+                <span>{t('siteAccessDuration')}</span>
+                <select
+                  id="site-access-duration"
+                  className="select"
+                  value={duration}
+                  disabled={disabled}
+                  onChange={(event) => setDuration(Number(event.target.value))}
+                >
+                  <option value={15}>{t('siteAccess15Minutes')}</option>
+                  <option value={60}>{t('siteAccess1Hour')}</option>
+                  <option value={1440}>{t('siteAccess24Hours')}</option>
+                </select>
+              </label>
+            </div>
+            <p id="site-access-consequence" className="settings-hint">
+              {t(mode === 'read-only' ? 'siteAccessReadOnlyHint' : 'siteAccessInteractiveHint')}
+            </p>
+            <button
+              className="btn btn-primary save-button"
+              type="submit"
+              disabled={disabled || !origin.trim()}
             >
-              <option value="read-only">{t('siteAccessReadOnly')}</option>
-              <option value="interactive">{t('siteAccessInteractive')}</option>
-            </select>
-          </label>
-          <label className="form-field" htmlFor="site-access-duration">
-            <span>{t('siteAccessDuration')}</span>
-            <select
-              id="site-access-duration"
-              className="select"
-              value={duration}
-              disabled={disabled}
-              onChange={(event) => setDuration(Number(event.target.value))}
-            >
-              <option value={15}>{t('siteAccess15Minutes')}</option>
-              <option value={60}>{t('siteAccess1Hour')}</option>
-              <option value={1440}>{t('siteAccess24Hours')}</option>
-            </select>
-          </label>
+              {t('siteAccessGrant')}
+            </button>
+          </form>
         </div>
-        <p id="site-access-consequence" className="settings-hint">
-          {t(mode === 'read-only' ? 'siteAccessReadOnlyHint' : 'siteAccessInteractiveHint')}
-        </p>
-        <button
-          className="btn btn-primary save-button"
-          type="submit"
-          disabled={disabled || !origin.trim()}
-        >
-          {t('siteAccessGrant')}
-        </button>
-      </form>
+      </details>
       <details className="site-access-list">
         <summary>
           {t('siteAccessGrants')} <span className="site-access-count">({grants.length})</span>
