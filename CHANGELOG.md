@@ -5,7 +5,7 @@
 ### Added
 
 - Owner-managed site rules in Settings, with denied, read-only or interactive
-  access, 15-minute/one-hour/24-hour expiry and immediate revoke controls.
+  access, one-day/seven-day/30-day or permanent duration and immediate revoke controls.
   Former billing/security blocks become editable default-deny settings, with no
   separate hardcoded runtime block. Custom exact-origin, domain, subdomain
   wildcard and bounded domain-regex rules override defaults newest-first.

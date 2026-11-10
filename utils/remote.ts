@@ -14,7 +14,7 @@ import { storedAttachmentsSchema, selectionAttachment, imagePreviewsSchema } fro
 import { userMessageSchema } from './agent-message';
 import { taskNoticeSchema } from './task-notice';
 import { panelDiagnosticSchema } from './diagnostics-schema';
-import { siteAccessStateSchema } from './site-access';
+import { siteAccessStateSchema, siteDurationSchema } from './site-access';
 
 export const REMOTE_SUBPROTOCOL = 'zylos-browser-remote.v3';
 export const REMOTE_KEY_PROTO_PREFIX = 'key.';
@@ -180,7 +180,7 @@ export const remoteRequestSchema = z.discriminatedUnion('type', [
       origin: z.string().max(2048),
       mode: z.enum(['denied', 'read-only', 'interactive']),
       matchType: z.enum(['origin', 'domain', 'domain-regex']).optional(),
-      durationMinutes: z.number().int().min(5).max(1440),
+      durationMinutes: siteDurationSchema,
     })
     .strict(),
   z.object({ type: z.literal('remote-site-access-revoke'), id: z.string().uuid() }).strict(),

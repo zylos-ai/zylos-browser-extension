@@ -34,7 +34,7 @@ export function SiteAccessSettings({
   const [origin, setOrigin] = useState('');
   const [matchType, setMatchType] = useState<'origin' | 'domain' | 'domain-regex'>('origin');
   const [mode, setMode] = useState<'denied' | 'read-only' | 'interactive'>('read-only');
-  const [duration, setDuration] = useState(15);
+  const [duration, setDuration] = useState('1');
   const [now, setNow] = useState(Date.now);
   const grants = state.siteAccess?.grants ?? [];
   const audit = state.siteAccess?.audit ?? [];
@@ -90,7 +90,7 @@ export function SiteAccessSettings({
                 origin: origin.trim(),
                 matchType,
                 mode,
-                durationMinutes: duration,
+                durationMinutes: duration === 'permanent' ? null : Number(duration) * 24 * 60,
               });
             }}
           >
@@ -163,11 +163,12 @@ export function SiteAccessSettings({
                   className="select"
                   value={duration}
                   disabled={disabled}
-                  onChange={(event) => setDuration(Number(event.target.value))}
+                  onChange={(event) => setDuration(event.target.value)}
                 >
-                  <option value={15}>{t('siteAccess15Minutes')}</option>
-                  <option value={60}>{t('siteAccess1Hour')}</option>
-                  <option value={1440}>{t('siteAccess24Hours')}</option>
+                  <option value="1">{t('siteAccess1Day')}</option>
+                  <option value="7">{t('siteAccess7Days')}</option>
+                  <option value="30">{t('siteAccess30Days')}</option>
+                  <option value="permanent">{t('siteAccessPermanent')}</option>
                 </select>
               </label>
             </div>
@@ -205,10 +206,16 @@ export function SiteAccessSettings({
                   {' · '}
                   {t(modeKey(grant.mode))}
                   {' · '}
-                  {grant.expiresAt <= now ? t('siteAccessExpired') : t('siteAccessExpires')}{' '}
-                  <time dateTime={new Date(grant.expiresAt).toISOString()}>
-                    {time(grant.expiresAt)}
-                  </time>
+                  {grant.expiresAt === null ? (
+                    t('siteAccessPermanent')
+                  ) : (
+                    <>
+                      {grant.expiresAt <= now ? t('siteAccessExpired') : t('siteAccessExpires')}{' '}
+                      <time dateTime={new Date(grant.expiresAt).toISOString()}>
+                        {time(grant.expiresAt)}
+                      </time>
+                    </>
+                  )}
                 </p>
               </div>
               <button

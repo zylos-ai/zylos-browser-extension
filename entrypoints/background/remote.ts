@@ -386,9 +386,9 @@ export function startRemoteBackground() {
   function snapshot(): RemoteState {
     state.siteAccess = siteAccessState();
     const nextExpiry = Math.min(
-      ...state.siteAccess.grants
-        .filter((grant) => grant.expiresAt > Date.now())
-        .map((grant) => grant.expiresAt),
+      ...state.siteAccess.grants.flatMap((grant) =>
+        grant.expiresAt !== null && grant.expiresAt > Date.now() ? [grant.expiresAt] : [],
+      ),
     );
     if (nextExpiry !== siteExpiry) {
       clearTimeout(siteExpiryTimer);
@@ -397,6 +397,11 @@ export function startRemoteBackground() {
         siteExpiryTimer = setTimeout(
           () => {
             siteExpiry = 0;
+            // Long grants exceed the browser timer limit; re-arm without revoking early.
+            if (Date.now() < nextExpiry) {
+              publish();
+              return;
+            }
             idem.cancel();
             clearPageContexts();
             void release(true, false, 'consent_changed')
@@ -405,7 +410,7 @@ export function startRemoteBackground() {
               )
               .finally(publish);
           },
-          Math.max(0, nextExpiry - Date.now()),
+          Math.min(2_147_483_647, Math.max(0, nextExpiry - Date.now())),
         );
     }
     state.agentStartEnabled = agentStartEnabled;

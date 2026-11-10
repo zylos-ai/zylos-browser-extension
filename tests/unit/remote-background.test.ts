@@ -234,6 +234,45 @@ const respond = async (
 };
 
 describe('decision transport background', () => {
+  it('re-arms a thirty-day rule without early release and never schedules permanent expiry', async () => {
+    await bootConnected();
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    const start = Date.now();
+    const long = await ask({
+      type: 'remote-site-access-grant',
+      origin: 'https://example.com',
+      mode: 'interactive',
+      durationMinutes: 43200,
+    });
+    expect(long.ok).toBe(true);
+    const early = timers.mock.calls.find(([, delay]) => delay === 2_147_483_647)!;
+    expect(early).toBeDefined();
+    const releases = executor.release.mock.calls.length;
+    vi.setSystemTime(start + 2_147_483_647);
+    (early[0] as () => void)();
+    await flush();
+    expect(executor.release).toHaveBeenCalledTimes(releases);
+    const remainder = 30 * 86400_000 - 2_147_483_647;
+    const final = timers.mock.calls.find(([, delay]) => delay === remainder)!;
+    expect(final).toBeDefined();
+    vi.setSystemTime(start + 30 * 86400_000);
+    (final[0] as () => void)();
+    await flush();
+    expect(executor.release.mock.calls.length).toBeGreaterThan(releases);
+    timers.mockClear();
+    const permanent = await ask({
+      type: 'remote-site-access-grant',
+      origin: 'https://example.com',
+      mode: 'read-only',
+      durationMinutes: null,
+    });
+    expect(permanent.ok).toBe(true);
+    expect((permanent.value!.siteAccess as any).grants[0].expiresAt).toBeNull();
+    expect(timers.mock.calls.some(([, delay]) => delay === 2_147_483_647 || delay === 0)).toBe(
+      false,
+    );
+  });
+
   it('resets access rules only through the panel mutation path and releases control', async () => {
     await bootConnected();
     await ask({
