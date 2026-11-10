@@ -234,6 +234,28 @@ const respond = async (
 };
 
 describe('decision transport background', () => {
+  it('resets access rules only through the panel mutation path and releases control', async () => {
+    await bootConnected();
+    await ask({
+      type: 'remote-site-access-grant',
+      origin: 'https://example.com',
+      mode: 'denied',
+      durationMinutes: 15,
+    });
+    await ask({
+      type: 'remote-site-access-default',
+      id: 'billing',
+      enabled: false,
+      mode: 'denied',
+    });
+    const result = await ask({ type: 'remote-site-access-reset' });
+    expect(result.ok).toBe(true);
+    expect((result.value!.siteAccess as any).grants).toEqual([]);
+    expect(
+      (result.value!.siteAccess as any).defaults.find((rule: any) => rule.id === 'billing').enabled,
+    ).toBe(true);
+    expect(executor.release).toHaveBeenCalled();
+  });
   it('configures default access rules from the panel and resets them on recipient change', async () => {
     await bootConnected();
     const current = (await state()).siteAccess as any;

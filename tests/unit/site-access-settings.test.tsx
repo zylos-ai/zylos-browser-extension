@@ -79,6 +79,17 @@ it('requires an explicit site and defaults to read-only access for fifteen minut
   expect(form.open).toBe(false);
 });
 
+it('shows corrupted-rule recovery outside collapsed sections and resets only on explicit click', async () => {
+  state.siteAccess!.recoveryRequired = true;
+  await render();
+  const alert = container.querySelector('[role="alert"]')!;
+  expect(alert.textContent).toContain('siteAccessRecoveryRequired');
+  expect(alert.closest('details')).toBeNull();
+  expect(change).not.toHaveBeenCalled();
+  await act(async () => alert.querySelector<HTMLButtonElement>('button')!.click());
+  expect(change).toHaveBeenCalledExactlyOnceWith({ type: 'remote-site-access-reset' });
+});
+
 it('makes action permission and duration explicit in the grant request', async () => {
   await render();
   await setValue('#site-access-origin', 'https://example.com:8443');

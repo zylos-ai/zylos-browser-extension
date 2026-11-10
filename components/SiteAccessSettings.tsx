@@ -63,6 +63,19 @@ export function SiteAccessSettings({
       aria-labelledby="site-access-heading"
     >
       <h2 id="site-access-heading">{t('siteAccess')}</h2>
+      {state.siteAccess?.recoveryRequired && (
+        <div role="alert" className="site-access-recovery">
+          <p>{t('siteAccessRecoveryRequired')}</p>
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={disabled}
+            onClick={() => onChange?.({ type: 'remote-site-access-reset' })}
+          >
+            {t('siteAccessReset')}
+          </button>
+        </div>
+      )}
       <details className="site-access-add">
         <summary>{t('siteAccessAdd')}</summary>
         <div className="site-access-add-body">

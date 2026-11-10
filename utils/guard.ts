@@ -1,22 +1,12 @@
-// Compatibility helpers for inspecting initial settings. Product callers use
-// site-access.ts, which evaluates the owner's configured defaults and custom rules.
-import { defaultSiteRules, matchingDefaultRule } from './site-rules';
-const defaults = defaultSiteRules();
-const BLOCKED_URL_PATTERNS = Object.freeze(
-  defaults.filter((rule) => rule.kind === 'url-regex').map((rule) => new RegExp(rule.pattern, 'i')),
-);
-const BLOCKED_HOST_PATTERNS = Object.freeze(
-  defaults
-    .filter((rule) => rule.kind === 'host-regex')
-    .map((rule) => new RegExp(rule.pattern, 'i')),
-);
+// Legacy callers share the current policy; there is no separate fixed deny list.
+import { isSiteUrlBlocked } from './site-access';
 
 const MAX_SCAN_DEPTH = 8;
 const MAX_SCAN_NODES = 4000;
 const SCAN_LIMIT = Symbol('scan-limit');
 
 export function isBlockedUrl(url: unknown): boolean {
-  return matchingDefaultRule(url, defaults)?.mode === 'denied';
+  return isSiteUrlBlocked(url);
 }
 
 // Depth-first walk of every string reachable from `root`. Returns the dotted
@@ -52,7 +42,6 @@ function firstBlockedPath(root: unknown): string | typeof SCAN_LIMIT | null {
   }
   return null;
 }
-
 /** null when allowed, otherwise a human-readable refusal. Screens URLs, not behaviour. */
 export function screen({
   method,
@@ -74,5 +63,3 @@ export function screen({
   }
   return null;
 }
-
-export { BLOCKED_URL_PATTERNS, BLOCKED_HOST_PATTERNS };

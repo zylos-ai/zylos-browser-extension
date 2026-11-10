@@ -1,6 +1,7 @@
 import type { Command } from '../commands';
 import type { Point } from './types';
 import { collectFrames, frameAllowed, type Frame, type Send } from './frames';
+import { assertPointPermissions } from './point-permissions';
 import { assertSiteAction, recordSiteAccess, siteAccessRevision } from '../site-access';
 import domAction from './injected/dom-action.js?raw';
 import pageQuery from './injected/page-query.js?raw';
@@ -95,21 +96,9 @@ export class PageActions {
       this.assertFrameAction(element.frame, action);
       return;
     }
-    // Coordinates may land inside a cross-origin child with a narrower grant.
-    const hit = await this.io.send('DOM.getNodeForLocation', {
-      x: Math.round(target.x!),
-      y: Math.round(target.y!),
-      includeUserAgentShadowDOM: true,
-    });
-    const frames = await this.frames();
-    let frame = frames.find((candidate) => candidate.id === hit.frameId);
-    if (!frame) fail('FRAME_UNAVAILABLE');
-    while (frame) {
-      this.assertFrameAction(frame, action);
-      const parentId: string | undefined = frame.parentId;
-      frame = parentId ? frames.find((candidate) => candidate.id === parentId) : undefined;
-      if (parentId && !frame) fail('FRAME_UNAVAILABLE');
-    }
+    await assertPointPermissions(this.io.send, { x: target.x!, y: target.y! }, (frame) =>
+      this.assertFrameAction(frame, action),
+    );
   }
   async prepareInput(command: InputCommand): Promise<Element> {
     const element = await this.resolve(command.ref);

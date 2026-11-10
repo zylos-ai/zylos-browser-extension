@@ -333,6 +333,7 @@ async function observationSetup() {
       return { frameTree: { frame: { id: 'main', loaderId: 'document-1' } } };
     if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 };
     if (method === 'DOM.getNodeForLocation') return { backendNodeId: 1, frameId: 'main' };
+    if (method === 'DOM.describeNode') return { node: { nodeName: 'DIV' } };
     if (method === 'Runtime.evaluate')
       return {
         result: {
@@ -1385,6 +1386,77 @@ test('loading pages do not produce a falsely ready observation', async () => {
   assert.equal(s.methods.includes('Page.captureScreenshot'), false);
   await s.executor.release();
 });
+test.each(['screenshot', 'observe'])(
+  '%s never captures pixels when a child frame is denied before capture',
+  async (op) => {
+    const s = await observationSetup();
+    const original = chrome.debugger.sendCommand;
+    let captures = 0;
+    chrome.debugger.sendCommand = async (target, method, params) => {
+      if (method === 'Page.getFrameTree')
+        return {
+          frameTree: {
+            frame: { id: 'main', url: s.tab.url, loaderId: 'document-1' },
+            childFrames: [
+              {
+                frame: {
+                  id: 'restricted-child',
+                  parentId: 'main',
+                  url: 'https://finance.example/billing',
+                },
+              },
+            ],
+          },
+        };
+      if (method === 'Page.captureScreenshot') captures++;
+      return original(target, method, params);
+    };
+    try {
+      await assert.rejects(
+        s.executor.execute({ op }, Date.now() + 10000),
+        (e) => e.code === 'BLOCKED_FRAME',
+      );
+      assert.equal(captures, 0, 'A denied child must prevent capture itself');
+    } finally {
+      await s.executor.release();
+    }
+  },
+);
+test.each(['screenshot', 'observe'])(
+  '%s discards captured pixels when a denied child appears during capture',
+  async (op) => {
+    const s = await observationSetup();
+    const original = chrome.debugger.sendCommand;
+    let childUrl;
+    let captures = 0;
+    chrome.debugger.sendCommand = async (target, method, params) => {
+      if (method === 'Page.getFrameTree')
+        return {
+          frameTree: {
+            frame: { id: 'main', url: s.tab.url, loaderId: 'document-1' },
+            childFrames: childUrl
+              ? [{ frame: { id: 'child', parentId: 'main', url: childUrl } }]
+              : [],
+          },
+        };
+      if (method === 'Page.captureScreenshot') {
+        captures++;
+        childUrl = 'https://finance.example/billing';
+        return { data: 'PRIVATE-CHILD-PIXELS' };
+      }
+      return original(target, method, params);
+    };
+    try {
+      await assert.rejects(
+        s.executor.execute({ op }, Date.now() + 10000),
+        (e) => e.code === 'BLOCKED_FRAME',
+      );
+      assert.equal(captures, 1, 'The child restriction appears only after capture starts');
+    } finally {
+      await s.executor.release();
+    }
+  },
+);
 test.each(['complete', 'stop'])(
   'a slow screenshot waits without a deadline until %s',
   async (outcome) => {
@@ -1477,6 +1549,64 @@ test('oversized screenshot is rejected locally without disconnecting or leaving 
   await s.executor.release();
 });
 
+test.each(['denied', 'read-only'])(
+  'native pointer dispatch rechecks a cross-site iframe that becomes %s after preflight',
+  async (mode) => {
+    const s = await observationSetup();
+    const { initializeSiteAccess, grantSiteAccess } = await import('../../utils/site-access');
+    const { frameSessions } = await import('../../utils/automation/frames');
+    await initializeSiteAccess('pointer-race');
+    await grantSiteAccess('https://child.example', mode, 15);
+    frameSessions().set('child-session', { tabId: s.tab.id, frameId: 'child' });
+    const original = chrome.debugger.sendCommand;
+    let overChild = false;
+    const inputs = [];
+    chrome.debugger.sendCommand = async (target, method, params) => {
+      if (method === 'Page.getFrameTree') {
+        const child = { id: 'child', parentId: 'main', url: 'https://child.example/' };
+        return {
+          frameTree:
+            target.sessionId === 'child-session'
+              ? { frame: child }
+              : {
+                  frame: { id: 'main', url: s.tab.url, loaderId: 'document-1' },
+                  childFrames: [{ frame: child }],
+                },
+        };
+      }
+      if (method === 'DOM.getNodeForLocation')
+        return { backendNodeId: overChild ? 2 : 1, frameId: 'main' };
+      if (method === 'DOM.describeNode')
+        return {
+          node:
+            params.backendNodeId === 2
+              ? { nodeName: 'IFRAME', frameId: 'child' }
+              : { nodeName: 'DIV' },
+        };
+      if (method === 'Runtime.evaluate' && params.expression.includes('reducedMotion:')) {
+        overChild = true;
+        return { result: { value: { width: 800, height: 600, reducedMotion: true } } };
+      }
+      if (method.startsWith('Input.')) inputs.push(params);
+      return original(target, method, params);
+    };
+    try {
+      await assert.rejects(
+        s.executor.execute({ op: 'hover', x: 100, y: 100 }, Date.now() + 10000),
+        (e) => e.code === (mode === 'denied' ? 'BLOCKED_URL' : 'SITE_READ_ONLY'),
+      );
+      assert.equal(
+        overChild,
+        true,
+        'The page-action preflight completed before the target changed',
+      );
+      assert.deepEqual(inputs, [], 'The final dispatch must reject the cross-site child');
+    } finally {
+      await s.executor.release();
+    }
+  },
+);
+
 test('stop during native cursor movement prevents the pending click', async () => {
   const s = await setup();
   const entered = deferred(),
@@ -1494,6 +1624,7 @@ test('stop during native cursor movement prevents the pending click', async () =
     if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main' } } };
     if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 };
     if (method === 'DOM.getNodeForLocation') return { backendNodeId: 1, frameId: 'main' };
+    if (method === 'DOM.describeNode') return { node: { nodeName: 'DIV' } };
     if (method === 'Runtime.evaluate' && params.expression.includes('width:innerWidth'))
       return { result: { value: { width: 800, height: 600 } } };
     if (method === 'Runtime.evaluate' && params.expression.includes('"nativePoint":true')) {

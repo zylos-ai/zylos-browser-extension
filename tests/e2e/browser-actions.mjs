@@ -65,6 +65,10 @@ function cdpClient(ws) {
     });
 }
 function fixture(url, port) {
+  if (url.startsWith('/access-pointer-parent'))
+    return `<!doctype html><title>OOPIF pointer parent</title><script>window.childClicks=0;addEventListener('message',e=>{if(e.data==='clicked')window.childClicks++})</script><iframe style="position:absolute;left:0;top:100px;width:500px;height:300px;border:0" src="http://localhost:${port}/billing-pointer-child"></iframe>`;
+  if (url.startsWith('/billing-pointer-child'))
+    return `<!doctype html><title>OOPIF pointer child</title><button style="position:absolute;left:20px;top:20px;width:200px;height:80px" onclick="parent.postMessage('clicked','*')">Restricted child button</button><div style="height:1500px"></div>`;
   if (url.startsWith('/billing-with-restricted-frame'))
     return `<!doctype html><title>Billing frame boundary</title><h1>Permitted parent</h1><iframe title="Restricted child" src="http://localhost:${port}/billing"></iframe>`;
   if (url.startsWith('/lazy-list'))
@@ -762,6 +766,86 @@ try {
       await workerEval('globalThis.debuggerCalls = []');
     },
   );
+  await check('site access: coordinate actions enforce cross-process child rules', async () => {
+    const tab = await previewPanel(
+      `chrome.tabs.create({url:${JSON.stringify(url + 'access-pointer-parent')},active:true})`,
+    );
+    await eventually(
+      async () => (await previewPanel(`chrome.tabs.get(${tab.id})`)).status === 'complete',
+    );
+    const childOrigin = `http://localhost:${site.address().port}`;
+    for (const mode of ['denied', 'read-only', 'interactive']) {
+      assert.equal(
+        (
+          await previewPanel(
+            `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-site-access-grant', origin: childOrigin, mode, durationMinutes: 15 })})`,
+          )
+        ).ok,
+        true,
+      );
+      let request = await askLoop('OOPIF pointer: ' + mode, tab);
+      const action = async (method, params = {}) => {
+        await decision(request, { kind: 'actions', actions: [{ method, params }] });
+        request = await nextRound(request);
+        return request.request.execution;
+      };
+      assert.equal(
+        (await action('use-current-tab', { contextId: request.request.context.pages[0].contextId }))
+          .failed,
+        false,
+      );
+      const click = await action('click', { x: 60, y: 150 });
+      if (mode === 'interactive') {
+        assert.equal(click.failed, false, JSON.stringify(click));
+        const proof = await workerEval(
+          `chrome.debugger.sendCommand({tabId:${tab.id}},'Runtime.evaluate',{expression:'window.childClicks',returnByValue:true})`,
+        );
+        assert.equal(proof.result.value, 1);
+      } else {
+        const code = mode === 'denied' ? 'BLOCKED_URL' : 'SITE_READ_ONLY';
+        assert.ok(
+          click.results.some((result) => result.error?.code === code),
+          JSON.stringify(click),
+        );
+        for (const [method, params] of [
+          ['hover', { x: 60, y: 150 }],
+          ['drag', { from: { x: 60, y: 150 }, to: { x: 90, y: 160 }, steps: 2 }],
+          ...(mode === 'denied'
+            ? [['scroll', { x: 60, y: 150, direction: 'down', pixels: 50 }]]
+            : []),
+        ]) {
+          const denied = await action(method, params);
+          assert.ok(
+            denied.results.some((result) => result.error?.code === code),
+            JSON.stringify(denied),
+          );
+        }
+        const proof = await workerEval(
+          `chrome.debugger.sendCommand({tabId:${tab.id}},'Runtime.evaluate',{expression:'window.childClicks',returnByValue:true})`,
+        );
+        assert.equal(proof.result.value, 0);
+      }
+      assert.ok(
+        (await cdp('Target.getTargets')).targetInfos.some(
+          (target) => target.type === 'iframe' && target.url.includes('/billing-pointer-child'),
+        ),
+      );
+      await decision(request, { kind: 'done', text: 'OOPIF boundary verified' });
+      await eventually(async () => !(await panelState()).chatBusy);
+    }
+    const rule = (await panelState()).siteAccess.grants.find(
+      (grant) => grant.origin === childOrigin,
+    );
+    assert.equal(
+      (
+        await previewPanel(
+          `chrome.runtime.sendMessage(${JSON.stringify({ type: 'remote-site-access-revoke', id: rule.id })})`,
+        )
+      ).ok,
+      true,
+    );
+    await previewPanel(`chrome.tabs.remove(${tab.id})`);
+  });
   await check(
     'mixed attachments support picker, paste, drop, persistent previews and task cleanup',
     async () => {

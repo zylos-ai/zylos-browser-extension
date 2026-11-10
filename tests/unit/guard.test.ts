@@ -1,8 +1,20 @@
 // @vitest-environment node
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { isBlockedUrl, screen } from '../../utils/guard';
+import { initializeSiteAccess, updateDefaultSiteRule } from '../../utils/site-access';
+
+beforeEach(async () => {
+  vi.stubGlobal('chrome', { storage: { local: { get: async () => ({}), set: async () => {} } } });
+  await initializeSiteAccess('legacy-guard-tests');
+});
+afterEach(() => vi.unstubAllGlobals());
 
 describe('url guard', () => {
+  it('uses the current owner settings when a default is disabled', async () => {
+    await updateDefaultSiteRule('billing', false, 'denied');
+    expect(isBlockedUrl('https://example.com/billing')).toBe(false);
+    expect(screen({ method: 'open', params: { url: 'https://example.com/billing' } })).toBeNull();
+  });
   it.each([
     'https://shop.example/checkout',
     'https://shop.example/checkouts/c/abc123',

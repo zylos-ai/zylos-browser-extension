@@ -41,6 +41,7 @@ function setup() {
         frameTree: { frame: top, childFrames: [{ frame: currentChild }] },
       };
     if (method === 'DOM.getNodeForLocation') return { backendNodeId: 1, frameId: 'child' };
+    if (method === 'DOM.describeNode') return { node: { nodeName: 'DIV' } };
     if (method === 'DOM.resolveNode') return { object: { objectId: 'child-node' } };
     if (method === 'Runtime.callFunctionOn') {
       const action = params.arguments[0].value;

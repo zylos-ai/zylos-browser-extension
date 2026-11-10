@@ -1,5 +1,8 @@
 export default {
   siteAccess: '站点权限',
+  siteAccessRecoveryRequired:
+    '保存的访问规则已损坏，自动操作已暂停。重置会移除全部自定义规则，并恢复默认限制。',
+  siteAccessReset: '重置访问规则',
   siteAccessAdd: '添加访问规则',
   siteAccessScope:
     '优先采用最新匹配的自定义规则；否则按启用的默认规则判断，多条默认规则匹配时取最严格权限。',
@@ -12,7 +15,7 @@ export default {
   siteAccessDomainHint:
     '覆盖 HTTP、HTTPS 及所有端口。*.example.com 只匹配子域名，不匹配 example.com 本身。',
   siteAccessRegexHint:
-    '匹配完整域名，不匹配网址路径。使用 ^ 和 $；不支持分组、前后查找或反向引用。',
+    '匹配完整域名，不匹配网址路径。使用 ^ 和 $；通配前缀与固定域名之间须有点号。不支持分组、前后查找或反向引用。',
   siteAccessBlocked: '禁止访问',
   siteAccessBlockedHint: '规则有效期间，禁止读取和操作所有匹配页面。',
   siteAccessDefaults: '默认访问规则',

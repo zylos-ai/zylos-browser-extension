@@ -145,7 +145,7 @@ describe('owner-managed site access', () => {
     expect(p.siteAccessState().grants).toHaveLength(1);
   });
 
-  it('restores grants only for the same recipient and rejects tampered lifetime or future creation', async () => {
+  it('restores grants only for the same recipient and skips future interactive grants', async () => {
     const p = await ready();
     await p.grantSiteAccess('https://example.com', 'interactive', 60);
     vi.resetModules();
@@ -158,6 +158,89 @@ describe('owner-managed site access', () => {
     data.grants[0]!.createdAt = Date.now() + 1000;
     await restart.initializeSiteAccess('recipient-a');
     expect(restart.siteAccessState().grants).toEqual([]);
+  });
+
+  it('keeps restrictive rules after a clock rollback before and after restart', async () => {
+    const p = await ready();
+    await p.grantSiteAccess('example.com', 'denied', 60, 'domain');
+    await p.grantSiteAccess('*.corp.test', 'read-only', 60, 'domain');
+    vi.setSystemTime(Date.now() - 60_000);
+    const verify = () => {
+      expect(p.isSiteUrlBlocked('https://example.com/article')).toBe(true);
+      expect(() => p.assertSiteAction('https://a.corp.test/article', 'click')).toThrow(
+        'SITE_READ_ONLY',
+      );
+      expect(p.siteAccessState().grants).toHaveLength(2);
+    };
+    verify();
+    await p.initializeSiteAccess('recipient-a');
+    verify();
+  });
+
+  it('restores valid records independently and stores default decisions by stable id', async () => {
+    const p = await ready();
+    await p.grantSiteAccess('example.com', 'denied', 60, 'domain');
+    await p.updateDefaultSiteRule('billing', false, 'denied');
+    const data = saved[p.SITE_ACCESS_KEY] as {
+      grants: unknown[];
+      audit: unknown[];
+      defaults: unknown[];
+    };
+    expect(data.defaults[0]).toEqual({ id: 'billing', enabled: false, mode: 'denied' });
+    data.grants.push({ mode: 'interactive', origin: 'invalid' });
+    data.audit.push({ at: 'invalid' });
+    data.defaults.push({ id: 'banks', enabled: 'invalid', mode: 'interactive' });
+    await p.initializeSiteAccess('recipient-a');
+    expect(p.siteAccessState().grants).toHaveLength(1);
+    expect(p.isSiteUrlBlocked('https://example.com/article')).toBe(true);
+    expect(p.isSiteUrlBlocked('https://other.test/billing')).toBe(false);
+    expect(p.isSiteUrlBlocked('https://online.usbank.com')).toBe(true);
+    expect(p.siteAccessState().recoveryRequired).toBeUndefined();
+  });
+
+  it('merges legacy defaults by id even when labels or patterns changed', async () => {
+    const p = await ready();
+    const defaults = p.siteAccessState().defaults;
+    defaults[0] = {
+      ...defaults[0]!,
+      label: 'Old billing label',
+      pattern: 'old pattern',
+      enabled: false,
+    };
+    saved[p.SITE_ACCESS_KEY] = { binding: 'recipient-a', grants: [], audit: [], defaults };
+    await p.initializeSiteAccess('recipient-a');
+    expect(p.siteAccessState().defaults[0]).toMatchObject({
+      label: 'Billing and checkout',
+      enabled: false,
+    });
+    expect(p.isSiteUrlBlocked('https://example.com/billing')).toBe(false);
+  });
+
+  it('fails closed for a corrupted restriction until the owner explicitly resets settings', async () => {
+    const p = await ready();
+    await p.grantSiteAccess('example.com', 'denied', 60, 'domain');
+    const data = saved[p.SITE_ACCESS_KEY] as { grants: { expiresAt: unknown }[] };
+    data.grants[0]!.expiresAt = 'corrupt';
+    await p.initializeSiteAccess('recipient-a');
+    expect(p.siteAccessState().recoveryRequired).toBe(true);
+    expect(p.isSiteUrlBlocked('https://example.com/article')).toBe(true);
+    expect(p.isSiteUrlBlocked('https://unrelated.test/article')).toBe(true);
+    await expect(p.grantSiteAccess('https://example.com', 'interactive', 60)).rejects.toThrow(
+      'SITE_ACCESS_RECOVERY_REQUIRED',
+    );
+    await expect(p.updateDefaultSiteRule('billing', false, 'denied')).rejects.toThrow(
+      'SITE_ACCESS_RECOVERY_REQUIRED',
+    );
+    await p.revokeSiteAccess(crypto.randomUUID());
+    expect(saved[p.SITE_ACCESS_KEY]).toMatchObject({ recoveryRequired: true });
+    await p.initializeSiteAccess('recipient-a');
+    expect(p.siteAccessState().recoveryRequired).toBe(true);
+    await p.clearSiteAccess();
+    expect(p.siteAccessState().recoveryRequired).toBeUndefined();
+    expect(p.isSiteUrlBlocked('https://unrelated.test/article')).toBe(false);
+    expect(p.isSiteUrlBlocked('https://example.com/billing')).toBe(true);
+    await p.initializeSiteAccess('recipient-a');
+    expect(p.siteAccessState().recoveryRequired).toBeUndefined();
   });
 
   it('revokes immediately before persistence and does not revive grants on storage failure', async () => {
@@ -187,9 +270,14 @@ describe('owner-managed site access', () => {
     get.mockRejectedValueOnce(new Error('cannot read'));
     await expect(p.initializeSiteAccess('recipient-a')).rejects.toThrow('cannot read');
     expect(p.isSiteUrlBlocked('https://example.com/billing')).toBe(true);
+    expect(p.isSiteUrlBlocked('https://unrelated.test/article')).toBe(true);
     saved[p.SITE_ACCESS_KEY] = { binding: 'recipient-a', grants: 'wrong', audit: [] };
     await p.initializeSiteAccess('recipient-a');
     expect(p.siteAccessState().grants).toEqual([]);
+    expect(p.siteAccessState().recoveryRequired).toBe(true);
+    saved[p.SITE_ACCESS_KEY] = { binding: null, grants: [], audit: [] };
+    await p.initializeSiteAccess('recipient-a');
+    expect(p.isSiteUrlBlocked('https://unrelated.test/article')).toBe(true);
   });
 
   it('serializes independent grants and replaces an existing origin without duplicate grants', async () => {

@@ -69,15 +69,28 @@ export const siteAccessStateSchema = z
     grants: z.array(siteGrantSchema).max(MAX_GRANTS),
     audit: z.array(siteAccessEventSchema).max(MAX_EVENTS),
     defaults: defaultRulesSchema,
+    recoveryRequired: z.boolean().optional(),
   })
   .strict();
 export type SiteGrant = z.infer<typeof siteGrantSchema>;
 export type SiteAccessEvent = z.infer<typeof siteAccessEventSchema>;
-const savedSchema = siteAccessStateSchema.extend({ binding: z.string().min(1).max(512) }).strict();
+const savedSchema = z.object({
+  binding: z.string().min(1).max(512),
+  grants: z.unknown(),
+  audit: z.unknown(),
+  defaults: z.unknown().optional(),
+  recoveryRequired: z.unknown().optional(),
+});
+const savedDefaultSchema = z.object({
+  id: z.string(),
+  enabled: z.boolean(),
+  mode: siteModeSchema,
+});
 
 let grants: SiteGrant[] = [];
 let audit: SiteAccessEvent[] = [];
 let defaults: DefaultSiteRule[] = defaultSiteRules();
+let recoveryRequired = false;
 let binding = '';
 let initialized = false;
 let revision = 0;
@@ -125,11 +138,12 @@ function liveGrant(url: unknown) {
   return grants.findLast(
     (grant) =>
       matchesSitePattern(url, grant.origin, grant.matchType || 'origin') &&
-      grant.createdAt <= now &&
+      (grant.createdAt <= now || grant.mode !== 'interactive') &&
       grant.expiresAt > now,
   );
 }
 function decision(url: unknown) {
+  if (recoveryRequired) return { mode: 'denied' } as const;
   const grant = liveGrant(url);
   if (grant) return { mode: grant.mode, grant };
   const rule = matchingDefaultRule(url, defaults);
@@ -145,7 +159,8 @@ async function persist(
       binding,
       grants: nextGrants,
       audit: nextAudit,
-      defaults: nextDefaults,
+      defaults: nextDefaults.map(({ id, enabled, mode }) => ({ id, enabled, mode })),
+      ...(recoveryRequired ? { recoveryRequired: true } : {}),
     },
   });
 }
@@ -158,6 +173,7 @@ export function siteAccessState(): z.infer<typeof siteAccessStateSchema> {
     grants: grants.map((grant) => ({ ...grant })),
     audit: audit.map((event) => ({ ...event })),
     defaults: defaults.map((rule) => ({ ...rule })),
+    ...(recoveryRequired ? { recoveryRequired: true } : {}),
   };
 }
 
@@ -168,22 +184,61 @@ export function initializeSiteAccess(recipient: string): Promise<void> {
   grants = [];
   audit = [];
   defaults = defaultSiteRules();
+  recoveryRequired = true;
   binding = recipient;
   return serial(async () => {
     if (!recipient || recipient.length > 512) fail('SITE_ACCESS_BINDING_REQUIRED');
     const stored = await chrome.storage.local.get([SITE_ACCESS_KEY]);
     if (epoch !== generation) return;
     const parsed = savedSchema.safeParse(stored[SITE_ACCESS_KEY]);
-    if (
-      parsed.success &&
-      parsed.data.binding === recipient &&
-      parsed.data.grants.every((grant) => grant.createdAt <= Date.now()) &&
-      new Set(parsed.data.grants.map((grant) => `${grant.matchType || 'origin'}:${grant.origin}`))
-        .size === parsed.data.grants.length
-    ) {
-      grants = parsed.data.grants;
-      audit = pruneAudit(parsed.data.audit);
-      defaults = parsed.data.defaults;
+    recoveryRequired = stored[SITE_ACCESS_KEY] !== undefined && !parsed.success;
+    if (parsed.success && parsed.data.binding === recipient) {
+      recoveryRequired =
+        parsed.data.recoveryRequired !== undefined && parsed.data.recoveryRequired !== false;
+      if (Array.isArray(parsed.data.grants)) {
+        if (parsed.data.grants.length > MAX_GRANTS) recoveryRequired = true;
+        for (const record of parsed.data.grants) {
+          const result = siteGrantSchema.safeParse(record);
+          if (!result.success) {
+            // Dropping an untrusted restriction could turn a denied site interactive.
+            if (!record || typeof record !== 'object' || record.mode !== 'interactive')
+              recoveryRequired = true;
+            continue;
+          }
+          const grant = result.data;
+          if (grant.mode === 'interactive' && grant.createdAt > Date.now()) continue;
+          grants = grants.filter(
+            (previous) =>
+              previous.origin !== grant.origin ||
+              (previous.matchType || 'origin') !== (grant.matchType || 'origin'),
+          );
+          grants.push(grant);
+        }
+        grants = grants.slice(-MAX_GRANTS);
+      } else recoveryRequired = true;
+      if (Array.isArray(parsed.data.audit))
+        audit = pruneAudit(
+          parsed.data.audit.flatMap((record) => {
+            const event = siteAccessEventSchema.safeParse(record);
+            return event.success ? [event.data] : [];
+          }),
+        );
+      if (Array.isArray(parsed.data.defaults)) {
+        // Legacy full records are also accepted; current labels and patterns come from code.
+        for (const record of parsed.data.defaults) {
+          const setting = savedDefaultSchema.safeParse(record);
+          if (!setting.success) {
+            if (record && typeof record === 'object' && typeof record.id === 'string') {
+              const seed = defaultSiteRules().find((rule) => rule.id === record.id);
+              if (seed) defaults = defaults.map((rule) => (rule.id === seed.id ? seed : rule));
+            }
+            continue;
+          }
+          defaults = defaults.map((rule) =>
+            rule.id === setting.data.id ? { ...rule, ...setting.data } : rule,
+          );
+        }
+      }
     }
     initialized = true;
   });
@@ -198,6 +253,7 @@ export function grantSiteAccess(
   const epoch = generation;
   return serial(async () => {
     if (!initialized || !binding || epoch !== generation) fail('SITE_ACCESS_NOT_READY');
+    if (recoveryRequired) fail('SITE_ACCESS_RECOVERY_REQUIRED');
     siteMatchTypeSchema.parse(matchType);
     if (!validSitePattern(origin, matchType)) fail('SITE_PATTERN_INVALID');
     z.number().int().min(5).max(1440).parse(durationMinutes);
@@ -275,6 +331,7 @@ export function clearSiteAccess(): Promise<void> {
   grants = [];
   audit = [];
   defaults = defaultSiteRules();
+  recoveryRequired = false;
   return serial(async () => {
     if (binding) await persist([], []);
   });
@@ -320,6 +377,12 @@ export function updateDefaultSiteRule(
 ): Promise<void> {
   siteModeSchema.parse(mode);
   z.boolean().parse(enabled);
+  if (recoveryRequired)
+    return Promise.reject(
+      Object.assign(new Error('SITE_ACCESS_RECOVERY_REQUIRED'), {
+        code: 'SITE_ACCESS_RECOVERY_REQUIRED',
+      }),
+    );
   if (!initialized || !binding)
     return Promise.reject(
       Object.assign(new Error('SITE_ACCESS_NOT_READY'), { code: 'SITE_ACCESS_NOT_READY' }),

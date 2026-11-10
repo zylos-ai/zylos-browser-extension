@@ -184,6 +184,7 @@ export const remoteRequestSchema = z.discriminatedUnion('type', [
     })
     .strict(),
   z.object({ type: z.literal('remote-site-access-revoke'), id: z.string().uuid() }).strict(),
+  z.object({ type: z.literal('remote-site-access-reset') }).strict(),
   z
     .object({
       type: z.literal('remote-site-access-default'),

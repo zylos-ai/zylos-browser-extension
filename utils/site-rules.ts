@@ -139,8 +139,10 @@ export function pageUrl(value: unknown): URL | undefined {
       !url.username &&
       !url.password &&
       !url.hostname.includes('*')
-    )
+    ) {
+      url.hostname = url.hostname.replace(/\.$/, '');
       return url;
+    }
   } catch {
     /* Invalid URLs do not acquire a custom rule. */
   }
@@ -196,6 +198,7 @@ export function validDomainRegex(pattern: string): boolean {
     } else suffix += literal;
   }
   const domainSuffix = suffix.replace(/^\./, '');
+  if (stars && !suffix.startsWith('.')) return false;
   if (!validDomain(domainSuffix) || domainSuffix.split('.').length < 2) return false;
   try {
     new RegExp(pattern, 'i');
@@ -244,6 +247,7 @@ function hostOf(value: string) {
     match?.[1]
       ?.replace(/^[^@]*@/, '')
       .replace(/:\d+$/, '')
+      .replace(/\.$/, '')
       .toLowerCase() || ''
   );
 }

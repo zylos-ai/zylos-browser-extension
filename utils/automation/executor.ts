@@ -26,6 +26,7 @@ import {
 import { cursorExpression } from './cursor';
 import { cleanupTask, recordTask } from './task-lifecycle';
 import { PointerMotion } from './pointer-motion';
+import { assertPointPermissions } from './point-permissions';
 import type { Command } from '../commands';
 import type { CdpResults, Cursor, GrantedTab, Point, Scope } from './types';
 import {
@@ -2003,20 +2004,12 @@ async function executeInternal(
       fail('PAGE_CHANGED', '页面已变化，请重新 snapshot');
     }
     if (method === 'Input.dispatchMouseEvent') {
-      const hit = await actionCdp('DOM.getNodeForLocation', {
-        x: Math.floor(Number(params.x)),
-        y: Math.floor(Number(params.y)),
-        includeUserAgentShadowDOM: true,
-      });
-      const frames = await collectFrames(actionCdp);
-      let frame = frames.find((candidate) => candidate.id === hit.frameId);
-      if (!frame) fail('FRAME_UNAVAILABLE');
-      while (frame) {
-        assertSiteAction(frame.url, params.type === 'mouseWheel' ? 'scroll' : command.op);
-        const parentId: string | undefined = frame.parentId;
-        frame = parentId ? frames.find((candidate) => candidate.id === parentId) : undefined;
-        if (parentId && !frame) fail('FRAME_UNAVAILABLE');
-      }
+      await assertPointPermissions(
+        actionCdp,
+        { x: Number(params.x), y: Number(params.y) },
+        (frame) =>
+          assertSiteAction(frame.url, params.type === 'mouseWheel' ? 'scroll' : command.op),
+      );
       check();
     }
     const result = await actionCdp(method, params);

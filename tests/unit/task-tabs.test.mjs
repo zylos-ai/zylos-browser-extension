@@ -106,6 +106,7 @@ async function fixture() {
         if (method === 'Runtime.evaluate')
           return { result: { value: { width: 800, height: 600, reducedMotion: true } } };
         if (method === 'DOM.getNodeForLocation') return { backendNodeId: 1, frameId: 'main' };
+        if (method === 'DOM.describeNode') return { node: { nodeName: 'DIV' } };
         return {};
       },
     },

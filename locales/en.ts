@@ -2,6 +2,9 @@ import type zh from './zh-CN';
 
 export default {
   siteAccess: 'Site permissions',
+  siteAccessRecoveryRequired:
+    'Saved access rules are damaged. Automation is paused. Reset removes all custom rules and restores the default restrictions.',
+  siteAccessReset: 'Reset access rules',
   siteAccessAdd: 'Add access rule',
   siteAccessScope:
     'The newest matching custom rule takes priority. Otherwise, enabled default rules apply; the most restrictive matching default wins.',
@@ -15,7 +18,7 @@ export default {
   siteAccessDomainHint:
     'Matches HTTP and HTTPS on all ports. *.example.com matches subdomains, not example.com itself.',
   siteAccessRegexHint:
-    'Matches the whole hostname, not the URL path. Use ^ and $; groups, lookarounds and backreferences are not supported.',
+    'Matches the whole hostname, not the URL path. Use ^ and $; a wildcard prefix must end at a dot before the fixed domain. Groups, lookarounds and backreferences are not supported.',
   siteAccessBlocked: 'Deny access',
   siteAccessBlockedHint:
     'Blocks reading and actions on every matching page while this rule is active.',

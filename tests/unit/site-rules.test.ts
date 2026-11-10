@@ -51,6 +51,15 @@ describe('site rule patterns', () => {
     ).toBe(true);
   });
 
+  it.each([
+    ['https://example.com./', 'example.com', 'domain'],
+    ['https://a.corp.test.:8443/', '*.corp.test', 'domain'],
+    ['https://x.regex.test./', '^.*\\.regex\\.test$', 'domain-regex'],
+    ['https://origin.test.:8443/', 'https://origin.test:8443', 'origin'],
+  ] as const)('canonicalizes a DNS root dot before matching %s', (url, pattern, type) => {
+    expect(matchesSitePattern(url, pattern, type)).toBe(true);
+  });
+
   it('accepts bounded hostname regex syntax and tests only the actual hostname', () => {
     const pattern = '^[a-z0-9-]*\\.example\\.com$';
     expect(validSitePattern(pattern, 'domain-regex')).toBe(true);
@@ -70,6 +79,9 @@ describe('site rule patterns', () => {
   it.each([
     'example\\.com',
     '^.*$',
+    '^.*example\\.com$',
+    '^.*e\\.com$',
+    '^[a-z]*example\\.com$',
     '^.*\\.com$',
     '/^example\\.com$/i',
     '^(a+)+\\.example\\.com$',
@@ -90,6 +102,7 @@ describe('site rule patterns', () => {
     const rules = defaultSiteRules();
     expect(matchingDefaultRule('https://example.com/%2562illing', rules)?.id).toBe('billing');
     expect(matchingDefaultRule('https://online.usbank.com', rules)?.id).toBe('banks');
+    expect(matchingDefaultRule('https://gemini.com./', rules)?.id).toBe('exact-finance');
     expect(matchingDefaultRule('https://example.com/payment-guide', rules)).toBeUndefined();
   });
 

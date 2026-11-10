@@ -1620,6 +1620,14 @@ export function startRemoteBackground() {
           }
           return snapshot();
         }
+        case 'remote-site-access-reset': {
+          idem.cancel();
+          clearPageContexts();
+          await release(true, false, 'consent_changed');
+          await clearSiteAccess();
+          publish();
+          return snapshot();
+        }
         case 'remote-site-access-default': {
           const updated = updateDefaultSiteRule(m.id, m.enabled, m.mode);
           void updated.catch(() => {});
@@ -1868,6 +1876,7 @@ export function startRemoteBackground() {
     const mutatesConsent = [
       'remote-site-access-grant',
       'remote-site-access-revoke',
+      'remote-site-access-reset',
       'remote-site-access-default',
       'remote-agent-start-set-enabled',
       'remote-compatibility-set-enabled',

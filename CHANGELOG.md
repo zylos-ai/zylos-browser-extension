@@ -16,6 +16,12 @@
   while refusing clicks, input, submissions, history navigation and recovery.
   Frame permissions and parent restrictions are checked during execution.
 - Refuse whole-page screenshots when a known restricted child frame lacks access.
+- Resolve cross-process iframe hits before coordinate input and check the embedded
+  subtree. Normalize trailing DNS dots for access-rule matching. Require a label
+  boundary after regex wildcard prefixes.
+- Restore saved rules independently and merge default settings by stable id.
+  Clock rollback preserves restrictions; damaged restrictions pause automation
+  until the owner explicitly resets access rules in the panel.
 
 ## [0.17.4] - 2026-11-04
 

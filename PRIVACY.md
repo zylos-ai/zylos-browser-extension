@@ -44,6 +44,15 @@ and expiry (at most 24 hours), persist locally across worker restarts, and are
 bound to your configured Relay/Key recipient. Changing that recipient clears
 the custom rules and history and restores default settings. You can revoke custom
 rules or edit default modes/enabled state in the panel.
+Trailing DNS dots are normalized before matching. Regex wildcard prefixes must
+end at a label boundary before their fixed domain suffix. A coordinate hit on a
+cross-process iframe checks its whole known subtree; a restricted descendant can
+therefore prevent input elsewhere in that iframe. Unresolved targets fail closed.
+Default settings store only stable ids, modes and enabled states. Invalid saved
+records are handled individually. Damaged restrictions pause automation and show
+a panel warning; the explicit reset removes custom rules and restores defaults.
+Clock rollback keeps deny/read-only rules active and does not activate future
+interactive grants.
 Read-only access permits page reads, screenshots and scrolling but denies clicks,
 typing and submissions; interactive access permits actions, while password/OTP
 field protections remain. Authorized page content can reach your Relay and Agent
