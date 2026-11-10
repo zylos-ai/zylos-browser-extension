@@ -98,6 +98,11 @@ it('shows scope, current expiry and revoke for an existing grant', async () => {
     },
   ];
   await render();
+  const list = container.querySelector<HTMLDetailsElement>('.site-access-list')!;
+  expect(list.open).toBe(false);
+  expect(list.querySelector('summary')!.textContent).toContain('(1)');
+  await act(async () => list.querySelector('summary')!.click());
+  expect(list.open).toBe(true);
   expect(container.querySelector('.site-access-grant')!.textContent).toContain(
     'https://example.com',
   );
@@ -109,6 +114,8 @@ it('shows scope, current expiry and revoke for an existing grant', async () => {
     type: 'remote-site-access-revoke',
     id: 'grant-1',
   });
+  await act(async () => list.querySelector('summary')!.click());
+  expect(list.open).toBe(false);
 });
 
 it('marks a grant expired without waiting for a background state push', async () => {

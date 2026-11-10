@@ -103,34 +103,38 @@ export function SiteAccessSettings({
           {t('siteAccessGrant')}
         </button>
       </form>
-      <div className="site-access-list" aria-label={t('siteAccessGrants')}>
-        <h3>{t('siteAccessGrants')}</h3>
-        {!grants.length && <p className="settings-hint">{t('siteAccessEmpty')}</p>}
-        {grants.map((grant) => (
-          <div key={grant.id} className="site-access-grant settings-row">
-            <div className="settings-copy">
-              <div className="site-access-origin">{grant.origin}</div>
-              <p className="settings-hint">
-                {t(grant.mode === 'read-only' ? 'siteAccessReadOnly' : 'siteAccessInteractive')}
-                {' · '}
-                {grant.expiresAt <= now ? t('siteAccessExpired') : t('siteAccessExpires')}{' '}
-                <time dateTime={new Date(grant.expiresAt).toISOString()}>
-                  {time(grant.expiresAt)}
-                </time>
-              </p>
+      <details className="site-access-list">
+        <summary>
+          {t('siteAccessGrants')} <span className="site-access-count">({grants.length})</span>
+        </summary>
+        <div className="site-access-grants-body">
+          {!grants.length && <p className="settings-hint">{t('siteAccessEmpty')}</p>}
+          {grants.map((grant) => (
+            <div key={grant.id} className="site-access-grant settings-row">
+              <div className="settings-copy">
+                <div className="site-access-origin">{grant.origin}</div>
+                <p className="settings-hint">
+                  {t(grant.mode === 'read-only' ? 'siteAccessReadOnly' : 'siteAccessInteractive')}
+                  {' · '}
+                  {grant.expiresAt <= now ? t('siteAccessExpired') : t('siteAccessExpires')}{' '}
+                  <time dateTime={new Date(grant.expiresAt).toISOString()}>
+                    {time(grant.expiresAt)}
+                  </time>
+                </p>
+              </div>
+              <button
+                className="btn btn-ghost site-access-revoke"
+                type="button"
+                disabled={disabled}
+                aria-label={t('siteAccessRevokeOrigin', { origin: grant.origin })}
+                onClick={() => onChange?.({ type: 'remote-site-access-revoke', id: grant.id })}
+              >
+                {t('siteAccessRevoke')}
+              </button>
             </div>
-            <button
-              className="btn btn-ghost site-access-revoke"
-              type="button"
-              disabled={disabled}
-              aria-label={t('siteAccessRevokeOrigin', { origin: grant.origin })}
-              onClick={() => onChange?.({ type: 'remote-site-access-revoke', id: grant.id })}
-            >
-              {t('siteAccessRevoke')}
-            </button>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      </details>
       <details className="site-access-history">
         <summary>{t('siteAccessHistory')}</summary>
         <p className="settings-hint">{t('siteAccessHistoryScope')}</p>

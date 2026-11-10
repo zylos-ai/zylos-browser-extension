@@ -1,6 +1,10 @@
 .site-access-settings {
-  padding-top: 24px;
+  padding-top: 16px;
   border-top: 1px solid var(--color-border);
+  gap: 12px;
+}
+.site-access-settings .settings-form {
+  gap: 12px;
 }
 .site-access-settings > div > .settings-hint {
   margin-top: 4px;
@@ -10,16 +14,18 @@
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px;
 }
-.site-access-list,
+.site-access-grants-body,
 .site-access-history ol {
   display: flex;
   flex-direction: column;
   gap: 12px;
   min-width: 0;
 }
-.site-access-list h3 {
-  font-size: var(--text-label);
-  font-weight: 500;
+.site-access-grants-body {
+  margin-top: 8px;
+}
+.site-access-count {
+  color: var(--color-muted);
 }
 .site-access-grant,
 .site-access-event {
@@ -40,9 +46,12 @@
   min-height: 40px;
   padding-inline: 10px;
 }
-.site-access-history summary {
+.site-access-history summary,
+.site-access-list summary {
   cursor: pointer;
   font-size: var(--text-label);
+  min-height: 24px;
+  line-height: 24px;
 }
 .site-access-history > .settings-hint,
 .site-access-history ol {

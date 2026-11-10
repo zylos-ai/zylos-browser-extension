@@ -493,6 +493,16 @@ try {
   await check(
     'site access: panel grants read-only and interactive access, audits and revokes',
     async () => {
+      if (['en', 'zh-CN'].includes(process.env.E2E_LOCALE)) {
+        await workerEval(
+          `chrome.storage.local.set({uiLanguage:${JSON.stringify(process.env.E2E_LOCALE)}})`,
+        );
+        await eventually(() =>
+          previewPanel(
+            `document.documentElement.lang === ${JSON.stringify(process.env.E2E_LOCALE)}`,
+          ),
+        );
+      }
       const origin = new URL(url).origin;
       const billing = url + 'billing';
       let request = await askLoop('Site access: default blocked');
@@ -519,6 +529,7 @@ try {
       const grant = (await panelState()).siteAccess.grants[0];
       assert.equal(grant.origin, origin);
       assert.equal(grant.mode, 'read-only');
+      assert.equal(await previewPanel("document.querySelector('.site-access-list').open"), false);
       for (const width of [320, 500]) {
         await cdp(
           'Emulation.setDeviceMetricsOverride',
@@ -543,6 +554,17 @@ try {
             Buffer.from(shot.data, 'base64'),
           );
         }
+        await previewPanel("document.querySelector('.site-access-list summary').click()");
+        assert.equal(await previewPanel("document.querySelector('.site-access-list').open"), true);
+        if (process.env.E2E_SCREENSHOT_DIR) {
+          const expanded = await cdp('Page.captureScreenshot', { format: 'png' }, sessionId);
+          await fs.writeFile(
+            path.join(process.env.E2E_SCREENSHOT_DIR, `site-access-expanded-${width}.png`),
+            Buffer.from(expanded.data, 'base64'),
+          );
+        }
+        await previewPanel("document.querySelector('.site-access-list summary').click()");
+        assert.equal(await previewPanel("document.querySelector('.site-access-list').open"), false);
       }
       await cdp('Emulation.clearDeviceMetricsOverride', {}, sessionId);
       await previewPanel("document.querySelector('.settings-button').click()");
