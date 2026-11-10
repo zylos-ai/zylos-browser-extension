@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.17.5] - 2026-11-10
+
+No Remote protocol change required; validated with Remote 0.10.5.
+
 ### Added
 
 - Owner-managed site rules in Settings, with denied, read-only or interactive
