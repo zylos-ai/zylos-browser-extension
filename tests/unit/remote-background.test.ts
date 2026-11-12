@@ -147,6 +147,9 @@ beforeEach(() => {
           Object.fromEntries(keys.filter((k) => k in storage).map((k) => [k, storage[k]])),
         ),
         set: vi.fn(async (obj: Record<string, unknown>) => Object.assign(storage, obj)),
+        remove: vi.fn(async (key: string) => {
+          delete storage[key];
+        }),
       },
     },
     alarms: { create: vi.fn(), onAlarm: { addListener: vi.fn() } },
@@ -666,6 +669,217 @@ describe('decision transport background', () => {
     expect(ws.last('agent-request')).toBeUndefined();
     expect(executor.release).toHaveBeenCalled();
     expect((await state()).agentStartEnabled).toBe(false);
+  });
+  const DAY = 86_400_000;
+  const BINDING = 'wss://agent.example/browser-remote/ext|abababababab';
+  const grantRecord = () => storage.agentStartGrant as Record<string, unknown> | undefined;
+  it('persists agent-start permission for seven days by default', async () => {
+    await taskStartSetup();
+    const now = Date.now();
+    expect(grantRecord()).toEqual({ binding: BINDING, grantedAt: now, expiresAt: now + 7 * DAY });
+    expect(JSON.stringify(grantRecord())).not.toContain(KEY);
+    expect(await state()).toMatchObject({
+      agentStartEnabled: true,
+      agentStartExpiresAt: now + 7 * DAY,
+    });
+  });
+  it('persists a permanent agent-start grant without scheduling expiry', async () => {
+    await bootConnected(false, false, true, false, false, false, true);
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    const result = await ask({
+      type: 'remote-agent-start-set-enabled',
+      enabled: true,
+      durationMinutes: null,
+    });
+    expect(result.ok).toBe(true);
+    expect(grantRecord()).toMatchObject({ binding: BINDING, expiresAt: null });
+    expect(result.value).toMatchObject({ agentStartEnabled: true, agentStartExpiresAt: null });
+    expect(timers.mock.calls.some(([, delay]) => delay === 2_147_483_647)).toBe(false);
+  });
+  it('restores an unexpired grant bound to this connection after a worker restart', async () => {
+    const now = Date.now();
+    storage.agentStartGrant = { binding: BINDING, grantedAt: now - DAY, expiresAt: now + DAY };
+    const ws = await bootConnected(false, false, true, false, false, false, true);
+    expect(await state()).toMatchObject({
+      agentStartEnabled: true,
+      agentStartExpiresAt: now + DAY,
+    });
+    chrome.tabs.get = vi.fn(async (id: number) => ({
+      id,
+      windowId: 1,
+      status: 'complete',
+      url: 'https://example.com/',
+    })) as any;
+    chrome.windows.get = vi.fn(async () => ({ id: 1 })) as any;
+    chrome.webNavigation = {
+      getFrame: vi.fn(async () => ({ documentId: 'task-document', url: 'https://example.com/' })),
+    } as any;
+    executor.createTask.mockImplementation(async (input) => {
+      executor.currentControl.mockReturnValue({
+        sessionId: input.taskId,
+        tabId: 20,
+        tabIds: [20],
+        phase: 'ready',
+        windowId: 1,
+      } as any);
+    });
+    expect(await requestStart(ws)).toMatchObject({ type: 'resp' });
+  });
+  it.each([
+    [
+      'expired',
+      () => ({ binding: BINDING, grantedAt: Date.now() - 2 * DAY, expiresAt: Date.now() }),
+    ],
+    [
+      'bound to another key',
+      () => ({
+        binding: 'wss://agent.example/browser-remote/ext|cdcdcdcdcdcd',
+        grantedAt: Date.now(),
+        expiresAt: null,
+      }),
+    ],
+    [
+      'bound to another relay',
+      () => ({
+        binding: 'wss://other.example/ext|abababababab',
+        grantedAt: Date.now(),
+        expiresAt: null,
+      }),
+    ],
+    [
+      'created after the current clock',
+      () => ({ binding: BINDING, grantedAt: Date.now() + DAY, expiresAt: Date.now() + 2 * DAY }),
+    ],
+    [
+      'longer than thirty days',
+      () => ({ binding: BINDING, grantedAt: Date.now(), expiresAt: Date.now() + 31 * DAY }),
+    ],
+    ['damaged', () => ({ binding: BINDING, grantedAt: 'yesterday', expiresAt: null })],
+  ])('does not restore and removes a grant that is %s', async (_name, record) => {
+    storage.agentStartGrant = record();
+    const ws = await bootConnected(false, false, true, false, false, false, true);
+    expect((await state()).agentStartEnabled).toBe(false);
+    expect('agentStartGrant' in storage).toBe(false);
+    expect(await requestStart(ws)).toMatchObject({ code: 'TASK_START_DISABLED' });
+  });
+  it('does not restore a grant while the connection is switched off', async () => {
+    storage.remoteConfig = { ...(storage.remoteConfig as object), enabled: false };
+    storage.agentStartGrant = { binding: BINDING, grantedAt: Date.now(), expiresAt: null };
+    startRemoteBackground();
+    await flush();
+    expect((await state()).agentStartEnabled).toBe(false);
+    expect('agentStartGrant' in storage).toBe(false);
+  });
+  it('expiry revokes like turning the permission off and stops the Agent task', async () => {
+    const ws = await bootConnected(false, false, true, false, false, false, true);
+    chrome.tabs.get = vi.fn(async (id: number) => ({
+      id,
+      windowId: 1,
+      status: 'complete',
+      url: 'https://example.com/',
+    })) as any;
+    chrome.windows.get = vi.fn(async () => ({ id: 1 })) as any;
+    chrome.webNavigation = {
+      getFrame: vi.fn(async () => ({ documentId: 'task-document', url: 'https://example.com/' })),
+    } as any;
+    executor.createTask.mockImplementation(async (input) => {
+      executor.currentControl.mockReturnValue({
+        sessionId: input.taskId,
+        tabId: 20,
+        tabIds: [20],
+        phase: 'ready',
+        windowId: 1,
+      } as any);
+    });
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    const start = Date.now();
+    await ask({ type: 'remote-agent-start-set-enabled', enabled: true, durationMinutes: 1440 });
+    const expiry = timers.mock.calls.find(([, delay]) => delay === DAY)!;
+    expect(expiry).toBeDefined();
+    expect(await requestStart(ws)).toMatchObject({ type: 'resp' });
+    expect((await state()).loopActive).toBe(true);
+    vi.setSystemTime(start + DAY);
+    (expiry[0] as () => void)();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await state()).toMatchObject({ agentStartEnabled: false, loopActive: false });
+    expect(await state()).not.toHaveProperty('agentStartExpiresAt', expect.anything());
+    expect('agentStartGrant' in storage).toBe(false);
+    expect(broadcasts.at(-1)).toMatchObject({ state: { agentStartEnabled: false } });
+  });
+  it('re-arms a thirty-day agent-start grant without revoking early', async () => {
+    await bootConnected(false, false, true, false, false, false, true);
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    const start = Date.now();
+    await ask({ type: 'remote-agent-start-set-enabled', enabled: true, durationMinutes: 43200 });
+    const early = timers.mock.calls.find(([, delay]) => delay === 2_147_483_647)!;
+    expect(early).toBeDefined();
+    vi.setSystemTime(start + 2_147_483_647);
+    (early[0] as () => void)();
+    await flush();
+    expect((await state()).agentStartEnabled).toBe(true);
+    expect(grantRecord()).toBeDefined();
+    const remainder = 30 * DAY - 2_147_483_647;
+    const final = timers.mock.calls.find(([, delay]) => delay === remainder)!;
+    expect(final).toBeDefined();
+    vi.setSystemTime(start + 30 * DAY);
+    (final[0] as () => void)();
+    await flush();
+    expect((await state()).agentStartEnabled).toBe(false);
+    expect('agentStartGrant' in storage).toBe(false);
+  });
+  it('treats a clock moved before the grant as revoked', async () => {
+    const ws = await taskStartSetup();
+    vi.setSystemTime(Date.now() - DAY);
+    expect(await requestStart(ws)).toMatchObject({ code: 'TASK_START_DISABLED' });
+    await flush();
+    expect((await state()).agentStartEnabled).toBe(false);
+    expect('agentStartGrant' in storage).toBe(false);
+    expect(executor.createTask).not.toHaveBeenCalled();
+  });
+  it('turning the permission off clears the persisted grant', async () => {
+    await taskStartSetup();
+    expect(grantRecord()).toBeDefined();
+    await ask({ type: 'remote-agent-start-set-enabled', enabled: false });
+    expect('agentStartGrant' in storage).toBe(false);
+    expect((await state()).agentStartExpiresAt).toBeUndefined();
+  });
+  it.each([
+    { type: 'remote-set-enabled', enabled: false },
+    { type: 'remote-save', relayUrl: 'wss://other.example/ext', key: 'b'.repeat(64) },
+    {
+      type: 'remote-save',
+      relayUrl: 'wss://agent.example/browser-remote/ext',
+      key: 'b'.repeat(64),
+    },
+  ])('connection changes clear the persisted grant: $type', async (change) => {
+    await taskStartSetup();
+    expect(grantRecord()).toBeDefined();
+    expect((await ask(change)).ok).toBe(true);
+    expect('agentStartGrant' in storage).toBe(false);
+    expect((await state()).agentStartEnabled).toBe(false);
+  });
+  it('saving the same connection keeps the grant', async () => {
+    await taskStartSetup();
+    const saved = grantRecord();
+    expect(
+      (
+        await ask({
+          type: 'remote-save',
+          relayUrl: 'wss://agent.example/browser-remote/ext',
+          key: KEY,
+        })
+      ).ok,
+    ).toBe(true);
+    expect(grantRecord()).toEqual(saved);
+    expect((await state()).agentStartEnabled).toBe(true);
+  });
+  it('Stop ends the current Agent task without revoking the grant', async () => {
+    const ws = await taskStartSetup();
+    expect(await requestStart(ws)).toMatchObject({ type: 'resp' });
+    expect((await state()).loopActive).toBe(true);
+    await ask({ type: 'remote-stop' });
+    expect(await state()).toMatchObject({ loopActive: false, agentStartEnabled: true });
+    expect(grantRecord()).toBeDefined();
   });
   it('Stop during half-open transport prevents a new task after reconnect', async () => {
     const ws = await bootConnected(false, false, true, true);

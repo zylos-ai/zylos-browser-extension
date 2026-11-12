@@ -15,6 +15,7 @@ import { userMessageSchema } from './agent-message';
 import { taskNoticeSchema } from './task-notice';
 import { panelDiagnosticSchema } from './diagnostics-schema';
 import { siteAccessStateSchema, siteDurationSchema } from './site-access';
+import { agentStartDurationSchema } from './agent-start-grant';
 
 export const REMOTE_SUBPROTOCOL = 'zylos-browser-remote.v3';
 export const REMOTE_KEY_PROTO_PREFIX = 'key.';
@@ -124,6 +125,8 @@ export const remoteStateSchema = z.object({
   detailedDiagnostics: detailStateSchema.optional(),
   diagnosticsEnabled: z.boolean().optional(),
   agentStartEnabled: z.boolean().optional(),
+  /** Grant expiry; null = until turned off. Absent when not granted. */
+  agentStartExpiresAt: z.number().nullable().optional(),
   compatibilityEnabled: z.boolean().optional(),
   diagnosticsConsent: z.string().optional(),
   configured: z.boolean(),
@@ -193,7 +196,14 @@ export const remoteRequestSchema = z.discriminatedUnion('type', [
       mode: z.enum(['denied', 'read-only', 'interactive']),
     })
     .strict(),
-  z.object({ type: z.literal('remote-agent-start-set-enabled'), enabled: z.boolean() }).strict(),
+  z
+    .object({
+      type: z.literal('remote-agent-start-set-enabled'),
+      enabled: z.boolean(),
+      // Minutes like site rules; omitted = default seven days, null = until turned off.
+      durationMinutes: agentStartDurationSchema.optional(),
+    })
+    .strict(),
   z
     .object({
       type: z.literal('remote-compatibility-set-enabled'),

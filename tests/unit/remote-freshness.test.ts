@@ -85,6 +85,9 @@ beforeEach(async () => {
         set: async (v: object) => {
           Object.assign(storage, v);
         },
+        remove: async (key: string) => {
+          delete storage[key];
+        },
       },
     },
     alarms: {
@@ -166,7 +169,9 @@ it('retains timely timeout diagnostics when inbound heartbeats stop', async () =
   await vi.advanceTimersByTimeAsync(60_000);
   const { events } = await getDiagnostics({});
   expect(events.find((event) => event.event === 'transport-timer')).toMatchObject({
-    timer: 'freshness', delayMs: 0, inboundAgeMs: 60_000,
+    timer: 'freshness',
+    delayMs: 0,
+    inboundAgeMs: 60_000,
   });
   expect(events.some((event) => event.code === 'HEARTBEAT_TIMEOUT')).toBe(true);
 });

@@ -127,3 +127,16 @@
   font-size: 11px;
   color: var(--color-muted);
 }
+
+.agent-start-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.agent-start-duration .select {
+  width: 136px;
+  padding-right: 28px;
+}
+.agent-start-status .settings-hint {
+  overflow-wrap: anywhere;
+}

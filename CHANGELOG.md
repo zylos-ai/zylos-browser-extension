@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+No Remote protocol change required; `agent-task-start-v1` negotiation is unchanged.
+
+### Changed
+
+- "Allow Agent to start tasks" now persists across MV3 worker and browser
+  restarts. Enabling it offers the site-rule durations — one day, seven days
+  (default), 30 days or until turned off — and Settings shows the expiry with a
+  quick revoke. The grant is stored locally, bound to the Relay URL and keyId
+  (no Key material), and restored only while unexpired and matching. Expiry
+  revokes exactly like turning it off, stopping an Agent-started task; long
+  grants re-arm without early expiry and a clock moved before the grant revokes
+  it. Changing the Relay URL, Key or connection switch clears it. Stop still
+  ends only the current task without revoking the grant.
+
 ## [0.17.5] - 2026-11-10
 
 No Remote protocol change required; validated with Remote 0.10.5.

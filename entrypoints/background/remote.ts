@@ -56,6 +56,16 @@ import {
   clearSiteAccess,
   updateDefaultSiteRule,
 } from '../../utils/site-access';
+import {
+  MAX_TIMER_MS,
+  agentStartBinding,
+  agentStartGrantLive,
+  clearAgentStartGrant,
+  createAgentStartGrant,
+  loadAgentStartGrant,
+  saveAgentStartGrant,
+  type AgentStartGrant,
+} from '../../utils/agent-start-grant';
 // Extension-owned conversations: request Agent decisions, execute locally, and
 // return observations over the authenticated Remote connection.
 import { captureCurrentPage, clearPageContexts, forgetPageContext } from '../../utils/page-context';
@@ -190,7 +200,9 @@ export function startRemoteBackground() {
   let attachmentsReady = false;
   let interruptReady = false;
   let sendingChat = false;
-  let agentStartEnabled = false;
+  // Persisted owner consent for Agent-started tasks; undefined means not allowed.
+  let agentStartGrant: AgentStartGrant | undefined;
+  let agentStartTimer: ReturnType<typeof setTimeout> | undefined;
   function compatibilityEnabled() {
     const control = currentControl();
     return !!(
@@ -413,7 +425,8 @@ export function startRemoteBackground() {
           Math.min(2_147_483_647, Math.max(0, nextExpiry - Date.now())),
         );
     }
-    state.agentStartEnabled = agentStartEnabled;
+    state.agentStartEnabled = !!agentStartGrant;
+    state.agentStartExpiresAt = agentStartGrant ? agentStartGrant.expiresAt : undefined;
     state.compatibilityEnabled = config.compatibilityEnabled;
     state.detailedDiagnostics = detailed.state();
     state.detailedSharing = sharing.state();
@@ -904,13 +917,56 @@ export function startRemoteBackground() {
     return stopTaskPromise;
   }
 
-  function revokeAgentStarts() {
-    agentStartEnabled = false;
+  function setAgentStartGrant(grant: AgentStartGrant | undefined) {
+    agentStartGrant = grant;
     agentStartRevision++;
+    armAgentStartExpiry();
+  }
+  function armAgentStartExpiry() {
+    clearTimeout(agentStartTimer);
+    agentStartTimer = undefined;
+    const expiresAt = agentStartGrant?.expiresAt;
+    if (expiresAt === undefined || expiresAt === null) return;
+    // Same scheduling as site rules: long grants re-arm rather than fire early.
+    agentStartTimer = setTimeout(
+      () => {
+        agentStartTimer = undefined;
+        checkAgentStartExpiry();
+      },
+      Math.min(MAX_TIMER_MS, Math.max(0, expiresAt - Date.now())),
+    );
+  }
+
+  /** Expiry (or a clock moved before the grant) revokes exactly like turning it off. */
+  function checkAgentStartExpiry() {
+    const grant = agentStartGrant;
+    if (!grant) return;
+    if (agentStartGrantLive(grant)) {
+      if (!agentStartTimer) armAgentStartExpiry();
+      return;
+    }
+    const pending = panelMutations
+      .catch(() => {})
+      .then(() => (agentStartGrant === grant ? revokeAgentStarts() : undefined));
+    panelMutations = pending;
+    void pending.catch((error) =>
+      recordLifecycle('runtime-error', { level: 'error', ...safeError(error) }),
+    );
+  }
+
+  function revokeAgentStarts() {
+    setAgentStartGrant(undefined);
+    // Clear the durable grant immediately; a failed write is reported to the panel.
+    const cleared = clearAgentStartGrant();
+    void cleared.catch(() => {});
+    let stopped: Promise<void>;
     if (agentStartPending || (loop.active && loop.taskId === agentStartedTask))
-      return stopCurrentTask();
-    publish();
-    return Promise.resolve();
+      stopped = stopCurrentTask();
+    else {
+      publish();
+      stopped = Promise.resolve();
+    }
+    return Promise.all([stopped, cleared]).then(() => {});
   }
 
   function scheduleReconnect() {
@@ -1328,11 +1384,18 @@ export function startRemoteBackground() {
       try {
         const input = taskStartSchema.parse(m.params);
         if (!agentStartReady) throw taskStartError('TASK_START_UNSUPPORTED');
-        if (!agentStartEnabled) throw taskStartError('TASK_START_DISABLED');
+        if (!agentStartGrantLive(agentStartGrant)) {
+          checkAgentStartExpiry();
+          throw taskStartError('TASK_START_DISABLED');
+        }
         const revision = agentStartRevision;
         const chatEpoch = chatRevision;
         const check = () => {
-          if (!agentStartEnabled || revision !== agentStartRevision || chatEpoch !== chatRevision)
+          if (
+            !agentStartGrantLive(agentStartGrant) ||
+            revision !== agentStartRevision ||
+            chatEpoch !== chatRevision
+          )
             throw taskStartError('TASK_START_REVOKED');
           if (gen !== generation || !state.connected || !loopReady)
             throw taskStartError('EXT_OFFLINE');
@@ -1503,8 +1566,9 @@ export function startRemoteBackground() {
     state.keyId = config.key ? await keyIdOf(config.key) : '';
     snapshot();
     if (!changed) return;
-    agentStartEnabled = false;
-    agentStartRevision++;
+    // In-memory only: boot restores a matching durable grant after this, and
+    // panel connection changes clear it through revokeAgentStarts().
+    setAgentStartGrant(undefined);
     clearPageContexts();
     disconnect('config changed');
     backoff = BACKOFF_MIN_MS;
@@ -1564,6 +1628,11 @@ export function startRemoteBackground() {
     if (activity.recover()) await persistChat();
     await applyConfig(cfg.success ? cfg.data : remoteConfigSchema.parse({}));
     await initializeSiteAccess(`${config.relayUrl}|${await keyIdOf(config.key)}`);
+    // A recycled worker restores an unexpired grant bound to this connection only.
+    const restored = await loadAgentStartGrant(
+      config.enabled ? agentStartBinding(config.relayUrl, state.keyId) : '',
+    ).catch(() => undefined);
+    if (restored) setAgentStartGrant(restored);
     if (config.enabled && state.configured) void connect();
     publish();
   })();
@@ -1581,6 +1650,7 @@ export function startRemoteBackground() {
     if (alarm.name !== KEEPALIVE_ALARM) return;
     void boot.then(() => {
       expireDiagnostics();
+      checkAgentStartExpiry();
       checkTransportFreshness();
       if (
         !socket &&
@@ -1695,8 +1765,12 @@ export function startRemoteBackground() {
         case 'remote-agent-start-set-enabled':
           if (!m.enabled) await revokeAgentStarts();
           else {
-            agentStartEnabled = true;
-            agentStartRevision++;
+            const binding = agentStartBinding(config.relayUrl, state.keyId);
+            if (!config.enabled || !binding) throw new Error('ui.error.credentialsRequired');
+            const grant = createAgentStartGrant(binding, m.durationMinutes);
+            // Persist first: the grant is never active without its durable binding.
+            await saveAgentStartGrant(grant);
+            setAgentStartGrant(grant);
           }
           publish();
           return snapshot();
