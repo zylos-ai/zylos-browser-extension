@@ -4,6 +4,7 @@ import { languagePreference } from '../utils/i18n';
 import type { RemoteRequest, RemoteState } from '../utils/remote';
 import { DetailedDiagnosticsSettings } from './DetailedDiagnosticsSettings';
 import { SiteAccessSettings } from './SiteAccessSettings';
+import { AgentStartSettings } from './AgentStartSettings';
 
 export function ConnectionSettings({
   state,
@@ -24,7 +25,7 @@ export function ConnectionSettings({
   onToggle: () => void;
   onDiagnosticsToggle?: () => void;
   onDetailedToggle?: () => void;
-  onAgentStartToggle?: () => void;
+  onAgentStartToggle?: (enabled: boolean, durationMinutes?: number | null) => void;
   onCompatibilityToggle?: () => void;
   onSiteAccessChange?: (request: RemoteRequest) => void;
 }) {
@@ -127,31 +128,7 @@ export function ConnectionSettings({
             </span>
           </button>
         </div>
-        <div className="settings-row">
-          <div className="settings-copy">
-            <label id="agent-start-label" htmlFor="agent-start-enabled">
-              {t('agentStartPermission')}
-            </label>
-            <p id="agent-start-hint" className="settings-hint">
-              {t('agentStartPermissionHint')}
-            </p>
-          </div>
-          <button
-            id="agent-start-enabled"
-            className="connection-toggle"
-            type="button"
-            role="switch"
-            aria-checked={!!state.agentStartEnabled}
-            aria-labelledby="agent-start-label"
-            aria-describedby="agent-start-hint"
-            disabled={pending || (!state.connected && !state.agentStartEnabled)}
-            onClick={onAgentStartToggle}
-          >
-            <span className="settings-switch-track" aria-hidden="true">
-              <span />
-            </span>
-          </button>
-        </div>
+        <AgentStartSettings state={state} pending={pending} onChange={onAgentStartToggle} />
         <div className="settings-row">
           <div className="settings-copy">
             <label id="diagnostics-label" htmlFor="diagnostics-enabled">

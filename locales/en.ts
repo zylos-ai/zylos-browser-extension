@@ -70,9 +70,12 @@ export default {
   taskCompatibilityPermission: 'Extension compatibility mode',
   compatibilityHint:
     "Allow active browser tasks to remove other extensions' inline UI. Saved across tasks and restarts; cleared when the connection address or key changes.",
-  agentStartPermission: 'Allow Agent to start tasks this session',
+  agentStartPermission: 'Allow Agent to start tasks',
   agentStartPermissionHint:
-    'The connected Agent may open task tabs. Turning this off stops its active task. Permission resets when the browser worker restarts or the connection settings change.',
+    'The connected Agent may open task tabs. Turning this off stops its active task. Kept across browser restarts until it expires; cleared when the connection address, key or connection switch changes.',
+  agentStartAllowedUntil: 'Allowed until {time}',
+  agentStartAllowedUntilOff: 'Allowed until turned off',
+  agentStartUntilOff: 'Until turned off',
   detailSharePreview: 'Prepare diagnostic file',
   detailShareRecipient: 'Recipient Remote:',
   detailShareExpires: 'Sharing expires at',

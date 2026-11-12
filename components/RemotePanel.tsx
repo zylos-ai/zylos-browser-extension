@@ -308,10 +308,11 @@ export function RemotePanel() {
               enabled: !state.compatibilityEnabled,
             })
           }
-          onAgentStartToggle={() =>
+          onAgentStartToggle={(enabled, durationMinutes) =>
             void action({
               type: 'remote-agent-start-set-enabled',
-              enabled: !state.agentStartEnabled,
+              enabled,
+              ...(enabled ? { durationMinutes } : {}),
             })
           }
           onDiagnosticsToggle={() =>
