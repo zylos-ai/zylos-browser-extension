@@ -2,7 +2,10 @@
 
 ## [Unreleased]
 
+## [0.17.6] - 2026-11-12
+
 No Remote protocol change required; `agent-task-start-v1` negotiation is unchanged.
+Validated with Remote 0.10.6.
 
 ### Changed
 
