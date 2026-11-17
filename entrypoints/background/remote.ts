@@ -133,6 +133,18 @@ import {
   appendAgentEvents,
   pruneAgentHistory,
 } from '../../utils/agent-activity';
+import {
+  WORKSPACE_URL_KEY,
+  buildWorkspaceUrl,
+  normalizeWorkspaceUrl,
+} from '../../utils/workspace/config';
+import { TokenStore, chromeLocalStorage } from '../../utils/workspace/token-store';
+import { WorkspaceApi } from '../../utils/workspace/api';
+import { WorkspaceConnector } from '../../utils/workspace/connector';
+import {
+  signIn as workspaceSignIn,
+  signOut as workspaceSignOut,
+} from '../../utils/workspace/sign-in';
 
 const BACKOFF_MIN_MS = 1000;
 const BACKOFF_MAX_MS = 60_000;
@@ -219,6 +231,44 @@ export function startRemoteBackground() {
   let agentStartReady = false;
   const taskStarts = new TaskStartLedger();
   let panelMutations: Promise<unknown> = Promise.resolve();
+  /** Serialize a connection-changing transaction with the panel's consent mutations. */
+  function mutate<T>(run: () => Promise<T>): Promise<T> {
+    const pending = panelMutations.catch(() => {}).then(run);
+    panelMutations = pending;
+    return pending;
+  }
+  // ---------------------------------------------------------------- workspace
+  // OpenMax Workspace mode: obtains relay URL + Key and writes them through the
+  // same remote config path as the manual form. Tokens never leave this worker.
+  let workspaceUrl = buildWorkspaceUrl();
+  const workspaceTokens = new TokenStore({
+    storage: chromeLocalStorage,
+    fetch: (...args) => fetch(...args),
+    baseUrl: () => workspaceUrl,
+    onStatus: (status) => void workspace.setAuth(status),
+  });
+  const workspaceApi = new WorkspaceApi({
+    tokens: workspaceTokens,
+    fetch: (...args) => fetch(...args),
+    baseUrl: () => workspaceUrl,
+  });
+  const workspace = new WorkspaceConnector({
+    api: workspaceApi,
+    storage: chromeLocalStorage,
+    authStatus: () => workspaceTokens.status(),
+    baseUrl: () => workspaceUrl,
+    browserId: () => state.browserId,
+    applyRelay: (relayUrl, key) =>
+      mutate(async () => {
+        await saveConnection(relayUrl, key);
+        return state.keyId;
+      }),
+    clearRelay: () => mutate(() => saveConnection(config.relayUrl, '', true)),
+    relayMatches: (relayUrl, localKeyId) =>
+      !!config.key && config.relayUrl === relayUrl && state.keyId === localKeyId,
+    relayConnected: () => state.connected,
+    publish: () => publish(),
+  });
   let stopTaskPromise: Promise<void> | undefined;
   let pendingStop: { taskId: string; resolve: (ok: boolean) => void } | undefined;
   let chatRevision = 0;
@@ -459,6 +509,7 @@ export function startRemoteBackground() {
     state.enabled = config.enabled;
     state.relayHost = relayHostOf(config.relayUrl);
     state.relayUrl = config.relayUrl;
+    state.workspace = workspace.view();
     return state;
   }
   let hadControl = false;
@@ -1127,7 +1178,8 @@ export function startRemoteBackground() {
       });
       // Transport loss pauses control; report it with the negotiated control-lost trigger.
       incidents?.trigger(detailedContext(), 'control-lost');
-      const terminalClose = [4001, 4002, 4004, 4005].includes(ev.code);
+      const workspaceKeyRejected = (ev.code === 4003 || ev.code === 4004) && workspace.ownsRelay();
+      const terminalClose = [4001, 4002, 4004, 4005].includes(ev.code) || workspaceKeyRejected;
       const freshRetry = ev.code === 4005 && !freshRecoveryAttempted;
       if (freshRetry) freshRecoveryAttempted = true;
       reconnectBlocked = terminalClose && !freshRetry;
@@ -1166,6 +1218,7 @@ export function startRemoteBackground() {
       else if (ev.code === 1006 && !recoverable && !state.error)
         state.error = 'ui.error.connectionRejected';
       publish();
+      if (workspaceKeyRejected) void workspace.onKeyRejected(ev.code as 4003 | 4004);
       if (!reconnectBlocked) scheduleReconnect();
     };
     ws.onclose = transportClosed;
@@ -1287,6 +1340,7 @@ export function startRemoteBackground() {
         if (resumeReady) for (const frame of outbox.values()) sendRaw(frame);
         wakeTransport();
         publish();
+        void workspace.onRelayReady();
         return;
       case 'task-ack':
         if (m.runtimeEpoch === runtimeEpoch && outbox.delete(m.deliveryId)) publish();
@@ -1595,6 +1649,35 @@ export function startRemoteBackground() {
     void connect();
   }
 
+  // Shared by the manual form and Workspace mode: one path into the remote config.
+  async function saveConnection(relayUrl: string, key: string, allowEmptyKey = false) {
+    const next = remoteConfigSchema.parse({
+      relayUrl: relayUrl.trim(),
+      key: key.trim(),
+      enabled: config.enabled,
+      compatibilityEnabled:
+        config.compatibilityEnabled &&
+        relayUrl.trim() === config.relayUrl &&
+        key.trim() === config.key,
+    });
+    if (!next.relayUrl || (!next.key && !allowEmptyKey))
+      throw new Error('ui.error.credentialsRequired');
+    // Revoke sharing before persisting a different recipient. A worker
+    // suspension between these writes must never expose the old records.
+    if (next.key !== config.key || next.relayUrl !== config.relayUrl) {
+      config.compatibilityEnabled = false;
+      revokeAutomaticRemoval();
+      const stopped = revokeAgentStarts();
+      const siteAccessCleared = clearSiteAccess();
+      detailed.clear();
+      await Promise.all([stopped, siteAccessCleared]);
+      await setDiagnosticsEnabled(false);
+    }
+    await diagnosticStorage('write', () => chrome.storage.local.set({ [REMOTE_CONFIG_KEY]: next }));
+    await applyConfig(next);
+    await initializeSiteAccess(`${config.relayUrl}|${await keyIdOf(config.key)}`);
+  }
+
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && changes[LANGUAGE_STORAGE_KEY])
       setWorkerLanguage(changes[LANGUAGE_STORAGE_KEY].newValue);
@@ -1645,6 +1728,12 @@ export function startRemoteBackground() {
       config.enabled ? agentStartBinding(config.relayUrl, state.keyId) : '',
     ).catch(() => undefined);
     if (restored) setAgentStartGrant(restored);
+    const savedWorkspaceUrl = (await chrome.storage.local.get([WORKSPACE_URL_KEY]))[
+      WORKSPACE_URL_KEY
+    ];
+    if (typeof savedWorkspaceUrl === 'string')
+      workspaceUrl = normalizeWorkspaceUrl(savedWorkspaceUrl) || workspaceUrl;
+    await workspace.init().catch(() => {});
     if (config.enabled && state.configured) void connect();
     publish();
   })();
@@ -1664,6 +1753,7 @@ export function startRemoteBackground() {
       expireDiagnostics();
       checkAgentStartExpiry();
       checkTransportFreshness();
+      void workspace.heartbeat();
       if (
         !socket &&
         config.enabled &&
@@ -1787,32 +1877,53 @@ export function startRemoteBackground() {
           publish();
           return snapshot();
         case 'remote-save': {
-          const next = remoteConfigSchema.parse({
-            relayUrl: m.relayUrl.trim(),
-            key: m.key.trim(),
-            enabled: config.enabled,
-            compatibilityEnabled:
-              config.compatibilityEnabled &&
-              m.relayUrl.trim() === config.relayUrl &&
-              m.key.trim() === config.key,
+          // (Already serialized as a consent mutation; saveConnection is called directly.)
+          // Manual URL + Key is a separate mode: leaving Workspace mode forgets its session.
+          await saveConnection(m.relayUrl, m.key);
+          if (workspace.current()) await workspace.forgetLocal();
+          return snapshot();
+        }
+        case 'workspace-sign-in':
+          await workspaceSignIn({
+            baseUrl: workspaceUrl,
+            redirectUri: chrome.identity.getRedirectURL(),
+            launch: (url) => chrome.identity.launchWebAuthFlow({ url, interactive: true }),
+            fetch: (...args) => fetch(...args),
+            tokens: workspaceTokens,
           });
-          if (!next.relayUrl || !next.key) throw new Error('ui.error.credentialsRequired');
-          // Revoke sharing before persisting a different recipient. A worker
-          // suspension between these writes must never expose the old records.
-          if (next.key !== config.key || next.relayUrl !== config.relayUrl) {
-            config.compatibilityEnabled = false;
-            revokeAutomaticRemoval();
-            const stopped = revokeAgentStarts();
-            const siteAccessCleared = clearSiteAccess();
-            detailed.clear();
-            await Promise.all([stopped, siteAccessCleared]);
-            await setDiagnosticsEnabled(false);
+          await workspace.setAuth('signed-in');
+          void workspace.loadAgents();
+          return snapshot();
+        case 'workspace-sign-out':
+          await workspace.signedOut();
+          await workspaceSignOut({
+            baseUrl: workspaceUrl,
+            fetch: (...args) => fetch(...args),
+            tokens: workspaceTokens,
+          });
+          return snapshot();
+        case 'workspace-agents':
+          void workspace.loadAgents();
+          return snapshot();
+        case 'workspace-connect':
+          // Long-running (Agent preparation): progress is published as state.
+          void workspace.connect(m).catch(() => publish());
+          return snapshot();
+        case 'workspace-reconnect':
+          void workspace.reconnect().catch(() => publish());
+          return snapshot();
+        case 'workspace-revoke':
+          await workspace.revoke();
+          return snapshot();
+        case 'workspace-set-url': {
+          const next = normalizeWorkspaceUrl(m.url);
+          if (next === null) throw new Error('ui.error.workspaceUrlInvalid');
+          if (next !== workspaceUrl) {
+            if (workspace.current()) await workspace.signedOut();
+            workspaceUrl = next;
+            await chrome.storage.local.set({ [WORKSPACE_URL_KEY]: next });
+            await workspace.setAuth(await workspaceTokens.status());
           }
-          await diagnosticStorage('write', () =>
-            chrome.storage.local.set({ [REMOTE_CONFIG_KEY]: next }),
-          );
-          await applyConfig(next);
-          await initializeSiteAccess(`${config.relayUrl}|${await keyIdOf(config.key)}`);
           return snapshot();
         }
         case 'remote-set-enabled': {

@@ -2422,3 +2422,54 @@ it('retains accepted decision progress without log events, but excludes supersed
   expect((await history()).events).toHaveLength(2);
   expect(JSON.stringify(await history())).not.toContain('Superseded progress');
 });
+
+describe('OpenMax Workspace mode', () => {
+  const workspaceRecord = (relayUrl: string) => ({
+    agentMemberId: 'ag1',
+    agentName: 'Max',
+    browserName: 'Chrome · Mac',
+    phase: 'connected',
+    connectionId: '22222222-2222-4222-8222-222222222222',
+    relayUrl,
+    localKeyId: 'abababababab',
+  });
+
+  it('clears a Workspace-issued Key on 4004 and offers Reconnect instead of redialing', async () => {
+    const relayUrl = (storage.remoteConfig as { relayUrl: string }).relayUrl;
+    storage.workspaceConnection = workspaceRecord(relayUrl);
+    const ws = await bootConnected();
+    expect((await state()).workspace).toMatchObject({ connection: { phase: 'connected' } });
+    ws.serverClose(4004);
+    await flush();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect((storage.remoteConfig as { key: string }).key).toBe('');
+    expect(sockets).toHaveLength(1);
+    const view = (await state()).workspace as { connection: { phase: string; error: string } };
+    expect(view.connection).toMatchObject({
+      phase: 'key-rejected',
+      error: 'ui.error.workspaceKeyRevoked',
+    });
+    expect(JSON.stringify(await state())).not.toContain(KEY);
+  });
+
+  it('leaves a manual connection unchanged on 4003', async () => {
+    const ws = await bootConnected();
+    ws.serverClose(4003);
+    await flush();
+    expect((storage.remoteConfig as { key: string }).key).toBe(KEY);
+    expect((await state()).workspace).not.toHaveProperty('connection');
+  });
+
+  it('saving a manual URL + Key leaves Workspace mode', async () => {
+    const relayUrl = (storage.remoteConfig as { relayUrl: string }).relayUrl;
+    storage.workspaceConnection = workspaceRecord(relayUrl);
+    await bootConnected();
+    const saved = await ask({
+      type: 'remote-save',
+      relayUrl: 'wss://manual.example/ext',
+      key: 'c'.repeat(64),
+    });
+    expect(saved.ok).toBe(true);
+    expect(storage.workspaceConnection).toBeUndefined();
+  });
+});

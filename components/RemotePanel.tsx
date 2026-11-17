@@ -291,6 +291,7 @@ export function RemotePanel() {
         <ConnectionSettings
           state={state}
           onSiteAccessChange={(command) => void action(command)}
+          onWorkspaceRequest={(command) => void action(command)}
           saving={pending === 'remote-save'}
           pending={pending !== null}
           onSave={async (relayUrl, key) => {

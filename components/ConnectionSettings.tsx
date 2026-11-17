@@ -5,6 +5,7 @@ import type { RemoteRequest, RemoteState } from '../utils/remote';
 import { DetailedDiagnosticsSettings } from './DetailedDiagnosticsSettings';
 import { SiteAccessSettings } from './SiteAccessSettings';
 import { AgentStartSettings } from './AgentStartSettings';
+import { WorkspaceConnect } from './WorkspaceConnect';
 
 export function ConnectionSettings({
   state,
@@ -17,6 +18,7 @@ export function ConnectionSettings({
   onAgentStartToggle,
   onCompatibilityToggle,
   onSiteAccessChange,
+  onWorkspaceRequest,
 }: {
   state: RemoteState;
   saving: boolean;
@@ -28,6 +30,7 @@ export function ConnectionSettings({
   onAgentStartToggle?: (enabled: boolean, durationMinutes?: number | null) => void;
   onCompatibilityToggle?: () => void;
   onSiteAccessChange?: (request: RemoteRequest) => void;
+  onWorkspaceRequest?: (request: RemoteRequest) => void;
 }) {
   const { t, preference, changeLanguage, savingLanguage, languageError } = useI18n();
   const [relayUrl, setRelayUrl] = useState(state.relayUrl || 'ws://127.0.0.1:3802/ext');
@@ -38,6 +41,9 @@ export function ConnectionSettings({
         <h1 id="settings-title">{state.configured ? t('settings') : t('connectTitle')}</h1>
         <p>{state.configured ? t('settingsDescription') : t('connectDescription')}</p>
       </div>
+      {onWorkspaceRequest && (
+        <WorkspaceConnect state={state} pending={pending} onRequest={onWorkspaceRequest} />
+      )}
       <section className="settings-section" aria-labelledby="connection-heading">
         <h2 id="connection-heading">{t('agentConnection')}</h2>
         <form

@@ -16,6 +16,7 @@ import { taskNoticeSchema } from './task-notice';
 import { panelDiagnosticSchema } from './diagnostics-schema';
 import { siteAccessStateSchema, siteDurationSchema } from './site-access';
 import { agentStartDurationSchema } from './agent-start-grant';
+import { workspaceViewSchema } from './workspace/connector';
 
 export const REMOTE_SUBPROTOCOL = 'zylos-browser-remote.v3';
 export const REMOTE_KEY_PROTO_PREFIX = 'key.';
@@ -157,6 +158,8 @@ export const remoteStateSchema = z.object({
     })
     .nullable(),
   chat: z.array(chatEntrySchema),
+  /** OpenMax Workspace mode; never carries tokens or the Key. */
+  workspace: workspaceViewSchema.optional(),
 });
 export type RemoteState = z.infer<typeof remoteStateSchema>;
 
@@ -234,6 +237,21 @@ export const remoteRequestSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('remote-state') }).strict(),
   z.object({ type: z.literal('remote-save'), relayUrl: z.string(), key: z.string() }).strict(),
   z.object({ type: z.literal('remote-set-enabled'), enabled: z.boolean() }).strict(),
+  z.object({ type: z.literal('workspace-sign-in') }).strict(),
+  z.object({ type: z.literal('workspace-sign-out') }).strict(),
+  z.object({ type: z.literal('workspace-agents') }).strict(),
+  z
+    .object({
+      type: z.literal('workspace-connect'),
+      agentMemberId: z.string().min(1).max(128),
+      agentName: z.string().max(200),
+      browserName: z.string().min(1).max(100),
+      confirm: z.boolean(),
+    })
+    .strict(),
+  z.object({ type: z.literal('workspace-reconnect') }).strict(),
+  z.object({ type: z.literal('workspace-revoke') }).strict(),
+  z.object({ type: z.literal('workspace-set-url'), url: z.string().max(512) }).strict(),
   z
     .object({
       type: z.literal('remote-chat-send'),

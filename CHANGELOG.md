@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- OpenMax Workspace mode: "Log in to OpenMax Workspace" (OAuth + PKCE via
+  `chrome.identity`), choose an Agent (first-time Agents need a confirm step),
+  name this browser, and the extension waits for the Agent to prepare, then
+  writes the relay URL and Key into the existing connection settings — the
+  Remote handshake is unchanged. Reports connected plus a heartbeat, supports
+  Switch Agent, Reconnect after a revoked/expired (4004) or rebound (4003) Key,
+  Revoke and Log out. The manual URL + Key form remains available. Tokens stay
+  in the service worker's `chrome.storage.local`; Workspace sign-in failures
+  never drop an established relay connection. New `identity` permission; the
+  Workspace API origin comes from `WXT_WORKSPACE_URL` (development: INT).
+- A Key change (switching Agent, Reconnect with a new Key) resets what is bound
+  to `relayUrl|keyId`: custom site rules, the Agent-start grant, compatibility
+  mode and diagnostics consent — same as changing the manual Key.
+
 ## [0.17.8] - 2026-11-20
 
 ### Fixed

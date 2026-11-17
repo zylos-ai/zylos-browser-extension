@@ -18,6 +18,7 @@ test('build exposes one sidebar and no toolbar popup', () => {
   assert.deepEqual([...manifest.permissions].sort(), [
     'alarms',
     'debugger',
+    'identity',
     'scripting',
     'sidePanel',
     'storage',
@@ -25,7 +26,11 @@ test('build exposes one sidebar and no toolbar popup', () => {
     'tabs',
     'webNavigation',
   ]);
-  assert.deepEqual(manifest.host_permissions, ['http://*/*', 'https://*/*']);
+  // Plus only the OpenMax Workspace API origin when the build sets one.
+  assert.deepEqual(manifest.host_permissions.slice(0, 2), ['http://*/*', 'https://*/*']);
+  assert.ok(manifest.host_permissions.length <= 3);
+  for (const origin of manifest.host_permissions.slice(2))
+    assert.match(origin, /^https:\/\/[^/*]+\/\*$/);
   assert.equal(manifest.externally_connectable, undefined);
   assert.ok(!manifest.web_accessible_resources?.length);
   const pages = fs.readdirSync(output).filter((file) => file.endsWith('.html'));

@@ -16,6 +16,18 @@ try {
 } catch {
   /* Non-Git source archives still receive a unique build identity. */
 }
+// OpenMax Workspace API origin (sign-in + browser connections). Set
+// WXT_WORKSPACE_URL for release builds; development builds default to INT.
+function workspaceOrigin(mode: string): string {
+  const value =
+    process.env.WXT_WORKSPACE_URL || (mode === 'development' ? 'https://cws-int.coco.xyz' : '');
+  if (!value) return '';
+  const url = new URL(value);
+  if (url.protocol !== 'https:' && url.hostname !== 'localhost')
+    throw new Error('WXT_WORKSPACE_URL must be https');
+  return url.origin;
+}
+
 const detailBuild = JSON.stringify({
   id: randomUUID(),
   commit,
@@ -30,7 +42,7 @@ export default defineConfig({
     define: { __DETAIL_BUILD__: JSON.stringify(detailBuild) },
     plugins: [tailwindcss()],
   }),
-  manifest: {
+  manifest: ({ mode }) => ({
     name: 'Zylos Browser',
     description: '__MSG_extensionDescription__',
     default_locale: 'en',
@@ -45,11 +57,17 @@ export default defineConfig({
       'sidePanel',
       'tabGroups',
       'webNavigation',
+      // OpenMax Workspace sign-in via launchWebAuthFlow (chromiumapp.org callback).
+      'identity',
     ],
     // The sidebar can stay open while the owner switches sites. activeTab alone
     // does not grant access to each newly selected page. Reads still target only
     // the page bound to an owner message, never all open tabs.
-    host_permissions: ['http://*/*', 'https://*/*'],
+    host_permissions: [
+      'http://*/*',
+      'https://*/*',
+      ...(workspaceOrigin(mode) ? [`${workspaceOrigin(mode)}/*`] : []),
+    ],
     action: {
       default_title: '__MSG_openSidebar__',
       default_icon: {
@@ -61,5 +79,5 @@ export default defineConfig({
     },
     content_security_policy: { extension_pages: "script-src 'self'; object-src 'self'" },
     // The relay connection uses WebSocket; no website-to-extension entrypoint is needed.
-  },
+  }),
 });
