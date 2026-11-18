@@ -1155,9 +1155,7 @@ test('header clear stays out of settings and cannot interrupt an active task', a
   expect(send).toHaveBeenLastCalledWith({ type: 'remote-chat-clear' });
   expect(clear().disabled).toBe(true);
   expect(container.querySelector('#settings')).not.toBeNull();
-  expect(container.querySelector<HTMLInputElement>('#relay-url')?.value).toBe(
-    'ws://localhost:3802/ext',
-  );
+  expect(container.querySelector('#settings #relay-url')).toBeNull();
   await click('#connection-enabled');
   expect(send).toHaveBeenLastCalledWith({ type: 'remote-set-enabled', enabled: false });
 });
@@ -1165,6 +1163,10 @@ test('header clear stays out of settings and cannot interrupt an active task', a
 test('settings show the saved URL without exposing the key and return to chat after saving', async () => {
   await mount();
   await click('.settings-button');
+  await click('.connection-manage');
+  expect(container.querySelector('#connect')).not.toBeNull();
+  // A manual connection opens the manual form directly.
+  expect(container.querySelector('.manual-toggle')?.getAttribute('aria-expanded')).toBe('true');
   expect(container.querySelector<HTMLInputElement>('#relay-url')?.value).toBe(
     'ws://localhost:3802/ext',
   );
@@ -1177,8 +1179,9 @@ test('settings show the saved URL without exposing the key and return to chat af
     relayUrl: 'ws://localhost:3802/ext',
     key: 'ab'.repeat(32),
   });
-  expect(container.querySelector('#settings')).toBeNull();
+  expect(container.querySelector('#connect')).toBeNull();
   await click('.settings-button');
+  await click('.connection-manage');
   expect(container.querySelector<HTMLInputElement>('#access-key')?.value).toBe('');
 });
 
@@ -1858,33 +1861,168 @@ test('history renders file metadata next to image previews without binary data',
   expect(container.querySelectorAll('.message-attachments img')).toHaveLength(1);
 });
 
-test('Workspace card: switch toggles to collapse, hides the connected Agent, explains confirmation; manual connect stays collapsed', async () => {
+const workspaceConnected = (): NonNullable<RemoteState['workspace']> => ({
+  baseUrl: 'https://ws.example',
+  auth: 'signed-in',
+  agents: [
+    { id: 'ag1', name: 'Max', authorized: true },
+    { id: 'ag2', name: 'Ada', authorized: false },
+  ],
+  connection: { agentMemberId: 'ag1', agentName: 'Max', browserName: 'Chrome', phase: 'connected' },
+});
+
+test('signed out: focused connect view with one primary sign-in and a hidden manual form', async () => {
+  state = { ...state, configured: false, connected: false, relayUrl: '' };
+  state.workspace = { baseUrl: 'https://ws.example', auth: 'signed-out' };
+  await mount();
+  expect(container.querySelector('#settings')).toBeNull();
+  expect(container.querySelector('#connect h1')?.textContent).toBe('连接你的 Agent');
+  const primary = container.querySelectorAll('#connect .btn-primary');
+  expect(primary).toHaveLength(1);
+  expect(primary[0]!.textContent).toBe('登录 OpenMax Workspace');
+  expect(container.querySelector('#relay-url')).toBeNull();
+  expect(container.querySelector('#workspace-url')).toBeNull();
+  send.mockClear();
+  await click('#connect .btn-primary');
+  expect(send).toHaveBeenLastCalledWith({ type: 'workspace-sign-in' });
+  await click('.manual-toggle');
+  expect(container.querySelector('#relay-url')).not.toBeNull();
+  expect(container.querySelector<HTMLInputElement>('#workspace-url')?.value).toBe(
+    'https://ws.example',
+  );
+  // Settings stays reachable and only summarizes the connection.
+  await click('.settings-button');
+  expect(container.querySelector('#settings .connection-summary')?.textContent).toContain('未连接');
+  await click('.connection-manage');
+  expect(container.querySelector('#connect')).not.toBeNull();
+});
+
+test('agent picker: avatar rows with status chips, whole row selects, confirm then name', async () => {
+  state = { ...state, configured: false, connected: false };
   state.workspace = {
     baseUrl: 'https://ws.example',
     auth: 'signed-in',
     agents: [
-      { id: 'ag1', name: 'Max', authorized: true },
-      { id: 'ag2', name: 'Ada', authorized: false },
+      { id: 'ag1', name: 'max', authorized: true, avatarUrl: 'https://ws.example/a.png' },
+      { id: 'ag2', name: 'ada', authorized: false },
     ],
+  };
+  await mount();
+  const rows = [...container.querySelectorAll<HTMLButtonElement>('.workspace-agent')];
+  expect(rows.map((row) => row.querySelector('.agent-row-name')?.textContent)).toEqual([
+    'max',
+    'ada',
+  ]);
+  expect(rows[0]!.querySelector('img')?.getAttribute('src')).toBe('https://ws.example/a.png');
+  expect(rows[1]!.querySelector('.agent-avatar')?.textContent).toBe('A');
+  expect(rows.map((row) => row.querySelector('.agent-chip')?.textContent)).toEqual([
+    '已授权',
+    '需确认',
+  ]);
+  expect(container.querySelector('.connect-heading p')?.textContent).toBe(
+    '首次连接的 Agent 需确认授权。',
+  );
+  await act(async () => rows[1]!.click());
+  expect(container.querySelector('.capability-list')).not.toBeNull();
+  await click('#connect .btn-primary');
+  send.mockClear();
+  await click('#connect button[type="submit"]');
+  expect(send).toHaveBeenLastCalledWith(
+    expect.objectContaining({ type: 'workspace-connect', agentMemberId: 'ag2', confirm: true }),
+  );
+});
+
+test('agent list error is one line with Retry; loading shows skeleton rows', async () => {
+  state = { ...state, configured: false, connected: false };
+  state.workspace = { baseUrl: 'https://ws.example', auth: 'signed-in', busy: 'agents' };
+  await mount();
+  expect(container.querySelectorAll('.agent-row.is-skeleton')).toHaveLength(3);
+  state = {
+    ...state,
+    workspace: {
+      baseUrl: 'https://ws.example',
+      auth: 'signed-in',
+      error: 'ui.error.workspaceUnreachable',
+    },
+  };
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(container.querySelector('.workspace-error')?.textContent).toBe(
+    '无法连接 Workspace，请稍后重试。重试',
+  );
+  send.mockClear();
+  await click('.workspace-error .link-button');
+  expect(send).toHaveBeenLastCalledWith({ type: 'workspace-agents' });
+});
+
+test('preparing shows the chosen Agent with a spinner, then returns to chat once connected', async () => {
+  state = { ...state, configured: false, connected: false };
+  state.workspace = {
+    ...workspaceConnected(),
+    connection: { ...workspaceConnected().connection!, phase: 'preparing' },
+  };
+  await mount();
+  expect(container.querySelector('#connect .agent-row .loading')).not.toBeNull();
+  expect(container.querySelector('#connect .agent-row')?.textContent).toContain('正在准备…');
+  expect(container.querySelector('#connect .btn-primary')).toBeNull();
+  state = { ...state, configured: true, connected: true, workspace: workspaceConnected() };
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(container.querySelector('#connect')).toBeNull();
+  expect(container.querySelector('.chat-panel')).not.toBeNull();
+});
+
+test('connected: compact header chip opens a menu with switch, sign-out and a confirmed revoke', async () => {
+  state.workspace = workspaceConnected();
+  await mount();
+  const chip = () => container.querySelector<HTMLButtonElement>('.connection-chip')!;
+  expect(chip().textContent).toContain('Max');
+  expect(chip().classList.contains('is-connected')).toBe(true);
+  expect(container.querySelector('.chat-panel')).not.toBeNull();
+  await act(async () => chip().click());
+  const items = [...container.querySelectorAll('.connection-menu [role="menuitem"]')];
+  expect(items.map((el) => el.textContent)).toEqual(['切换 Agent', '退出登录', '断开并撤销授权']);
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+  send.mockClear();
+  await click('.connection-menu .workspace-revoke');
+  expect(confirm).toHaveBeenCalled();
+  expect(send).not.toHaveBeenCalledWith({ type: 'workspace-revoke' });
+  confirm.mockReturnValue(true);
+  await act(async () => chip().click());
+  await click('.connection-menu .workspace-revoke');
+  expect(send).toHaveBeenLastCalledWith({ type: 'workspace-revoke' });
+  confirm.mockRestore();
+  // Switch opens the picker without the connected Agent.
+  await act(async () => chip().click());
+  await click('.connection-menu [role="menuitem"]');
+  expect(container.querySelector('#connect h1')?.textContent).toBe('切换 Agent');
+  expect(
+    [...container.querySelectorAll('.workspace-agent .agent-row-name')].map((el) => el.textContent),
+  ).toEqual(['Ada']);
+  await click('.settings-button');
+  expect(container.querySelector('.chat-panel')).not.toBeNull();
+});
+
+test('failed: inline banner with Reconnect primary and Switch Agent secondary', async () => {
+  state.connected = false;
+  state.workspace = {
+    ...workspaceConnected(),
     connection: {
-      agentMemberId: 'ag1',
-      agentName: 'Max',
-      browserName: 'Chrome',
-      phase: 'connected',
+      ...workspaceConnected().connection!,
+      phase: 'key-rejected',
+      error: 'ui.error.workspaceKeyRevoked',
     },
   };
   await mount();
-  await click('.settings-button');
-  expect(container.querySelector<HTMLDetailsElement>('.manual-connect')?.open).toBe(false);
-  const toggle = () =>
-    container.querySelector<HTMLButtonElement>('.workspace-actions .btn[aria-expanded]')!;
-  expect(toggle().textContent).toBe('切换 Agent');
-  await act(async () => toggle().click());
-  expect(toggle().textContent).toBe('收起');
-  const rows = [...container.querySelectorAll('.workspace-agent')].map((el) => el.textContent);
-  expect(rows).toEqual(['Ada首次连接需确认']);
-  expect(container.querySelector('.workspace-agents')?.textContent).toContain(
-    '需要你授权它使用这个浏览器',
-  );
-  expect(container.querySelector('.workspace-revoke')?.textContent).toBe('断开并撤销授权');
+  const banner = () => container.querySelector('.chat-panel .workspace-banner')!;
+  expect(banner().textContent).toContain('连接 Key 已被撤销或过期');
+  expect(container.querySelector('.offline-notice')).toBeNull();
+  const buttons = [...banner().querySelectorAll('button')];
+  expect(buttons.map((b) => [b.textContent, b.classList.contains('btn-primary')])).toEqual([
+    ['重新连接', true],
+    ['切换 Agent', false],
+  ]);
+  send.mockClear();
+  await act(async () => buttons[0]!.click());
+  expect(send).toHaveBeenLastCalledWith({ type: 'workspace-reconnect' });
+  await act(async () => buttons[1]!.click());
+  expect(container.querySelector('#connect h1')?.textContent).toBe('切换 Agent');
 });

@@ -1,108 +1,68 @@
-import { useState } from 'react';
 import { useI18n } from './LanguageProvider';
 import { languagePreference } from '../utils/i18n';
 import type { RemoteRequest, RemoteState } from '../utils/remote';
 import { DetailedDiagnosticsSettings } from './DetailedDiagnosticsSettings';
 import { SiteAccessSettings } from './SiteAccessSettings';
 import { AgentStartSettings } from './AgentStartSettings';
-import { WorkspaceConnect } from './WorkspaceConnect';
+import { AgentAvatar, connectionAvatar } from './WorkspaceConnect';
 
 export function ConnectionSettings({
   state,
-  saving,
   pending,
-  onSave,
   onToggle,
   onDiagnosticsToggle,
   onDetailedToggle,
   onAgentStartToggle,
   onCompatibilityToggle,
   onSiteAccessChange,
-  onWorkspaceRequest,
+  status,
+  onOpenConnect,
 }: {
   state: RemoteState;
-  saving: boolean;
   pending: boolean;
-  onSave: (relayUrl: string, key: string) => Promise<boolean>;
   onToggle: () => void;
   onDiagnosticsToggle?: () => void;
   onDetailedToggle?: () => void;
   onAgentStartToggle?: (enabled: boolean, durationMinutes?: number | null) => void;
   onCompatibilityToggle?: () => void;
   onSiteAccessChange?: (request: RemoteRequest) => void;
-  onWorkspaceRequest?: (request: RemoteRequest) => void;
+  status: string;
+  onOpenConnect: () => void;
 }) {
   const { t, preference, changeLanguage, savingLanguage, languageError } = useI18n();
-  const [relayUrl, setRelayUrl] = useState(state.relayUrl || 'ws://127.0.0.1:3802/ext');
-  const [key, setKey] = useState('');
+  const connection = state.workspace?.connection;
   return (
     <main id="settings" className="settings-page" aria-labelledby="settings-title">
       <div className="settings-intro">
-        <h1 id="settings-title">{state.configured ? t('settings') : t('connectTitle')}</h1>
-        <p>{state.configured ? t('settingsDescription') : t('connectDescription')}</p>
+        <h1 id="settings-title">{t('settings')}</h1>
       </div>
-      {onWorkspaceRequest && (
-        <WorkspaceConnect state={state} pending={pending} onRequest={onWorkspaceRequest} />
-      )}
-      <details
-        className="settings-section manual-connect"
-        // Workspace is the primary path; keep the manual form open for manual setups.
-        open={!onWorkspaceRequest || (state.configured && !state.workspace?.connection)}
-      >
-        <summary id="connection-heading">{t('manualConnectTitle')}</summary>
-        <p className="settings-hint">{t('manualConnectHint')}</p>
-        <form
-          className="settings-form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!pending && relayUrl.trim() && key.trim())
-              void onSave(relayUrl, key).then((ok) => {
-                if (ok) setKey('');
-              });
-          }}
-        >
-          <label className="form-field" htmlFor="relay-url">
-            <span>{t('relayUrl')}</span>
-            <input
-              className="input"
-              id="relay-url"
-              value={relayUrl}
-              onChange={(e) => setRelayUrl(e.target.value)}
-              placeholder="ws://127.0.0.1:3802/ext"
-              autoComplete="off"
-              spellCheck={false}
-              required
-              disabled={pending}
+      <section className="settings-section connection-summary" aria-labelledby="connection-heading">
+        <h2 id="connection-heading">{t('connectionSectionTitle')}</h2>
+        <div className="connection-summary-row">
+          {connection ? (
+            <AgentAvatar name={connection.agentName} url={connectionAvatar(state.workspace)} />
+          ) : (
+            <span
+              className={`status-dot${state.connected ? ' is-connected' : ''}`}
+              aria-hidden="true"
             />
-          </label>
-          <label className="form-field" htmlFor="access-key">
-            <span>{t('accessKey')}</span>
-            <input
-              className="input"
-              id="access-key"
-              type="password"
-              value={key}
-              onChange={(e) => setKey(e.target.value)}
-              placeholder={state.keyId ? t('savedKeyPlaceholder') : t('keyPlaceholder')}
-              aria-describedby="key-hint"
-              autoComplete="off"
-              spellCheck={false}
-              required
-              disabled={pending}
-            />
-            <span id="key-hint" className="settings-hint">
-              {t('keyHint')}
-            </span>
-          </label>
+          )}
+          <span className="connection-summary-text">
+            {connection?.agentName ||
+              (state.configured ? state.relayHost || t('manualConnectTitle') : t('notConnected'))}
+            {state.configured && (
+              <small className={state.connected ? 'is-connected' : ''}>{status}</small>
+            )}
+          </span>
           <button
-            className="btn btn-primary save-button"
-            type="submit"
-            disabled={pending || !relayUrl.trim() || !key.trim()}
+            className="btn btn-outline btn-sm connection-manage"
+            type="button"
+            onClick={onOpenConnect}
           >
-            {saving ? t('saving') : state.enabled ? t('saveConnect') : t('saveSettings')}
+            {state.configured ? t('manageConnection') : t('connectAction')}
           </button>
-        </form>
-      </details>
+        </div>
+      </section>
       <SiteAccessSettings state={state} pending={pending} onChange={onSiteAccessChange} />
       <DetailedDiagnosticsSettings
         state={state}
