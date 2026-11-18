@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useI18n } from './LanguageProvider';
 import { Brand } from './Brand';
 import type { RemoteRequest, RemoteState } from '../utils/remote';
-import { defaultBrowserName } from '../utils/workspace/config';
+import { defaultBrowserName, workspaceEnvs } from '../utils/workspace/config';
 import type { WorkspaceView } from '../utils/workspace/connector';
 
 type Agent = NonNullable<WorkspaceView['agents']>[number];
@@ -309,22 +309,18 @@ export function ConnectView({
           {ws.auth === 'expired' ? t('workspaceLoginExpiredTitle') : t('connectTitle')}
         </h1>
         <p>{ws.auth === 'expired' ? t('workspaceLoginExpired') : t('connectDescription')}</p>
-        {ws.baseUrl ? (
-          <button
-            className="btn btn-primary save-button connect-primary"
-            type="button"
-            disabled={busy}
-            onClick={() => onRequest({ type: 'workspace-sign-in' })}
-          >
-            {busy
-              ? t('workspaceSigningIn')
-              : ws.auth === 'expired'
-                ? t('workspaceLoginAgain')
-                : t('workspaceLogin')}
-          </button>
-        ) : (
-          <WorkspaceUrlForm initial="" busy={busy} primary onRequest={onRequest} />
-        )}
+        <button
+          className="btn btn-primary save-button connect-primary"
+          type="button"
+          disabled={busy}
+          onClick={() => onRequest({ type: 'workspace-sign-in' })}
+        >
+          {busy
+            ? t('workspaceSigningIn')
+            : ws.auth === 'expired'
+              ? t('workspaceLoginAgain')
+              : t('workspaceLogin')}
+        </button>
         {errorLine(ws.error)}
       </div>
     );
@@ -565,9 +561,7 @@ export function ConnectView({
         {manualOpen && (
           <div id="manual-connect-form" className="manual-panel">
             <ManualConnectForm state={state} pending={pending} saving={saving} onSave={onSave} />
-            {ws?.baseUrl && (
-              <WorkspaceUrlForm initial={ws.baseUrl} busy={busy} onRequest={onRequest} />
-            )}
+            {ws && <WorkspaceEnvSelect current={ws.baseUrl} busy={busy} onRequest={onRequest} />}
           </div>
         )}
       </div>
@@ -654,48 +648,38 @@ function ManualConnectForm({
   );
 }
 
-function WorkspaceUrlForm({
-  initial,
+/** Test builds only: pick one of the build-configured Workspace environments. */
+function WorkspaceEnvSelect({
+  current,
   busy,
-  primary = false,
   onRequest,
 }: {
-  initial: string;
+  current: string;
   busy: boolean;
-  primary?: boolean;
   onRequest: (request: RemoteRequest) => void;
 }) {
   const { t } = useI18n();
-  const [url, setUrl] = useState(initial);
+  const envs = workspaceEnvs();
+  if (envs.length < 2) return null;
   return (
-    <form
-      className="settings-form workspace-url-form"
-      onSubmit={(e) => {
-        e.preventDefault();
-        onRequest({ type: 'workspace-set-url', url });
-      }}
-    >
-      <label className="form-field" htmlFor="workspace-url">
-        <span>{t('workspaceAddress')}</span>
-        <input
-          className="input"
-          id="workspace-url"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          placeholder="https://"
-          autoComplete="off"
-          spellCheck={false}
+    <div className="settings-form workspace-env-form">
+      <label className="form-field" htmlFor="workspace-env">
+        <span>{t('workspaceEnvironment')}</span>
+        <select
+          id="workspace-env"
+          className="select"
+          value={current}
           disabled={busy}
-        />
-        {!primary && <span className="settings-hint">{t('workspaceAddressHint')}</span>}
+          onChange={(e) => onRequest({ type: 'workspace-set-url', url: e.target.value })}
+        >
+          {envs.map((env) => (
+            <option key={env.url} value={env.url}>
+              {env.name}
+            </option>
+          ))}
+        </select>
+        <span className="settings-hint">{t('workspaceEnvironmentHint')}</span>
       </label>
-      <button
-        className={`btn save-button ${primary ? 'btn-primary' : 'btn-outline'}`}
-        type="submit"
-        disabled={busy || !url.trim() || url.trim() === initial}
-      >
-        {t('saveSettings')}
-      </button>
-    </form>
+    </div>
   );
 }

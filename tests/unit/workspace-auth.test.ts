@@ -14,7 +14,13 @@ import {
 } from '../../utils/workspace/token-store';
 import { WorkspaceApi } from '../../utils/workspace/api';
 import { buildAuthorizeUrl, signIn } from '../../utils/workspace/sign-in';
-import { WORKSPACE_AUTH_KEY, normalizeWorkspaceUrl } from '../../utils/workspace/config';
+import {
+  WORKSPACE_AUTH_KEY,
+  buildWorkspaceUrl,
+  normalizeWorkspaceUrl,
+  resolveWorkspaceUrl,
+  workspaceEnvs,
+} from '../../utils/workspace/config';
 
 const BASE = 'https://ws.example';
 
@@ -311,5 +317,28 @@ describe('API 401 handling', () => {
   test('business errors surface status and code', async () => {
     const { api } = setup([404]);
     await expect(api.listAgents()).rejects.toMatchObject({ status: 404, code: 'X' });
+  });
+});
+
+describe('build-configured workspace environments', () => {
+  const envs = JSON.stringify([
+    { name: 'INT', url: 'https://cws-int.coco.xyz' },
+    { name: 'dev', url: 'https://cws-dev.example' },
+  ]);
+  test('parses the baked env list; first entry is the default', () => {
+    expect(workspaceEnvs(envs).map((e) => e.name)).toEqual(['INT', 'dev']);
+    expect(buildWorkspaceUrl(workspaceEnvs(envs))).toBe('https://cws-int.coco.xyz');
+    expect(workspaceEnvs(undefined)).toEqual([]);
+    expect(workspaceEnvs('not json')).toEqual([]);
+    expect(workspaceEnvs(JSON.stringify([{ name: 'x', url: 'http://evil.example' }]))).toEqual([]);
+  });
+  test('a stored URL outside the build allow-list falls back to the build default', () => {
+    const release = workspaceEnvs(JSON.stringify([{ name: '', url: 'https://ws.example' }]));
+    expect(resolveWorkspaceUrl('https://cws-int.coco.xyz', release)).toBe('https://ws.example');
+    expect(resolveWorkspaceUrl('https://custom.example', release)).toBe('https://ws.example');
+    expect(resolveWorkspaceUrl(undefined, release)).toBe('https://ws.example');
+    expect(resolveWorkspaceUrl('https://cws-dev.example/', workspaceEnvs(envs))).toBe(
+      'https://cws-dev.example',
+    );
   });
 });

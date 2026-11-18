@@ -137,6 +137,8 @@ import {
   WORKSPACE_URL_KEY,
   buildWorkspaceUrl,
   normalizeWorkspaceUrl,
+  resolveWorkspaceUrl,
+  workspaceEnvs,
 } from '../../utils/workspace/config';
 import { TokenStore, chromeLocalStorage } from '../../utils/workspace/token-store';
 import { WorkspaceApi } from '../../utils/workspace/api';
@@ -1731,8 +1733,7 @@ export function startRemoteBackground() {
     const savedWorkspaceUrl = (await chrome.storage.local.get([WORKSPACE_URL_KEY]))[
       WORKSPACE_URL_KEY
     ];
-    if (typeof savedWorkspaceUrl === 'string')
-      workspaceUrl = normalizeWorkspaceUrl(savedWorkspaceUrl) || workspaceUrl;
+    workspaceUrl = resolveWorkspaceUrl(savedWorkspaceUrl);
     await workspace.init().catch(() => {});
     if (config.enabled && state.configured) void connect();
     publish();
@@ -1916,8 +1917,10 @@ export function startRemoteBackground() {
           await workspace.revoke();
           return snapshot();
         case 'workspace-set-url': {
+          // Only a build-configured environment can be selected.
           const next = normalizeWorkspaceUrl(m.url);
-          if (next === null) throw new Error('ui.error.workspaceUrlInvalid');
+          if (!next || !workspaceEnvs().some((env) => env.url === next))
+            throw new Error('ui.error.workspaceUrlInvalid');
           if (next !== workspaceUrl) {
             if (workspace.current()) await workspace.signedOut();
             workspaceUrl = next;

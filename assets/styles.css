@@ -1398,8 +1398,7 @@ html[data-theme='zylos'] > body {
     color: var(--color-muted);
     text-wrap: pretty;
   }
-  .connect-hero .connect-primary,
-  .connect-hero .workspace-url-form {
+  .connect-hero .connect-primary {
     margin-top: 28px;
     width: 100%;
     text-align: left;
@@ -1519,11 +1518,12 @@ html[data-theme='zylos'] > body {
     border: 1px solid var(--color-border);
     border-radius: var(--radius-card);
   }
-  .manual-panel .workspace-url-form {
+  .manual-panel .workspace-env-form {
     padding-top: 20px;
     border-top: 1px solid var(--color-border);
   }
-  .connect-page .input {
+  .connect-page .input,
+  .connect-page .select {
     width: 100%;
     min-width: 0;
     height: var(--zylos-primary-control-size);
@@ -1535,7 +1535,7 @@ html[data-theme='zylos'] > body {
     font-size: var(--text-label);
     box-shadow: none;
   }
-  .connect-page .input:focus {
+  .connect-page :is(.input, .select):focus {
     border-color: var(--color-primary);
     outline: 2px solid var(--color-primary-border);
     outline-offset: 1px;

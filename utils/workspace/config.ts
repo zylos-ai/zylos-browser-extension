@@ -1,18 +1,53 @@
-// OpenMax Workspace endpoint configuration. The base URL comes from the build
-// (WXT_WORKSPACE_URL; development builds default to the INT Workspace) and can
-// be overridden in settings. No production URL is hard-coded in this repo yet.
+// OpenMax Workspace endpoint configuration. The allowed Workspace origins are
+// baked in at build time (see wxt.config.ts): release builds carry exactly one
+// (WXT_WORKSPACE_URL); test builds may carry several named environments
+// (WXT_WORKSPACE_ENVS) that the owner picks from. There is no free-text address.
 
 export const WORKSPACE_CLIENT_ID = 'openmax-browser';
 export const WORKSPACE_SCOPE = 'connect:browser';
-export const WORKSPACE_INT_URL = 'https://cws-int.coco.xyz';
 export const WORKSPACE_URL_KEY = 'workspaceUrl';
 export const WORKSPACE_AUTH_KEY = 'workspaceAuth';
 export const WORKSPACE_CONNECTION_KEY = 'workspaceConnection';
 
-export function buildWorkspaceUrl(): string {
-  const env = (import.meta as { env?: Record<string, unknown> }).env ?? {};
-  const configured = typeof env.WXT_WORKSPACE_URL === 'string' ? env.WXT_WORKSPACE_URL : '';
-  return normalizeWorkspaceUrl(configured || (env.DEV ? WORKSPACE_INT_URL : '')) ?? '';
+export interface WorkspaceEnv {
+  name: string;
+  url: string;
+}
+
+declare const __WORKSPACE_ENVS__: string;
+
+/** Build-time Workspace environments; the first one is the build default. */
+export function workspaceEnvs(
+  raw: unknown = typeof __WORKSPACE_ENVS__ === 'undefined' ? undefined : __WORKSPACE_ENVS__,
+): WorkspaceEnv[] {
+  let parsed: unknown;
+  try {
+    parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const envs: WorkspaceEnv[] = [];
+  for (const item of parsed) {
+    const name = typeof item?.name === 'string' ? item.name : '';
+    const url = typeof item?.url === 'string' ? normalizeWorkspaceUrl(item.url) : null;
+    if (url && !envs.some((env) => env.url === url)) envs.push({ name, url });
+  }
+  return envs;
+}
+
+export function buildWorkspaceUrl(envs = workspaceEnvs()): string {
+  return envs[0]?.url ?? '';
+}
+
+/**
+ * The Workspace origin to use: the stored choice only when this build allows
+ * it, otherwise the build default (a release build never talks to a leftover
+ * test or custom address from an older build).
+ */
+export function resolveWorkspaceUrl(stored: unknown, envs = workspaceEnvs()): string {
+  const url = typeof stored === 'string' ? normalizeWorkspaceUrl(stored) : null;
+  return url && envs.some((env) => env.url === url) ? url : buildWorkspaceUrl(envs);
 }
 
 /** Origin-only https URL (http allowed for localhost development). */

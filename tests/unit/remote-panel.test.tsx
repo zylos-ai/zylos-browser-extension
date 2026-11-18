@@ -1887,14 +1887,51 @@ test('signed out: focused connect view with one primary sign-in and a hidden man
   expect(send).toHaveBeenLastCalledWith({ type: 'workspace-sign-in' });
   await click('.manual-toggle');
   expect(container.querySelector('#relay-url')).not.toBeNull();
-  expect(container.querySelector<HTMLInputElement>('#workspace-url')?.value).toBe(
-    'https://ws.example',
-  );
+  // Release build: the Workspace address is baked in, never editable.
+  expect(container.querySelector('#workspace-url')).toBeNull();
+  expect(container.querySelector('#workspace-env')).toBeNull();
+  expect(container.querySelector('#connect')?.textContent).not.toContain('Workspace 地址');
   // Settings stays reachable and only summarizes the connection.
   await click('.settings-button');
   expect(container.querySelector('#settings .connection-summary')?.textContent).toContain('未连接');
   await click('.connection-manage');
   expect(container.querySelector('#connect')).not.toBeNull();
+});
+
+test('workspace env picker appears only when the build configures more than one env', async () => {
+  state = { ...state, configured: false, connected: false, relayUrl: '' };
+  state.workspace = { baseUrl: 'https://cws-int.coco.xyz', auth: 'signed-out' };
+  vi.stubGlobal(
+    '__WORKSPACE_ENVS__',
+    JSON.stringify([{ name: 'INT', url: 'https://cws-int.coco.xyz' }]),
+  );
+  await mount();
+  await click('.manual-toggle');
+  expect(container.querySelector('#workspace-env')).toBeNull();
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  vi.stubGlobal(
+    '__WORKSPACE_ENVS__',
+    JSON.stringify([
+      { name: 'INT', url: 'https://cws-int.coco.xyz' },
+      { name: 'dev', url: 'https://cws-dev.example' },
+    ]),
+  );
+  await mount();
+  await click('.manual-toggle');
+  const select = container.querySelector<HTMLSelectElement>('#workspace-env');
+  expect([...select!.options].map((o) => o.textContent)).toEqual(['INT', 'dev']);
+  expect(select!.value).toBe('https://cws-int.coco.xyz');
+  expect(container.querySelector('#workspace-url')).toBeNull();
+  send.mockClear();
+  await act(async () => {
+    select!.value = 'https://cws-dev.example';
+    select!.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  expect(send).toHaveBeenLastCalledWith({
+    type: 'workspace-set-url',
+    url: 'https://cws-dev.example',
+  });
 });
 
 test('agent picker: avatar rows with status chips, whole row selects, confirm then name', async () => {
