@@ -2271,3 +2271,56 @@ html[data-theme='zylos'] > body {
     font-weight: 500;
   }
 }
+
+@layer utilities.zylos {
+  /* Header at narrow widths: the left status/pill shrinks (name truncates), tools never do. */
+  .header-actions {
+    gap: 8px;
+  }
+  .header-actions > :first-child {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+  .header-tools {
+    gap: 2px;
+  }
+  .connection-chip-wrap {
+    max-width: 200px;
+  }
+  .connection-chip {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .connection-chip-name {
+    flex: 0 1 auto;
+    min-width: 2.5em;
+  }
+  .clear-chat-button,
+  .settings-button.is-icon {
+    width: 36px;
+    min-width: 36px;
+    padding: 0;
+    justify-content: center;
+  }
+  .header-stop {
+    height: 32px;
+    min-height: 32px;
+    padding: 0 10px;
+    border: 1px solid color-mix(in oklab, var(--color-error) 30%, transparent);
+    border-radius: var(--radius-pill);
+    background: var(--color-error-soft);
+    color: var(--color-error);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .header-stop:hover:not(:disabled) {
+    background: color-mix(in oklab, var(--color-error) 14%, var(--color-base-100));
+    color: var(--color-error);
+  }
+  .header-stop-icon {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    background: currentColor;
+  }
+}

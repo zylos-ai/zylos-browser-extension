@@ -233,14 +233,15 @@ export function RemotePanel() {
               <button
                 id="stop-current-task"
                 type="button"
-                className="btn btn-ghost header-button"
+                className="btn header-button header-stop"
                 disabled={stopping}
                 onClick={() => void action({ type: 'remote-stop' })}
               >
+                <span className="header-stop-icon" aria-hidden="true" />
                 {t(stopping ? 'stopping' : 'stopTask')}
               </button>
             )}
-            {state.configured && screen !== 'connect' && (
+            {state.configured && screen !== 'connect' && !(chatBusy || sending) && (
               <button
                 type="button"
                 className="btn btn-ghost header-button clear-chat-button"
@@ -262,13 +263,14 @@ export function RemotePanel() {
                 >
                   <path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5m4-5v5" />
                 </svg>
-                <span>{t('clearChatShort')}</span>
+                <span className="sr-only">{t('clearChatShort')}</span>
               </button>
             )}
             <button
               ref={settingsButtonRef}
               type="button"
-              className="btn btn-ghost header-button settings-button"
+              className={`btn btn-ghost header-button settings-button${showBack ? '' : ' is-icon'}`}
+              title={showBack ? undefined : t('settings')}
               onClick={() => {
                 setScreen(showBack ? (state.configured ? 'chat' : 'connect') : 'settings');
                 setSwitching(false);
@@ -298,7 +300,7 @@ export function RemotePanel() {
                   </>
                 )}
               </svg>
-              {showBack ? t('back') : t('settings')}
+              {showBack ? t('back') : <span className="sr-only">{t('settings')}</span>}
             </button>
           </div>
         </div>

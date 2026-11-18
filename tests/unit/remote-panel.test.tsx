@@ -1141,10 +1141,9 @@ test('header clear stays out of settings and cannot interrupt an active task', a
   await mount();
   const clear = () =>
     container.querySelector<HTMLButtonElement>('.sidebar-header .clear-chat-button')!;
-  expect(clear().disabled).toBe(true);
-  send.mockClear();
-  await click('.clear-chat-button');
-  expect(send).not.toHaveBeenCalled();
+  // While a task runs, Stop is the header action and Clear is hidden.
+  expect(clear()).toBeNull();
+  expect(container.querySelector('#stop-current-task')).not.toBeNull();
   await click('.settings-button');
   expect(container.querySelector('#settings .clear-chat-button')).toBeNull();
   state.loopActive = false;
@@ -2089,4 +2088,26 @@ test('settings: grouped rows with short hints, info toggles long text, sub-pages
   expect(container.querySelector('#detailed-enabled')).not.toBeNull();
   await click('.settings-back');
   expect(container.querySelector('#diagnostics-enabled')).not.toBeNull();
+});
+
+test('running task header: Stop is prominent, Clear hidden, Settings icon-only, pill keeps the name', async () => {
+  state.workspace = workspaceConnected();
+  state.loopActive = true;
+  await mount();
+  const tools = [...container.querySelectorAll('.header-tools > button')];
+  expect(tools.map((b) => b.id || b.className.split(' ').pop())).toEqual([
+    'stop-current-task',
+    'is-icon',
+  ]);
+  expect(container.querySelector('#stop-current-task')?.classList.contains('header-stop')).toBe(
+    true,
+  );
+  expect(container.querySelector('.settings-button')?.getAttribute('title')).toBe('设置');
+  expect(container.querySelector('.connection-chip-name')?.textContent).toBe('Max');
+  state.loopActive = false;
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(container.querySelector('#stop-current-task')).toBeNull();
+  expect(container.querySelector('.clear-chat-button')?.getAttribute('aria-label')).toBe(
+    '清空对话',
+  );
 });
