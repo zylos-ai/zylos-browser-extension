@@ -166,7 +166,7 @@
 .settings-subpage .site-access-settings > details > summary {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 4px;
   min-height: 52px;
   line-height: 20px;
   list-style: none;
@@ -182,8 +182,17 @@
   margin-right: 4px;
   border-right: 1.6px solid var(--color-muted);
   border-bottom: 1.6px solid var(--color-muted);
+  margin-left: auto;
   transform: rotate(45deg);
   transition: transform 150ms;
+}
+/* The count sits right-aligned next to the chevron. */
+.settings-subpage .site-access-settings > details > summary > .site-access-count {
+  margin-left: auto;
+  font-weight: 400;
+}
+.settings-subpage .site-access-settings > details > summary:has(.site-access-count)::after {
+  margin-left: 12px;
 }
 .settings-subpage .site-access-settings > details[open] > summary::after {
   transform: rotate(-135deg);
