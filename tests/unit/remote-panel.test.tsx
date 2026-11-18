@@ -1857,3 +1857,34 @@ test('history renders file metadata next to image previews without binary data',
   );
   expect(container.querySelectorAll('.message-attachments img')).toHaveLength(1);
 });
+
+test('Workspace card: switch toggles to collapse, hides the connected Agent, explains confirmation; manual connect stays collapsed', async () => {
+  state.workspace = {
+    baseUrl: 'https://ws.example',
+    auth: 'signed-in',
+    agents: [
+      { id: 'ag1', name: 'Max', authorized: true },
+      { id: 'ag2', name: 'Ada', authorized: false },
+    ],
+    connection: {
+      agentMemberId: 'ag1',
+      agentName: 'Max',
+      browserName: 'Chrome',
+      phase: 'connected',
+    },
+  };
+  await mount();
+  await click('.settings-button');
+  expect(container.querySelector<HTMLDetailsElement>('.manual-connect')?.open).toBe(false);
+  const toggle = () =>
+    container.querySelector<HTMLButtonElement>('.workspace-actions .btn[aria-expanded]')!;
+  expect(toggle().textContent).toBe('切换 Agent');
+  await act(async () => toggle().click());
+  expect(toggle().textContent).toBe('收起');
+  const rows = [...container.querySelectorAll('.workspace-agent')].map((el) => el.textContent);
+  expect(rows).toEqual(['Ada首次连接需确认']);
+  expect(container.querySelector('.workspace-agents')?.textContent).toContain(
+    '需要你授权它使用这个浏览器',
+  );
+  expect(container.querySelector('.workspace-revoke')?.textContent).toBe('断开并撤销授权');
+});

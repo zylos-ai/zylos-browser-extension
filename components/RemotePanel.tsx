@@ -165,8 +165,11 @@ export function RemotePanel() {
   }
 
   const connected = state.connected;
+  const workspacePhase = state.workspace?.connection?.phase;
   const status = !state.configured
-    ? t('notConnected')
+    ? workspacePhase === 'preparing' || workspacePhase === 'applying'
+      ? t('workspacePhasePreparing')
+      : t('notConnected')
     : !state.enabled
       ? t('disabled')
       : connected

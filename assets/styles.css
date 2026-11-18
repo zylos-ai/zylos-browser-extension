@@ -1384,6 +1384,23 @@ html[data-theme='zylos'] > body {
     height: auto;
     min-height: var(--zylos-primary-control-size);
   }
+  .workspace-phase.is-connected {
+    color: var(--color-success);
+  }
+  .workspace-phase.is-failed,
+  .workspace-phase.is-key-rejected {
+    color: var(--color-error);
+  }
+  .workspace-revoke {
+    color: var(--color-error);
+  }
+  .manual-connect > summary {
+    cursor: pointer;
+    font-weight: 500;
+  }
+  .manual-connect[open] > summary {
+    margin-bottom: 4px;
+  }
   .workspace-error {
     color: var(--color-error);
   }

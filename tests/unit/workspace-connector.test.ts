@@ -191,3 +191,29 @@ test('agents list maps to the panel view', async () => {
   await connector.loadAgents();
   expect(connector.view().agents).toEqual([{ id: 'ag1', name: 'Max', authorized: false }]);
 });
+
+test.each([
+  [403, 'ui.error.workspaceAgentUnavailable'],
+  [404, 'ui.error.workspaceAgentNotFound'],
+  [429, 'ui.error.workspaceRateLimited'],
+  [503, 'ui.error.workspaceUnreachable'],
+  [400, 'ui.error.workspaceRequestFailed'],
+])('connect failure %i maps to a specific error', async (status, error) => {
+  const { connector, api } = setup([]);
+  await connector.init();
+  api.createConnection.mockRejectedValueOnce(new WorkspaceApiError(status, 'X', 'x'));
+  await connector.connect(input);
+  expect(connector.view().connection).toMatchObject({ phase: 'failed', error });
+});
+
+test.each([
+  [404, 'ui.error.workspaceAgentsLoadFailed'],
+  [400, 'ui.error.workspaceAgentsLoadFailed'],
+  [0, 'ui.error.workspaceUnreachable'],
+])('agent list failure %i uses list wording', async (status, error) => {
+  const { connector, api } = setup([]);
+  await connector.init();
+  api.listAgents.mockRejectedValueOnce(new WorkspaceApiError(status, 'X', 'x'));
+  await connector.loadAgents();
+  expect(connector.view().error).toBe(error);
+});

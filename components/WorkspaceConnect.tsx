@@ -46,6 +46,7 @@ export function WorkspaceConnect({
   if (!ws) return null;
 
   const busy = pending || !!ws.busy;
+  const settling = connection?.phase === 'preparing' || connection?.phase === 'applying';
   const phaseText = connection
     ? {
         idle: t('workspacePhasePreparing'),
@@ -56,11 +57,19 @@ export function WorkspaceConnect({
         'key-rejected': t('workspacePhaseKeyRejected'),
       }[connection.phase]
     : '';
+  // Switching never offers the Agent this browser is already connected to.
+  const agents = ws.agents?.filter((agent) => agent.id !== connection?.agentMemberId);
+  const needsConfirm = agents?.some((agent) => !agent.authorized);
+  const error = ws.error && (
+    <p className="settings-hint workspace-error" role="alert">
+      {errorText(ws.error)}
+    </p>
+  );
 
   return (
     <section className="settings-section workspace-settings" aria-labelledby="workspace-heading">
       <h2 id="workspace-heading">{t('workspaceTitle')}</h2>
-      <p className="settings-hint">{t('workspaceHint')}</p>
+      {!connection && <p className="settings-hint">{t('workspaceHint')}</p>}
 
       {!ws.baseUrl ? (
         <WorkspaceUrlForm url={url} setUrl={setUrl} busy={busy} onRequest={onRequest} />
@@ -77,8 +86,13 @@ export function WorkspaceConnect({
             disabled={busy}
             onClick={() => onRequest({ type: 'workspace-sign-in' })}
           >
-            {ws.auth === 'expired' ? t('workspaceLoginAgain') : t('workspaceLogin')}
+            {busy
+              ? t('workspaceSigningIn')
+              : ws.auth === 'expired'
+                ? t('workspaceLoginAgain')
+                : t('workspaceLogin')}
           </button>
+          {error}
         </>
       ) : null}
 
@@ -87,39 +101,53 @@ export function WorkspaceConnect({
           <div className="settings-copy">
             <strong>{connection.agentName || t('workspaceAgent')}</strong>
             <p className="settings-hint">
-              {connection.browserName} · {phaseText}
+              <span
+                className={`workspace-phase is-${connection.phase === 'connected' && state.connected ? 'connected' : connection.phase}`}
+              >
+                {phaseText}
+              </span>
+              {' · '}
+              {connection.browserName}
             </p>
             {connection.error && (
               <p className="settings-hint workspace-error" role="alert">
                 {errorText(connection.error)}
               </p>
             )}
+            {!signedIn &&
+              (connection.phase === 'key-rejected' || connection.phase === 'failed') && (
+                <p className="settings-hint">{t('workspaceReconnectNeedsLogin')}</p>
+              )}
           </div>
           <div className="workspace-actions">
-            {(connection.phase === 'key-rejected' || connection.phase === 'failed') && (
+            {signedIn && (connection.phase === 'key-rejected' || connection.phase === 'failed') && (
               <button
                 className="btn btn-primary btn-sm"
                 type="button"
-                disabled={busy || !signedIn}
+                disabled={busy}
                 onClick={() => onRequest({ type: 'workspace-reconnect' })}
               >
                 {t('workspaceReconnect')}
               </button>
             )}
-            {signedIn && connection.phase !== 'preparing' && connection.phase !== 'applying' && (
+            {signedIn && !settling && (
               <button
                 className="btn btn-sm"
                 type="button"
                 disabled={busy}
-                onClick={() => setChoosing((v) => !v)}
+                aria-expanded={choosing}
+                onClick={() => {
+                  setChoosing((v) => !v);
+                  setStep({ kind: 'list' });
+                }}
               >
-                {choosing ? t('cancel') : t('workspaceSwitchAgent')}
+                {choosing ? t('workspaceCollapse') : t('workspaceSwitchAgent')}
               </button>
             )}
             <button
-              className="btn btn-sm"
+              className="btn btn-sm btn-ghost workspace-revoke"
               type="button"
-              disabled={busy || connection.phase === 'preparing'}
+              disabled={busy || settling}
               onClick={() => {
                 if (window.confirm(t('workspaceRevokeConfirm', { agent: connection.agentName })))
                   onRequest({ type: 'workspace-revoke' });
@@ -131,20 +159,29 @@ export function WorkspaceConnect({
         </div>
       )}
 
+      {signedIn && !connection && (
+        <p className="settings-hint" role="status">
+          {t('workspaceNotConnectedHint')}
+        </p>
+      )}
+
       {showPicker && step.kind === 'list' && (
         <div className="workspace-agents" role="list" aria-label={t('workspaceChooseAgent')}>
-          <p className="settings-hint">{t('workspaceChooseAgent')}</p>
+          <strong>{t('workspaceChooseAgent')}</strong>
+          {needsConfirm && <p className="settings-hint">{t('workspaceNeedsConfirmHint')}</p>}
           {ws.busy === 'agents' && <p className="settings-hint">{t('workspaceLoadingAgents')}</p>}
-          {ws.agents?.length === 0 && <p className="settings-hint">{t('workspaceNoAgents')}</p>}
-          {ws.agents?.map((agent) => (
+          {agents?.length === 0 && (
+            <p className="settings-hint">
+              {connection ? t('workspaceNoOtherAgents') : t('workspaceNoAgents')}
+            </p>
+          )}
+          {agents?.map((agent) => (
             <button
               key={agent.id}
               role="listitem"
               className="btn workspace-agent"
               type="button"
-              disabled={
-                busy || (agent.id === connection?.agentMemberId && connection.phase === 'connected')
-              }
+              disabled={busy}
               onClick={() =>
                 setStep(
                   agent.authorized
@@ -159,6 +196,17 @@ export function WorkspaceConnect({
               </span>
             </button>
           ))}
+          {error}
+          {ws.error && !ws.busy && (
+            <button
+              className="btn btn-sm"
+              type="button"
+              disabled={busy}
+              onClick={() => onRequest({ type: 'workspace-agents' })}
+            >
+              {t('workspaceRetry')}
+            </button>
+          )}
         </div>
       )}
 
@@ -231,11 +279,7 @@ export function WorkspaceConnect({
         </form>
       )}
 
-      {ws.error && (
-        <p className="settings-hint workspace-error" role="alert">
-          {errorText(ws.error)}
-        </p>
-      )}
+      {signedIn && !(showPicker && step.kind === 'list') && error}
 
       {ws.baseUrl && (
         <details className="workspace-advanced">

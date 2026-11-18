@@ -44,8 +44,13 @@ export function ConnectionSettings({
       {onWorkspaceRequest && (
         <WorkspaceConnect state={state} pending={pending} onRequest={onWorkspaceRequest} />
       )}
-      <section className="settings-section" aria-labelledby="connection-heading">
-        <h2 id="connection-heading">{t('agentConnection')}</h2>
+      <details
+        className="settings-section manual-connect"
+        // Workspace is the primary path; keep the manual form open for manual setups.
+        open={!onWorkspaceRequest || (state.configured && !state.workspace?.connection)}
+      >
+        <summary id="connection-heading">{t('manualConnectTitle')}</summary>
+        <p className="settings-hint">{t('manualConnectHint')}</p>
         <form
           className="settings-form"
           onSubmit={(e) => {
@@ -97,7 +102,7 @@ export function ConnectionSettings({
             {saving ? t('saving') : state.enabled ? t('saveConnect') : t('saveSettings')}
           </button>
         </form>
-      </section>
+      </details>
       <SiteAccessSettings state={state} pending={pending} onChange={onSiteAccessChange} />
       <DetailedDiagnosticsSettings
         state={state}

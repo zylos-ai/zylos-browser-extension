@@ -193,7 +193,9 @@ export class WorkspaceConnector {
     }
     if (error instanceof WorkspaceApiError) {
       if (error.status === 0 || error.status >= 500) return 'ui.error.workspaceUnreachable';
-      if (error.status === 403 || error.status === 404) return 'ui.error.workspaceAgentUnavailable';
+      if (error.status === 403) return 'ui.error.workspaceAgentUnavailable';
+      if (error.status === 404) return 'ui.error.workspaceAgentNotFound';
+      if (error.status === 429) return 'ui.error.workspaceRateLimited';
       return 'ui.error.workspaceRequestFailed';
     }
     if (error instanceof Error && error.message.startsWith('ui.error.')) return error.message;
@@ -207,7 +209,14 @@ export class WorkspaceConnector {
     try {
       this.agents = await this.deps.api.listAgents();
     } catch (e) {
-      this.error = await this.fail(e);
+      const error = await this.fail(e);
+      // Agent-specific wording makes no sense for the list itself.
+      this.error =
+        error === 'ui.error.workspaceAgentNotFound' ||
+        error === 'ui.error.workspaceAgentUnavailable' ||
+        error === 'ui.error.workspaceRequestFailed'
+          ? 'ui.error.workspaceAgentsLoadFailed'
+          : error;
     } finally {
       this.busy = undefined;
       this.deps.publish();
