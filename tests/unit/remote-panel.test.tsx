@@ -2026,3 +2026,30 @@ test('failed: inline banner with Reconnect primary and Switch Agent secondary', 
   await act(async () => buttons[1]!.click());
   expect(container.querySelector('#connect h1')?.textContent).toBe('切换 Agent');
 });
+
+test('settings: grouped rows with short hints, info toggles long text, sub-pages for site access and diagnostics', async () => {
+  state.workspace = workspaceConnected();
+  await mount();
+  await click('.settings-button');
+  expect(
+    [...container.querySelectorAll('#settings .settings-group > h2')].map((el) => el.textContent),
+  ).toEqual(['连接', '站点权限', '偏好设置', '高级']);
+  expect(container.querySelector('.connection-manage')?.textContent).toContain('Max');
+  expect(container.querySelector('#compatibility-hint')?.textContent).toBe(
+    '任务中可移除其他扩展的页面元素',
+  );
+  expect(container.querySelector('.settings-item-more')).toBeNull();
+  await click('.settings-info');
+  expect(container.querySelector('.settings-item-more')?.textContent).toContain('任务标签页');
+  // Site access lives on its own page; behavior is unchanged there.
+  expect(container.querySelector('.site-access-add')).toBeNull();
+  await click('.site-access-link');
+  expect(container.querySelector('#settings h1')?.textContent).toBe('站点权限');
+  expect(container.querySelector('.site-access-add')).not.toBeNull();
+  await click('.settings-back');
+  await click('.detailed-link');
+  expect(container.querySelector('#settings h1')?.textContent).toBe('详细本地诊断');
+  expect(container.querySelector('#detailed-enabled')).not.toBeNull();
+  await click('.settings-back');
+  expect(container.querySelector('#diagnostics-enabled')).not.toBeNull();
+});

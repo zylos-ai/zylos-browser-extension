@@ -140,3 +140,57 @@
 .agent-start-status .settings-hint {
   overflow-wrap: anywhere;
 }
+
+/* Inside the settings sub-page the sections render as one grouped list. */
+.settings-subpage .site-access-settings {
+  padding-top: 0;
+  border-top: 0;
+  gap: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+}
+.settings-subpage .site-access-settings > h2 {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+.settings-subpage .site-access-settings > details {
+  padding: 0 14px;
+}
+.settings-subpage .site-access-settings > details + details {
+  border-top: 1px solid var(--color-border);
+}
+.settings-subpage .site-access-settings > details > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 52px;
+  line-height: 20px;
+  list-style: none;
+  font-weight: 500;
+}
+.settings-subpage .site-access-settings > details > summary::-webkit-details-marker {
+  display: none;
+}
+.settings-subpage .site-access-settings > details > summary::after {
+  content: '';
+  width: 7px;
+  height: 7px;
+  margin-right: 4px;
+  border-right: 1.6px solid var(--color-muted);
+  border-bottom: 1.6px solid var(--color-muted);
+  transform: rotate(45deg);
+  transition: transform 150ms;
+}
+.settings-subpage .site-access-settings > details[open] > summary::after {
+  transform: rotate(-135deg);
+}
+.settings-subpage .site-access-settings > details[open] {
+  padding-bottom: 14px;
+}
+.settings-subpage .site-access-recovery {
+  margin: 14px;
+}

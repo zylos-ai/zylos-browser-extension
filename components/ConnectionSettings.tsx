@@ -1,3 +1,5 @@
+import { useState } from 'react';
+import { SettingsGroup, SettingsItem, SettingsLink, Switch } from './SettingsList';
 import { useI18n } from './LanguageProvider';
 import { languagePreference } from '../utils/i18n';
 import type { RemoteRequest, RemoteState } from '../utils/remote';
@@ -30,154 +32,188 @@ export function ConnectionSettings({
   onOpenConnect: () => void;
 }) {
   const { t, preference, changeLanguage, savingLanguage, languageError } = useI18n();
+  const [page, setPage] = useState<'main' | 'site-access' | 'detailed'>('main');
   const connection = state.workspace?.connection;
+  const ruleCount = state.siteAccess?.grants?.length ?? 0;
+
+  if (page !== 'main')
+    return (
+      <main
+        id="settings"
+        className="settings-page settings-subpage"
+        aria-labelledby="settings-title"
+      >
+        <button className="link-button settings-back" type="button" onClick={() => setPage('main')}>
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="m15 6-6 6 6 6" />
+          </svg>
+          {t('settings')}
+        </button>
+        <h1 id="settings-title">
+          {page === 'site-access' ? t('siteAccess') : t('detailedDiagnostics')}
+        </h1>
+        {page === 'site-access' ? (
+          <SiteAccessSettings state={state} pending={pending} onChange={onSiteAccessChange} />
+        ) : (
+          <DetailedDiagnosticsSettings
+            state={state}
+            pending={pending}
+            onToggle={() => onDetailedToggle?.()}
+          />
+        )}
+      </main>
+    );
+
   return (
     <main id="settings" className="settings-page" aria-labelledby="settings-title">
-      <div className="settings-intro">
-        <h1 id="settings-title">{t('settings')}</h1>
-      </div>
-      <section className="settings-section connection-summary" aria-labelledby="connection-heading">
-        <h2 id="connection-heading">{t('connectionSectionTitle')}</h2>
-        <div className="connection-summary-row">
-          {connection ? (
-            <AgentAvatar name={connection.agentName} url={connectionAvatar(state.workspace)} />
-          ) : (
-            <span
-              className={`status-dot${state.connected ? ' is-connected' : ''}`}
-              aria-hidden="true"
-            />
-          )}
-          <span className="connection-summary-text">
-            {connection?.agentName ||
-              (state.configured ? state.relayHost || t('manualConnectTitle') : t('notConnected'))}
-            {state.configured && (
-              <small className={state.connected ? 'is-connected' : ''}>{status}</small>
-            )}
-          </span>
-          <button
-            className="btn btn-outline btn-sm connection-manage"
-            type="button"
-            onClick={onOpenConnect}
-          >
-            {state.configured ? t('manageConnection') : t('connectAction')}
-          </button>
-        </div>
-      </section>
-      <SiteAccessSettings state={state} pending={pending} onChange={onSiteAccessChange} />
-      <DetailedDiagnosticsSettings
-        state={state}
-        pending={pending}
-        onToggle={() => onDetailedToggle?.()}
-      />
-      <section
-        className="settings-section preferences-settings"
-        aria-labelledby="preferences-heading"
+      <h1 id="settings-title" className="settings-title">
+        {t('settings')}
+      </h1>
+      <SettingsGroup
+        id="connection-heading"
+        title={t('connectionSectionTitle')}
+        className="connection-summary"
       >
-        <h2 id="preferences-heading">{t('preferences')}</h2>
-        <div className="settings-row">
-          <div className="settings-copy">
-            <label id="compatibility-label" htmlFor="compatibility-enabled">
-              {t('taskCompatibilityPermission')}
-            </label>
-            <p id="compatibility-hint" className="settings-hint">
-              {t('compatibilityHint')}
-            </p>
-          </div>
-          <button
-            id="compatibility-enabled"
-            className="connection-toggle"
-            type="button"
-            role="switch"
-            aria-checked={!!state.compatibilityEnabled}
-            aria-labelledby="compatibility-label"
-            aria-describedby="compatibility-hint"
-            disabled={pending}
-            onClick={onCompatibilityToggle}
-          >
-            <span className="settings-switch-track" aria-hidden="true">
-              <span />
-            </span>
-          </button>
-        </div>
-        <AgentStartSettings state={state} pending={pending} onChange={onAgentStartToggle} />
-        <div className="settings-row">
-          <div className="settings-copy">
-            <label id="diagnostics-label" htmlFor="diagnostics-enabled">
-              {t('diagnostics')}
-            </label>
-            <p id="diagnostics-hint" className="settings-hint">
-              {t('diagnosticsHint')}
-            </p>
-          </div>
-          <button
-            id="diagnostics-enabled"
-            className="connection-toggle"
-            type="button"
-            role="switch"
-            aria-checked={!!state.diagnosticsEnabled}
-            aria-labelledby="diagnostics-label"
-            aria-describedby="diagnostics-hint"
-            disabled={pending}
-            onClick={onDiagnosticsToggle}
-          >
-            <span className="settings-switch-track" aria-hidden="true">
-              <span />
-            </span>
-          </button>
-        </div>
-        <div className="settings-row language-settings">
-          <div className="settings-copy">
-            <label htmlFor="interface-language">{t('language')}</label>
-            <p id="language-hint" className="settings-hint">
-              {t('languageHint')}
-            </p>
-          </div>
-          <select
-            id="interface-language"
-            className="select"
-            value={preference}
-            disabled={savingLanguage}
-            aria-describedby="language-hint"
-            onChange={(e) => void changeLanguage(languagePreference(e.target.value))}
-          >
-            <option value="auto">{t('autoLanguage')}</option>
-            <option value="zh-CN">中文</option>
-            <option value="en">English</option>
-          </select>
-        </div>
-        {languageError && (
-          <p className="language-error settings-hint" role="alert">
-            {t('languageSaveFailed')}
-          </p>
-        )}
-        {state.configured && (
-          <div className="settings-row connection-management">
-            <div className="settings-copy">
-              <label id="connection-enabled-label" htmlFor="connection-enabled">
-                {t('connectionEnabled')}
-              </label>
-              <p id="connection-enabled-hint" className="settings-hint">
-                {t('connectionEnabledHint')}
-              </p>
-            </div>
-            <button
-              id="connection-enabled"
-              className="connection-toggle"
-              type="button"
-              role="switch"
-              aria-checked={state.enabled}
-              aria-labelledby="connection-enabled-label"
-              aria-describedby="connection-enabled-hint"
-              disabled={pending}
-              onClick={onToggle}
-            >
-              <span className="settings-switch-track" aria-hidden="true">
-                <span />
+        <SettingsLink
+          className="connection-manage"
+          leading={
+            connection ? (
+              <AgentAvatar name={connection.agentName} url={connectionAvatar(state.workspace)} />
+            ) : (
+              <span className={`settings-status-icon${state.connected ? ' is-connected' : ''}`}>
+                <span className="status-dot" />
               </span>
-            </button>
-          </div>
+            )
+          }
+          label={
+            connection?.agentName ||
+            (state.configured ? state.relayHost || t('manualConnectTitle') : t('notConnected'))
+          }
+          hint={
+            state.configured ? (
+              <span className={state.connected ? 'is-connected' : ''}>{status}</span>
+            ) : (
+              t('connectAction')
+            )
+          }
+          onClick={onOpenConnect}
+        />
+      </SettingsGroup>
+      <SettingsGroup id="site-access-group" title={t('siteAccess')}>
+        <SettingsLink
+          className="site-access-link"
+          label={t('siteAccessGrants')}
+          hint={state.siteAccess?.recoveryRequired ? t('siteAccessNeedsAttention') : undefined}
+          value={ruleCount}
+          onClick={() => setPage('site-access')}
+        />
+      </SettingsGroup>
+      <SettingsGroup
+        id="preferences-heading"
+        title={t('preferences')}
+        className="preferences-settings"
+      >
+        <AgentStartSettings state={state} pending={pending} onChange={onAgentStartToggle} />
+        <SettingsItem
+          label={t('taskCompatibilityPermission')}
+          labelId="compatibility-label"
+          htmlFor="compatibility-enabled"
+          hint={t('compatibilityShort')}
+          hintId="compatibility-hint"
+          more={t('compatibilityHint')}
+          control={
+            <Switch
+              id="compatibility-enabled"
+              checked={!!state.compatibilityEnabled}
+              labelledBy="compatibility-label"
+              describedBy="compatibility-hint"
+              disabled={pending}
+              onClick={onCompatibilityToggle}
+            />
+          }
+        />
+        <SettingsItem
+          className="language-settings"
+          label={t('language')}
+          htmlFor="interface-language"
+          hint={
+            languageError ? (
+              <span role="alert" className="language-error">
+                {t('languageSaveFailed')}
+              </span>
+            ) : undefined
+          }
+          control={
+            <select
+              id="interface-language"
+              className="select settings-select"
+              value={preference}
+              disabled={savingLanguage}
+              onChange={(e) => void changeLanguage(languagePreference(e.target.value))}
+            >
+              <option value="auto">{t('autoLanguage')}</option>
+              <option value="zh-CN">中文</option>
+              <option value="en">English</option>
+            </select>
+          }
+        />
+      </SettingsGroup>
+      <SettingsGroup id="advanced-heading" title={t('advanced')}>
+        <SettingsItem
+          label={t('diagnostics')}
+          labelId="diagnostics-label"
+          htmlFor="diagnostics-enabled"
+          hint={t('diagnosticsShort')}
+          hintId="diagnostics-hint"
+          more={t('diagnosticsHint')}
+          control={
+            <Switch
+              id="diagnostics-enabled"
+              checked={!!state.diagnosticsEnabled}
+              labelledBy="diagnostics-label"
+              describedBy="diagnostics-hint"
+              disabled={pending}
+              onClick={onDiagnosticsToggle}
+            />
+          }
+        />
+        <SettingsLink
+          className="detailed-link"
+          label={t('detailedDiagnostics')}
+          value={state.detailedDiagnostics?.enabled ? t('on') : t('off')}
+          onClick={() => setPage('detailed')}
+        />
+        {state.configured && (
+          <SettingsItem
+            className="connection-management"
+            label={t('connectionEnabled')}
+            labelId="connection-enabled-label"
+            htmlFor="connection-enabled"
+            hint={t('connectionEnabledHint')}
+            hintId="connection-enabled-hint"
+            control={
+              <Switch
+                id="connection-enabled"
+                checked={state.enabled}
+                labelledBy="connection-enabled-label"
+                describedBy="connection-enabled-hint"
+                disabled={pending}
+                onClick={onToggle}
+              />
+            }
+          />
         )}
-      </section>
+      </SettingsGroup>
     </main>
   );
 }
