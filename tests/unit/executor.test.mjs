@@ -1893,3 +1893,109 @@ test('never takes over a tab held by a foreign debugger', async () => {
   s.attached.delete(s.tab.id);
   await s.executor.release(false).catch(() => {});
 });
+
+// Chrome's refusal while another extension (e.g. Surfingkeys) embeds its own page.
+const foreignRefusal = async () => {
+  throw new Error('Cannot access a chrome-extension:// URL of different extension');
+};
+
+test('a reattachment without selection refused by a foreign frame re-arms the lease', async () => {
+  const s = await frameSelectionSetup();
+  const first = s.executor.currentControlRecovery();
+  const attach = chrome.debugger.attach;
+  chrome.debugger.attach = foreignRefusal;
+  await assert.rejects(
+    s.executor.recoverControl(first.recoveryId),
+    (error) => error.code === 'FOREIGN_FRAME_PRESENT' && /Surfingkeys/.test(error.message),
+  );
+  const second = s.executor.currentControlRecovery();
+  assert.ok(second, 'the task is still suspended, not ended');
+  assert.notEqual(second.recoveryId, first.recoveryId);
+  assert.equal(second.frameSelection, true);
+  assert.equal(s.revoked.mock.calls.length, 0);
+  assert.equal(s.suspended.mock.calls.at(-1)[0].recoveryId, second.recoveryId);
+  assert.deepEqual(s.scripts, [], 'nothing was inspected or removed without a decision');
+  assert.equal(s.attached.size, 0);
+  // The old ID is spent; the Agent inspects and explicitly selects under the new one.
+  await assert.rejects(s.executor.recoverControl(first.recoveryId));
+  assert.equal(s.executor.currentControlRecovery().recoveryId, second.recoveryId);
+  const inspected = await s.executor.inspectRecoveryFrames(second.recoveryId);
+  chrome.debugger.attach = attach;
+  const result = await s.executor.recoverControl(second.recoveryId, Infinity, [
+    inspected.inspection.candidates[0].id,
+  ]);
+  assert.equal(result.recovered, true);
+  assert.deepEqual(result.removal, { requested: 1, removed: 1, outcome: 'completed' });
+  await s.executor.release(false);
+});
+
+test('other reattachment failures still end the lease', async () => {
+  const s = await frameSelectionSetup();
+  const recovery = s.executor.currentControlRecovery();
+  chrome.debugger.attach = async () => {
+    throw new Error('Another debugger is already attached');
+  };
+  await assert.rejects(s.executor.recoverControl(recovery.recoveryId));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(s.executor.currentControlRecovery(), undefined);
+  assert.equal(s.revoked.mock.calls.at(-1)[0], 'failed');
+});
+
+test('a refused selected removal is not re-armed', async () => {
+  const s = await frameSelectionSetup();
+  const recovery = s.executor.currentControlRecovery();
+  const inspected = await s.executor.inspectRecoveryFrames(recovery.recoveryId);
+  chrome.debugger.attach = foreignRefusal;
+  await assert.rejects(
+    s.executor.recoverControl(recovery.recoveryId, Infinity, [
+      inspected.inspection.candidates[0].id,
+    ]),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(s.executor.currentControlRecovery(), undefined);
+});
+
+test('a first attach refused by a foreign frame suspends into recovery instead of failing', async () => {
+  const s = await frameSelectionSetup();
+  // Leave the setup's lease, then let a parked task try to attach again.
+  const setupLease = s.executor.currentControlRecovery();
+  const inspected = await s.executor.inspectRecoveryFrames(setupLease.recoveryId);
+  await s.executor.recoverControl(setupLease.recoveryId, Infinity, [
+    inspected.inspection.candidates[0].id,
+  ]);
+  await s.executor.execute({ op: 'finish' }, Date.now() + 10000);
+  assert.equal(s.attached.size, 0);
+  const attach = chrome.debugger.attach;
+  chrome.debugger.attach = foreignRefusal;
+  await assert.rejects(
+    s.executor.execute({ op: 'snapshot' }, Date.now() + 10000),
+    (error) => error.code === 'CONTROL_SUSPENDED' && /another extension/.test(error.message),
+  );
+  const lease = s.executor.currentControlRecovery();
+  assert.ok(lease);
+  assert.notEqual(lease.recoveryId, setupLease.recoveryId);
+  assert.equal(lease.frameSelection, true);
+  assert.equal(s.executor.currentGrant(), null);
+  assert.equal(s.attached.size, 0);
+  const again = await s.executor.inspectRecoveryFrames(lease.recoveryId);
+  chrome.debugger.attach = attach;
+  const result = await s.executor.recoverControl(lease.recoveryId, Infinity, [
+    again.inspection.candidates[0].id,
+  ]);
+  assert.equal(result.recovered, true);
+  assert.equal(s.executor.currentGrant().id, s.tab.id);
+  await s.executor.release(false);
+});
+
+test('without recovery a refused first attach reports FOREIGN_FRAME_PRESENT', async () => {
+  const s = await observationSetup();
+  s.executor.initializeExecutor();
+  await s.executor.execute({ op: 'finish' }, Date.now() + 10000);
+  chrome.debugger.attach = foreignRefusal;
+  await assert.rejects(
+    s.executor.execute({ op: 'snapshot' }, Date.now() + 10000),
+    (error) => error.code === 'FOREIGN_FRAME_PRESENT',
+  );
+  assert.equal(s.executor.currentControlRecovery(), undefined);
+  await s.executor.release(false);
+});

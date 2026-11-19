@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Remote browser control no longer breaks for good when another extension embeds
+  its own page in the tab, as Surfingkeys does with its frontend iframe. Chrome
+  refuses `chrome.debugger` on such a tab ("Cannot access a chrome-extension://
+  URL of different extension") and detaches with `target_closed` when the frame
+  appears after attach. A refused first attach (for example `use-current-tab`)
+  now enters the existing control recovery instead of failing with an opaque
+  `BROWSER_ERROR`, and a `recover-control` without removal that Chrome refuses
+  for the same reason re-arms the recovery under a new `recoveryId` instead of
+  ending the task. The Agent can then inspect and explicitly select the foreign
+  iframe for removal through the existing consent path; nothing is removed
+  without that selection. Without recovery the error is reported as
+  `FOREIGN_FRAME_PRESENT` with guidance.
+
 ## [0.17.7] - 2026-11-19
 
 Requires zylos-browser-remote 0.11.2 or later for a complete fix of zylos-browser-remote#29 (upgrade both together).
