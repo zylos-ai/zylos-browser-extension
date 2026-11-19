@@ -1834,3 +1834,62 @@ test('a never-settling CDP command rejects at the operation deadline', async () 
   chrome.debugger.sendCommand = send;
   await s.executor.release(false);
 });
+
+const strictAttach =
+  (attached) =>
+  async ({ tabId }) => {
+    if (attached.has(tabId))
+      throw new Error(`Another debugger is already attached to the tab with id: ${tabId}.`);
+    attached.add(tabId);
+  };
+
+test('re-attaches its own tab after a timed-out operation left Chrome attached', async () => {
+  const s = await observationSetup();
+  s.executor.initializeExecutor();
+  await s.executor.execute({ op: 'snapshot' }, Date.now() + 10000);
+  chrome.debugger.attach = strictAttach(s.attached);
+  const detach = chrome.debugger.detach;
+  // The abandoned detach never reaches Chrome: our session stays attached.
+  chrome.debugger.detach = () => new Promise(() => {});
+  s.executor.abandonTarget();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(s.attached.has(s.tab.id));
+  chrome.debugger.detach = detach;
+  const result = await s.executor.execute({ op: 'snapshot' }, Date.now() + 10000);
+  assert.match(result.text, /Save failed/);
+  assert.ok(s.attached.has(s.tab.id));
+  await s.executor.release(false);
+});
+
+test('a hung page cannot block the detach of an abandoned target', async () => {
+  const s = await observationSetup();
+  s.executor.initializeExecutor();
+  await s.executor.execute({ op: 'click', x: 100, y: 100 }, Date.now() + 10000);
+  const send = chrome.debugger.sendCommand;
+  // The page main thread is busy: in-page evaluation never answers.
+  chrome.debugger.sendCommand = (target, method, params) =>
+    method === 'Runtime.evaluate' ? new Promise(() => {}) : send(target, method, params);
+  s.executor.abandonTarget();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(s.attached.has(s.tab.id), false);
+  chrome.debugger.sendCommand = send;
+  await s.executor.release(false);
+});
+
+test('never takes over a tab held by a foreign debugger', async () => {
+  const s = await observationSetup();
+  s.executor.initializeExecutor();
+  await s.executor.execute({ op: 'finish' }, Date.now() + 10000);
+  assert.equal(s.attached.has(s.tab.id), false);
+  s.attached.add(s.tab.id); // DevTools or another extension attached meanwhile.
+  chrome.debugger.attach = strictAttach(s.attached);
+  let detached = 0;
+  chrome.debugger.detach = async () => {
+    detached++;
+  };
+  const error = await s.executor.execute({ op: 'snapshot' }, Date.now() + 10000).catch((e) => e);
+  assert.match(String(error.message), /already attached/);
+  assert.equal(detached, 0);
+  s.attached.delete(s.tab.id);
+  await s.executor.release(false).catch(() => {});
+});

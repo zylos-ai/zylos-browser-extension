@@ -25,7 +25,16 @@
   by abandoning the executing decision and sending a fresh request carrying
   `OPERATION_CANCELLED` (unknown or stale IDs are a no-op), and accepts a
   `done`/`blocked` decision for the still-executing request ID to end the turn
-  instead of returning `DECISION_CONFLICT`. Older Relays never send these.
+  instead of returning `DECISION_CONFLICT`. A `done`/`blocked` for a request the
+  Relay already cancelled (the Agent's caller was killed) is accepted while its
+  follow-up request is still pending. Both paths still require the latest owner
+  input and apply the research-coverage gate. Older Relays never send these;
+  upgrade together with Remote PR #30.
+- After a timed-out operation on a busy page the extension could not re-attach
+  to its own tab ("Another debugger is already attached"). Abandoning a target
+  no longer waits on in-page cursor cleanup before detaching, and re-attaching
+  reclaims only the extension's own stale debugger session; a foreign debugger
+  is never detached.
 
 ## [0.17.6] - 2026-11-12
 
