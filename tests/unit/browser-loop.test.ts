@@ -995,3 +995,38 @@ describe('abandoned executions', () => {
     loop.cancel();
   });
 });
+
+describe('action timeoutMs', () => {
+  const find = (extra: Record<string, unknown>) => ({
+    kind: 'actions',
+    actions: [{ method: 'find', params: { selector: 'x' }, ...extra }],
+  });
+  it('accepts integers in [1000, 300000] and rejects anything else', () => {
+    expect(decisionSchema.safeParse(find({ timeoutMs: 1000 })).success).toBe(true);
+    expect(decisionSchema.safeParse(find({ timeoutMs: 300000 })).success).toBe(true);
+    for (const timeoutMs of [999, 300001, 1500.5, '60000', null])
+      expect(decisionSchema.safeParse(find({ timeoutMs })).success).toBe(false);
+  });
+  it('does not apply to methods without a default budget', () => {
+    const parsed = decisionSchema.safeParse({
+      kind: 'actions',
+      actions: [
+        {
+          method: 'recover-control',
+          params: { recoveryId: '22222222-2222-4222-8222-222222222222' },
+          timeoutMs: 5000,
+        },
+      ],
+    });
+    expect(parsed.success).toBe(false);
+    expect(JSON.stringify(parsed.error?.issues)).toContain('does not apply');
+  });
+  it('documents the override and the timeout retry policy for the Agent', () => {
+    const { requests, loop } = setup();
+    expect(requests[0]!.execution.instructions).toContain(
+      'only for actions you expect to be\nslow; max 300000',
+    );
+    expect(requests[0]!.execution.instructions).toContain('reply blocked and explain why');
+    loop.cancel();
+  });
+});

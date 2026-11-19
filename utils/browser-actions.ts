@@ -10,7 +10,12 @@ import {
   execute,
 } from './automation/executor';
 import { usePageContext, readPageContext } from './page-context';
-import { browserParams as paramSchemas, BROWSER_METHODS, type BrowserMethod } from './tool-catalog';
+import {
+  browserParams as paramSchemas,
+  UNTIMED_METHODS,
+  BROWSER_METHODS,
+  type BrowserMethod,
+} from './tool-catalog';
 export { BROWSER_METHODS, type BrowserMethod } from './tool-catalog';
 
 // Retried mutating calls replay their recorded answer instead of clicking twice.
@@ -179,6 +184,8 @@ export type Dispatch = {
   params: Record<string, unknown>;
   requestId?: string;
   deadline?: number;
+  /** Agent per-action override of the default budget. */
+  timeoutMs?: number;
   keyId: string;
 };
 
@@ -191,7 +198,10 @@ export function dispatch(
 ): Promise<unknown> {
   return idem.run(req, (assertActive) => {
     onStart?.();
-    const timeoutMs = typeof req.deadline === 'number' ? undefined : defaultTimeout(req.method);
+    // An Agent timeoutMs (validated by the decision schema) replaces only the
+    // default budget; explicit deadlines and untimed methods are unaffected.
+    const fallback = typeof req.deadline === 'number' ? undefined : defaultTimeout(req.method);
+    const timeoutMs = fallback === undefined ? undefined : (req.timeoutMs ?? fallback);
     if (timeoutMs === undefined)
       return dispatchNow(req, idem, assertActive, onExecute, beforeInput);
     return withOperationTimeout(req.method, timeoutMs, (deadline) =>
@@ -211,9 +221,7 @@ export const OPERATION_TIMEOUT_MS: Partial<Record<string, number | null>> = {
   snapshot: 60_000,
   'wait-for-page': 60_000,
   'read-page': 30_000,
-  'recover-control': null,
-  'inspect-recovery-frames': null,
-  'use-current-tab': null,
+  ...Object.fromEntries(UNTIMED_METHODS.map((method) => [method, null])),
 };
 const DEFAULT_OPERATION_TIMEOUT_MS = 60_000;
 function defaultTimeout(method: string) {

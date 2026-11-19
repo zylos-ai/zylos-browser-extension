@@ -659,7 +659,7 @@ export function startRemoteBackground() {
     execute: (actions, assertActive, requestId, hasUpdates, expectedControl) =>
       runBrowserRound(
         actions,
-        async (method, params, id) => {
+        async (method, params, id, timeoutMs) => {
           await waitForTransport(assertActive);
           assertActive();
           const diagnosticOperation = startDiagnosticOperation(method);
@@ -672,7 +672,7 @@ export function startRemoteBackground() {
           send({ type: 'agent-event', phase: 'start', taskId, id, method, params });
           try {
             const result = await dispatch(
-              { method, params, requestId: id, keyId: state.keyId },
+              { method, params, requestId: id, timeoutMs, keyId: state.keyId },
               idem,
               undefined,
               () => {

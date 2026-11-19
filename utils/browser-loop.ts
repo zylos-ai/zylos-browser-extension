@@ -1,6 +1,12 @@
 import { z } from 'zod';
 import { commandSchema } from './commands';
-import { browserParams, describeTools } from './tool-catalog';
+import {
+  ACTION_TIMEOUT_MAX_MS,
+  ACTION_TIMEOUT_MIN_MS,
+  UNTIMED_METHODS,
+  browserParams,
+  describeTools,
+} from './tool-catalog';
 import instructions from '../agent/decision-guide.md?raw';
 import readingInstructions from '../agent/reading-guide.md?raw';
 import progressInstructions from '../agent/progress-guide.md?raw';
@@ -62,9 +68,25 @@ export const loopActionSchema = z
   .object({
     method: z.enum(loopMethods),
     params: z.record(z.unknown()).default({}),
+    // Action-level, not a tool parameter: it bounds execution, not the page operation.
+    timeoutMs: z
+      .number({ invalid_type_error: 'timeoutMs must be an integer number of milliseconds' })
+      .int('timeoutMs must be an integer number of milliseconds')
+      .min(ACTION_TIMEOUT_MIN_MS, `timeoutMs must be at least ${ACTION_TIMEOUT_MIN_MS}`)
+      .max(ACTION_TIMEOUT_MAX_MS, `timeoutMs must be at most ${ACTION_TIMEOUT_MAX_MS}`)
+      .optional(),
   })
   .strict()
   .superRefine((action, ctx) => {
+    if (
+      action.timeoutMs !== undefined &&
+      [...UNTIMED_METHODS, 'record-findings', 'read-findings'].includes(action.method)
+    )
+      ctx.addIssue({
+        code: 'custom',
+        path: ['timeoutMs'],
+        message: `timeoutMs does not apply to ${action.method}`,
+      });
     const params = browserParams[action.method].safeParse(action.params);
     if (!params.success) {
       for (const issue of params.error.issues)

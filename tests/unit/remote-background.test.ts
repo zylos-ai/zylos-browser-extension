@@ -31,7 +31,7 @@ vi.mock('../../utils/browser-round', () => ({
     const results = [];
     for (const action of actions) {
       active();
-      results.push(await call(action.method, action.params, id));
+      results.push(await call(action.method, action.params, id, action.timeoutMs));
     }
     active();
     return {
@@ -1523,7 +1523,9 @@ describe('decision transport background', () => {
     });
     const pingTimer = setInterval(() => ws.receive({ type: 'ping', ts: Date.now() }), 17000);
     await vi.advanceTimersByTimeAsync(59_000);
-    expect(JSON.stringify(ws.frames)).not.toContain('OPERATION_TIMEOUT');
+    expect(
+      ws.frames.some((f) => f.type === 'agent-event' && f.phase === 'end' && f.method === 'find'),
+    ).toBe(false);
     await vi.advanceTimersByTimeAsync(2_000);
     clearInterval(pingTimer);
     await flush();
@@ -1533,6 +1535,48 @@ describe('decision transport background', () => {
     ).toMatchObject({ error: { code: 'OPERATION_TIMEOUT' } });
     expect(executor.abandonTarget).toHaveBeenCalled();
   });
+  it('an Agent timeoutMs override extends the budget for that one action', async () => {
+    const ws = await bootConnected();
+    const request = await selectPage(ws);
+    executor.execute.mockImplementationOnce(() => new Promise(() => {}));
+    await respond(ws, request, {
+      kind: 'actions',
+      actions: [{ method: 'find', params: { selector: 'table' }, timeoutMs: 120_000 }],
+    });
+    const pingTimer = setInterval(() => ws.receive({ type: 'ping', ts: Date.now() }), 17000);
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(
+      ws.frames.some((f) => f.type === 'agent-event' && f.phase === 'end' && f.method === 'find'),
+    ).toBe(false);
+    await vi.advanceTimersByTimeAsync(60_000);
+    clearInterval(pingTimer);
+    await flush();
+    expect(
+      ws.frames.find((f) => f.type === 'agent-event' && f.phase === 'end' && f.method === 'find'),
+    ).toMatchObject({
+      error: { code: 'OPERATION_TIMEOUT', message: expect.stringContaining('120s') },
+    });
+  });
+  it.each([999, 300_001, 1500.5, '60000'])(
+    'rejects timeoutMs %s with BAD_DECISION instead of clamping',
+    async (timeoutMs) => {
+      const ws = await bootConnected();
+      const request = await selectPage(ws);
+      await respond(
+        ws,
+        request,
+        {
+          kind: 'actions',
+          actions: [{ method: 'find', params: { selector: 'table' }, timeoutMs }],
+        },
+        41,
+      );
+      const reply = ws.frames.find((f) => f.id === 41);
+      expect(reply).toMatchObject({ type: 'error', code: 'BAD_DECISION' });
+      expect(reply?.message).toContain('timeoutMs');
+      expect(executor.execute).not.toHaveBeenCalled();
+    },
+  );
   it('agent-cancel abandons the executing request and asks for a fresh decision', async () => {
     const ws = await bootConnected();
     const request = await selectPage(ws);

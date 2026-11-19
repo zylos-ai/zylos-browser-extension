@@ -13,6 +13,14 @@
   debugger attach no longer blocks the attachment queue: it times out after
   30s and the target is dropped so the next operation re-attaches cleanly.
   Explicit deadlines keep `COMMAND_EXPIRED`.
+- The Agent can set an optional action-level `timeoutMs` (integer,
+  1000–300000 ms) to replace the default budget for one action it expects to be
+  slow. Out-of-range or non-integer values are rejected with `BAD_DECISION`
+  rather than clamped; it is refused for recover-control,
+  inspect-recovery-frames, use-current-tab and findings actions and never
+  changes explicit deadlines. The Agent guides now say to re-observe after
+  `OPERATION_TIMEOUT`, retry a step that timed out twice once with a larger
+  `timeoutMs`, then reply blocked instead of repeating it.
 - Pairs with zylos-browser-remote PR #30: the extension handles `agent-cancel`
   by abandoning the executing decision and sending a fresh request carrying
   `OPERATION_CANCELLED` (unknown or stale IDs are a no-op), and accepts a

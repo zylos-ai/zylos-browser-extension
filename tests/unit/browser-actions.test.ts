@@ -331,6 +331,34 @@ describe('default operation budget', () => {
     await rejects(call('find', { selector: 'x' }), 'OPERATION_TIMEOUT');
   });
 
+  it('applies an Agent timeoutMs only in place of a default budget', async () => {
+    executor.currentControl.mockReturnValue({ sessionId: 's', tabId: 7, tabIds: [7] });
+    executor.currentGrant.mockReturnValue({ id: 7, url: 'https://example.com/' });
+    const before = Date.now();
+    await call('observe', {}, { timeoutMs: 200_000 });
+    const extended = executor.execute.mock.calls[0]![1] as number;
+    expect(extended).toBeGreaterThanOrEqual(before + 200_000);
+    expect(extended).toBeLessThan(before + 201_000);
+    const deadline = Date.now() + 5_000;
+    await call('observe', {}, { deadline, timeoutMs: 200_000 });
+    expect(executor.execute.mock.calls[1]![1]).toBe(deadline);
+    vi.useFakeTimers();
+    try {
+      context.usePageContext.mockImplementationOnce(
+        () => new Promise((resolve) => setTimeout(() => resolve({ late: true }), 10_000)),
+      );
+      const adopted = call(
+        'use-current-tab',
+        { contextId: '11111111-1111-4111-8111-111111111111' },
+        { timeoutMs: 1_000 },
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(adopted).resolves.toEqual({ late: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps explicit deadlines and their COMMAND_EXPIRED semantics', async () => {
     executor.currentControl.mockReturnValue({ sessionId: 's', tabId: 7, tabIds: [7] });
     executor.currentGrant.mockReturnValue({ id: 7, url: 'https://example.com/' });
