@@ -659,7 +659,7 @@ export function startRemoteBackground() {
     execute: (actions, assertActive, requestId, hasUpdates, expectedControl) =>
       runBrowserRound(
         actions,
-        async (method, params, id) => {
+        async (method, params, id, timeoutMs) => {
           await waitForTransport(assertActive);
           assertActive();
           const diagnosticOperation = startDiagnosticOperation(method);
@@ -672,7 +672,7 @@ export function startRemoteBackground() {
           send({ type: 'agent-event', phase: 'start', taskId, id, method, params });
           try {
             const result = await dispatch(
-              { method, params, requestId: id, keyId: state.keyId },
+              { method, params, requestId: id, timeoutMs, keyId: state.keyId },
               idem,
               undefined,
               () => {
@@ -1539,6 +1539,18 @@ export function startRemoteBackground() {
           message: e.message?.slice(0, 1500),
         });
       }
+      return;
+    }
+    if (m.method === 'agent-cancel') {
+      // Relay gave up waiting on an executing decision. Unknown/stale IDs are a no-op ack.
+      const parsed = z
+        .object({ id: z.string().max(128), reason: z.string().max(500).optional() })
+        .safeParse(m.params);
+      if (!parsed.success) {
+        reply({ type: 'error', code: 'BAD_PARAMS', message: 'agent-cancel requires an id' });
+        return;
+      }
+      reply({ type: 'resp', result: loop.cancelExecution(parsed.data.id, parsed.data.reason) });
       return;
     }
     reply({

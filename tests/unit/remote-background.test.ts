@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const executor = vi.hoisted(() => ({
   createTask: vi.fn(),
   release: vi.fn(async () => {}),
+  abandonTarget: vi.fn(),
   completeTask: vi.fn(async () => {}),
   currentControl: vi.fn(
     (): null | {
@@ -30,7 +31,7 @@ vi.mock('../../utils/browser-round', () => ({
     const results = [];
     for (const action of actions) {
       active();
-      results.push(await call(action.method, action.params, id));
+      results.push(await call(action.method, action.params, id, action.timeoutMs));
     }
     active();
     return {
@@ -1484,7 +1485,7 @@ describe('decision transport background', () => {
     await flush();
     expect(ws.last('resp')).toMatchObject({ id: 504, result: { enabled: false, events: [] } });
   });
-  it('lets a slow browser action finish without a default deadline or replay', async () => {
+  it('lets a slow browser action finish within its default budget without replay', async () => {
     const ws = await bootConnected();
     const request = await selectPage(ws);
     let complete!: () => void;
@@ -1501,7 +1502,7 @@ describe('decision transport background', () => {
       actions: [{ method: 'find', params: { selector: 'table' } }],
     });
     const pingTimer = setInterval(() => ws.receive({ type: 'ping', ts: Date.now() }), 17000);
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(59_000);
     clearInterval(pingTimer);
     expect(ws.last('agent-request')!.id).toBe(request.id);
     expect((await state()).loopActive).toBe(true);
@@ -1510,6 +1511,99 @@ describe('decision transport background', () => {
     expect(ws.last('agent-request')!.id).not.toBe(request.id);
     expect(ws.last('agent-request')!.execution).toMatchObject({ results: [{ ran: 'find' }] });
     expect(executor.execute).toHaveBeenCalledOnce();
+  });
+  it('ends a never-settling browser action with OPERATION_TIMEOUT instead of hanging', async () => {
+    const ws = await bootConnected();
+    const request = await selectPage(ws);
+    // A Chrome debugger promise that never settles after a page re-render.
+    executor.execute.mockImplementationOnce(() => new Promise(() => {}));
+    await respond(ws, request, {
+      kind: 'actions',
+      actions: [{ method: 'find', params: { selector: 'table' } }],
+    });
+    const pingTimer = setInterval(() => ws.receive({ type: 'ping', ts: Date.now() }), 17000);
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(
+      ws.frames.some((f) => f.type === 'agent-event' && f.phase === 'end' && f.method === 'find'),
+    ).toBe(false);
+    await vi.advanceTimersByTimeAsync(2_000);
+    clearInterval(pingTimer);
+    await flush();
+    // The real round runner turns this error into round evidence for the next request.
+    expect(
+      ws.frames.find((f) => f.type === 'agent-event' && f.phase === 'end' && f.method === 'find'),
+    ).toMatchObject({ error: { code: 'OPERATION_TIMEOUT' } });
+    expect(executor.abandonTarget).toHaveBeenCalled();
+  });
+  it('an Agent timeoutMs override extends the budget for that one action', async () => {
+    const ws = await bootConnected();
+    const request = await selectPage(ws);
+    executor.execute.mockImplementationOnce(() => new Promise(() => {}));
+    await respond(ws, request, {
+      kind: 'actions',
+      actions: [{ method: 'find', params: { selector: 'table' }, timeoutMs: 120_000 }],
+    });
+    const pingTimer = setInterval(() => ws.receive({ type: 'ping', ts: Date.now() }), 17000);
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(
+      ws.frames.some((f) => f.type === 'agent-event' && f.phase === 'end' && f.method === 'find'),
+    ).toBe(false);
+    await vi.advanceTimersByTimeAsync(60_000);
+    clearInterval(pingTimer);
+    await flush();
+    expect(
+      ws.frames.find((f) => f.type === 'agent-event' && f.phase === 'end' && f.method === 'find'),
+    ).toMatchObject({
+      error: { code: 'OPERATION_TIMEOUT', message: expect.stringContaining('120s') },
+    });
+  });
+  it.each([999, 300_001, 1500.5, '60000'])(
+    'rejects timeoutMs %s with BAD_DECISION instead of clamping',
+    async (timeoutMs) => {
+      const ws = await bootConnected();
+      const request = await selectPage(ws);
+      await respond(
+        ws,
+        request,
+        {
+          kind: 'actions',
+          actions: [{ method: 'find', params: { selector: 'table' }, timeoutMs }],
+        },
+        41,
+      );
+      const reply = ws.frames.find((f) => f.id === 41);
+      expect(reply).toMatchObject({ type: 'error', code: 'BAD_DECISION' });
+      expect(reply?.message).toContain('timeoutMs');
+      expect(executor.execute).not.toHaveBeenCalled();
+    },
+  );
+  it('agent-cancel abandons the executing request and asks for a fresh decision', async () => {
+    const ws = await bootConnected();
+    const request = await selectPage(ws);
+    executor.execute.mockImplementationOnce(() => new Promise(() => {}));
+    await respond(ws, request, {
+      kind: 'actions',
+      actions: [{ method: 'find', params: { selector: 'table' } }],
+    });
+    ws.receive({ type: 'req', id: 7, method: 'agent-cancel', params: { id: 'stale' } });
+    await flush();
+    expect(ws.frames.find((f) => f.id === 7)).toMatchObject({
+      type: 'resp',
+      result: { cancelled: false },
+    });
+    expect(ws.last('agent-request')!.id).toBe(request.id);
+    ws.receive({
+      type: 'req',
+      id: 8,
+      method: 'agent-cancel',
+      params: { id: request.id, reason: 'caller timeout' },
+    });
+    await flush();
+    const next = ws.last('agent-request')!;
+    expect(next.id).not.toBe(request.id);
+    expect(ws.frames.find((f) => f.id === 8)).toMatchObject({ result: { cancelled: true } });
+    expect(JSON.stringify(next.execution)).toContain('OPERATION_CANCELLED');
+    expect((await state()).loopActive).toBe(true);
   });
   it('correlates direct input receipts and stops instead of silently dropping failed owner input', async () => {
     const ws = await bootConnected();

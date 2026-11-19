@@ -18,6 +18,7 @@ type Call = (
   method: string,
   params: Record<string, unknown>,
   requestId: string,
+  timeoutMs?: number,
 ) => Promise<unknown>;
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const reads = new Set(['find', 'inspect', 'frames', 'observe', 'wait-for-page']);
@@ -53,13 +54,15 @@ export async function runBrowserRound(
     outcome: 'not-executed',
   }));
   const lost = () => controlLossRevision() !== startLoss || (hadControl && !currentControl());
-  const guarded: Call = async (method, params, id) => {
+  const guarded: Call = async (method, params, id, timeoutMs) => {
     await beforeOperation();
     assertActive();
     if (lost()) throw Object.assign(new Error('Control lost'), { code: 'STOPPED' });
     const index = actions.findIndex((_, i) => id === `${requestId}:${i}`);
     if (index >= 0) results[index]!.outcome = 'uncertain';
-    const value = await call(method, params, id);
+    const value = await (timeoutMs === undefined
+      ? call(method, params, id)
+      : call(method, params, id, timeoutMs));
     const recoveryProof = consumeInputRecovery(value);
     if (
       index >= 0 &&
@@ -264,7 +267,7 @@ async function executeRound(
     const action = actions[0]!;
     assertActive();
     try {
-      const page = await call(action.method, action.params, `${requestId}:0`);
+      const page = await call(action.method, action.params, `${requestId}:0`, action.timeoutMs);
       assertActive();
       return {
         mode: currentControl() ? 'operating' : 'reading',
@@ -304,7 +307,12 @@ async function executeRound(
     const version = browserPageVersion();
     let actionCompleted = false;
     try {
-      const result = await call(action.method, action.params, `${requestId}:${i}`);
+      const result = await call(
+        action.method,
+        action.params,
+        `${requestId}:${i}`,
+        action.timeoutMs,
+      );
       assertActive();
       actionCompleted = true;
       results.push({

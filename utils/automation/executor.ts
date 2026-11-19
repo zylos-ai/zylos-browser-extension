@@ -53,6 +53,27 @@ import {
 let grant: GrantedTab | null = null;
 const pointerMotion = new PointerMotion();
 let cursor: Cursor | null = null;
+// Tabs where Chrome may still hold *our* debugger session: added on attach,
+// removed only on a confirmed detach or onDetach. A detach abandoned after a
+// timeout can leave Chrome attached while our state says detached.
+const ownedAttachments = new Set<number>();
+const alreadyAttached = (error: unknown) =>
+  /already attached/i.test(String((error as { message?: string })?.message ?? error));
+async function attachTab(target: { tabId: number }) {
+  try {
+    await diagnosticAttach(target, '1.3');
+  } catch (error) {
+    // Never fight a genuinely foreign debugger; only reclaim our own stale session.
+    if (!alreadyAttached(error) || !ownedAttachments.has(target.tabId)) throw error;
+    await diagnosticDetach(target).catch(() => {});
+    await diagnosticAttach(target, '1.3');
+  }
+  ownedAttachments.add(target.tabId);
+}
+async function detachTab(target: { tabId: number }) {
+  await diagnosticDetach(target);
+  ownedAttachments.delete(target.tabId);
+}
 let control: Scope | null = null;
 let parked = false;
 let pauseTimer: ReturnType<typeof setTimeout> | undefined;
@@ -295,10 +316,40 @@ function markTask(session: Scope, phase: Scope['phase']) {
 }
 const inspectable = (tab: chrome.tabs.Tab): tab is chrome.tabs.Tab & { id: number; url: string } =>
   typeof tab.id === 'number' && allowed(tab.url) && (!tab.pendingUrl || allowed(tab.pendingUrl));
-function serial<T>(fn: () => Promise<T>): Promise<T> {
-  const next = attachmentQueue.catch(() => {}).then(fn);
+// A Chrome debugger call that never settles must not hold the attachment queue
+// forever: the waiter times out, the target is dropped and the next operation
+// re-attaches cleanly.
+export const ATTACHMENT_TIMEOUT_MS = 30_000;
+function serial<T>(fn: () => Promise<T>, timeoutMs = ATTACHMENT_TIMEOUT_MS): Promise<T> {
+  const next = attachmentQueue
+    .catch(() => {})
+    .then(() => {
+      if (!Number.isFinite(timeoutMs)) return fn();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      return Promise.race([
+        fn(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            abandonTarget();
+            reject(
+              Object.assign(new Error('Browser debugger attachment did not respond'), {
+                code: 'OPERATION_TIMEOUT',
+              }),
+            );
+          }, timeoutMs);
+        }),
+      ]).finally(() => clearTimeout(timer));
+    });
   attachmentQueue = next.catch(() => {});
   return next;
+}
+/** Drops the debugger target after a hung operation so the next one starts clean. */
+export function abandonTarget() {
+  // The page may be hung: do not wait on in-page cursor cleanup before the
+  // browser-side detach (that wait is what left Chrome attached in #29).
+  cursor = null;
+  if (!grant) return invalidate('other');
+  void detachCurrent().catch(() => {});
 }
 
 async function groupOwnedTab(session: Scope, tabId: number) {
@@ -412,7 +463,7 @@ async function detachCurrent(strict = false) {
   await clearCursor();
   if (old) {
     try {
-      await diagnosticDetach({ tabId: old.id });
+      await detachTab({ tabId: old.id });
     } catch {
       if (strict) {
         const targets = await chrome.debugger.getTargets().catch(() => null);
@@ -631,7 +682,7 @@ function syncTarget() {
     await detachCurrent();
     if (control !== session || parked || session.tabId !== targetId) return;
     if (blockedAttachments.has(tab.id)) fail('DEBUGGER_DETACH_FAILED');
-    await diagnosticAttach({ tabId: tab.id }, '1.3');
+    await attachTab({ tabId: tab.id });
     try {
       if (control !== session || parked || session.tabId !== targetId) return;
       await diagnosticSend({ tabId: tab.id }, 'Page.enable');
@@ -663,7 +714,7 @@ function syncTarget() {
       });
       publish();
     } finally {
-      if (grant?.id !== tab.id) await diagnosticDetach({ tabId: tab.id }).catch(() => {});
+      if (grant?.id !== tab.id) await detachTab({ tabId: tab.id }).catch(() => {});
     }
   });
 }
@@ -727,6 +778,7 @@ export function initializeExecutor() {
     groupReference: control && control.groupId !== null ? 'assigned' : 'none',
   }));
   chrome.debugger.onDetach.addListener((source, reason) => {
+    if (source.tabId !== undefined) ownedAttachments.delete(source.tabId);
     recordDebuggerEvent('detach', source, reason);
     recordDiagnostic(
       'detach',
@@ -1254,7 +1306,7 @@ export async function recoverControl(
         check();
       }
       if (blockedAttachments.has(lease.tabId)) fail('DEBUGGER_DETACH_FAILED');
-      await diagnosticAttach({ tabId: lease.tabId }, '1.3');
+      await attachTab({ tabId: lease.tabId });
       attached = true;
       await checkTab();
       const initialization = {
@@ -1348,11 +1400,13 @@ export async function recoverControl(
       // The serialized attach queue stays owned until late completion is cleaned up.
       // A newer task cannot attach on this tab before this lease is detached.
       if (attached && !committed)
-        await diagnosticDetach({ tabId: lease.tabId }).catch(() => {
+        await detachTab({ tabId: lease.tabId }).catch(() => {
           blockedAttachments.add(lease.tabId);
         });
     }
-  });
+    // Recovery bounds itself by its lease deadline and must keep the queue until
+    // late completion is cleaned up.
+  }, Infinity);
   try {
     return await Promise.race([
       attempt,

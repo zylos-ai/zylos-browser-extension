@@ -12,6 +12,17 @@ const {
   screenshot: _screenshot,
   ...loopActionParams
 } = actionParams;
+// Methods without a default execution budget keep their own lease/consent
+// lifecycles; an Agent timeoutMs override does not apply to them.
+export const UNTIMED_METHODS: readonly string[] = [
+  'recover-control',
+  'inspect-recovery-frames',
+  'use-current-tab',
+];
+/** Bounds for an Agent's per-action timeoutMs override. */
+export const ACTION_TIMEOUT_MIN_MS = 1_000;
+export const ACTION_TIMEOUT_MAX_MS = 300_000;
+
 export const browserParams = {
   ...loopActionParams,
   ...researchParams,

@@ -921,3 +921,242 @@ it('notes reuse the last text observation without retransmitting screenshot byte
   expect(io.execute).toHaveBeenCalledTimes(1);
   loop.cancel();
 });
+
+describe('abandoned executions', () => {
+  const hang = (io: ReturnType<typeof setup>['io']) =>
+    io.execute.mockImplementationOnce(() => new Promise<RoundResult>(() => {}));
+
+  it('agent-cancel releases the executing request and issues a fresh request', async () => {
+    const { loop, requests, io } = setup();
+    hang(io);
+    loop.accept(requests[0]!.id, action);
+    await Promise.resolve();
+    expect(loop.currentRequestId).toBe(requests[0]!.id);
+    expect(loop.cancelExecution('unknown-id')).toEqual({ cancelled: false });
+    expect(requests).toHaveLength(1);
+    expect(loop.cancelExecution(requests[0]!.id, 'caller timeout')).toEqual({ cancelled: true });
+    expect(requests).toHaveLength(2);
+    expect(loop.currentRequestId).toBe(requests[1]!.id);
+    expect(requests[1]!.execution.results).toMatchObject([
+      { status: 'error', error: { code: 'OPERATION_CANCELLED' } },
+    ]);
+    // A second cancel for the same id is stale.
+    expect(loop.cancelExecution(requests[0]!.id)).toEqual({ cancelled: false });
+    loop.cancel();
+  });
+
+  it('a late result from the abandoned round does not produce another request', async () => {
+    const { loop, requests, io } = setup();
+    let finish!: (value: RoundResult) => void;
+    io.execute.mockImplementationOnce(
+      () =>
+        new Promise<RoundResult>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    loop.accept(requests[0]!.id, action);
+    await Promise.resolve();
+    loop.cancelExecution(requests[0]!.id);
+    finish({ observation: { text: 'late' }, results: [], failed: false, mode: 'operating' });
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(requests).toHaveLength(2);
+    expect(loop.pendingId).toBe(requests[1]!.id);
+    loop.cancel();
+  });
+
+  it.each(['done', 'blocked'] as const)(
+    '%s for the executing request ends the turn instead of DECISION_CONFLICT',
+    async (kind) => {
+      const { loop, requests, io } = setup();
+      hang(io);
+      loop.accept(requests[0]!.id, action);
+      await Promise.resolve();
+      expect(loop.accept(requests[0]!.id, { kind, text: 'Gave up' })).toEqual({
+        accepted: true,
+        replayed: false,
+      });
+      await Promise.resolve();
+      expect(io.finish).toHaveBeenCalledWith('Gave up', kind, 'task-1');
+      expect(loop.taskId).toBeUndefined();
+    },
+  );
+
+  it('keeps DECISION_CONFLICT for a changed actions decision on the executing request', async () => {
+    const { loop, requests, io } = setup();
+    hang(io);
+    loop.accept(requests[0]!.id, action);
+    await Promise.resolve();
+    expect(() =>
+      loop.accept(requests[0]!.id, {
+        ...action,
+        actions: [{ method: 'open', params: { url: 'https://example.org' } }],
+      }),
+    ).toThrow('different contents');
+    loop.cancel();
+  });
+});
+
+describe('action timeoutMs', () => {
+  const find = (extra: Record<string, unknown>) => ({
+    kind: 'actions',
+    actions: [{ method: 'find', params: { selector: 'x' }, ...extra }],
+  });
+  it('accepts integers in [1000, 300000] and rejects anything else', () => {
+    expect(decisionSchema.safeParse(find({ timeoutMs: 1000 })).success).toBe(true);
+    expect(decisionSchema.safeParse(find({ timeoutMs: 300000 })).success).toBe(true);
+    for (const timeoutMs of [999, 300001, 1500.5, '60000', null])
+      expect(decisionSchema.safeParse(find({ timeoutMs })).success).toBe(false);
+  });
+  it('does not apply to methods without a default budget', () => {
+    const parsed = decisionSchema.safeParse({
+      kind: 'actions',
+      actions: [
+        {
+          method: 'recover-control',
+          params: { recoveryId: '22222222-2222-4222-8222-222222222222' },
+          timeoutMs: 5000,
+        },
+      ],
+    });
+    expect(parsed.success).toBe(false);
+    expect(JSON.stringify(parsed.error?.issues)).toContain('does not apply');
+  });
+  it('documents the override and the timeout retry policy for the Agent', () => {
+    const { requests, loop } = setup();
+    expect(requests[0]!.execution.instructions).toContain(
+      'only for actions you expect to be\nslow; max 300000',
+    );
+    expect(requests[0]!.execution.instructions).toContain('reply blocked and explain why');
+    loop.cancel();
+  });
+});
+
+describe('cancelled and replaced executions', () => {
+  const capture = (io: ReturnType<typeof setup>['io']) => {
+    let assertActive!: () => void;
+    let fail!: (error: unknown) => void;
+    (
+      io.execute as unknown as {
+        mockImplementationOnce(fn: (a: unknown, b: unknown) => Promise<RoundResult>): void;
+      }
+    ).mockImplementationOnce(
+      (_actions, active) =>
+        new Promise<RoundResult>((_, reject) => {
+          assertActive = active as () => void;
+          fail = reject;
+        }),
+    );
+    return { assertActive: () => assertActive(), fail: (e: unknown) => fail(e) };
+  };
+  const flush = async () => {
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  };
+
+  it('accepts done for a request the Relay already cancelled (caller killed, then done)', async () => {
+    const { loop, requests, io } = setup();
+    capture(io);
+    loop.accept(requests[0]!.id, action);
+    await flush();
+    expect(loop.cancelExecution(requests[0]!.id, 'caller disconnected').cancelled).toBe(true);
+    expect(requests).toHaveLength(2);
+    expect(loop.accept(requests[0]!.id, { kind: 'done', text: 'Finished anyway' })).toEqual({
+      accepted: true,
+      replayed: false,
+    });
+    await vi.waitFor(() =>
+      expect(io.finish).toHaveBeenCalledWith('Finished anyway', 'done', 'task-1'),
+    );
+    expect(() => loop.accept(requests[1]!.id, action)).toThrow();
+  });
+
+  it('keeps DECISION_CONFLICT for a cancelled request once its follow-up was answered', async () => {
+    const { loop, requests, io } = setup();
+    capture(io);
+    loop.accept(requests[0]!.id, action);
+    await flush();
+    loop.cancelExecution(requests[0]!.id);
+    io.execute.mockImplementationOnce(() => new Promise<RoundResult>(() => {}));
+    loop.accept(requests[1]!.id, action);
+    expect(() => loop.accept(requests[0]!.id, { kind: 'done', text: 'Late' })).toThrow(
+      'different contents',
+    );
+    loop.cancel();
+  });
+
+  it.each(['executing', 'cancelled'] as const)(
+    'requires the latest owner input before a %s request may end the turn',
+    async (state) => {
+      const { loop, requests, io } = setup();
+      capture(io);
+      loop.accept(requests[0]!.id, action);
+      await flush();
+      if (state === 'cancelled') loop.cancelExecution(requests[0]!.id);
+      loop.steer(
+        'u1',
+        { role: 'user', content: [{ type: 'text', text: 'Actually do something else' }] },
+        { type: 'current-page', status: 'unavailable' },
+      );
+      expect(() => loop.accept(requests[0]!.id, { kind: 'done', text: 'Old goal' })).toThrow(
+        'New owner input',
+      );
+      expect(io.finish).not.toHaveBeenCalled();
+      loop.accept(requests[0]!.id, { kind: 'done', text: 'Merged answer' }, 'u1');
+      await vi.waitFor(() =>
+        expect(io.finish).toHaveBeenCalledWith('Merged answer', 'done', 'task-1'),
+      );
+    },
+  );
+
+  it('stops a cancelled round at its next browser step', async () => {
+    const { loop, requests, io } = setup();
+    const round = capture(io);
+    loop.accept(requests[0]!.id, action);
+    await flush();
+    expect(() => round.assertActive()).not.toThrow();
+    loop.cancelExecution(requests[0]!.id);
+    expect(() => round.assertActive()).toThrow('Turn stopped');
+    loop.cancel();
+  });
+
+  it('ignores an error from a cancelled round instead of ending the turn', async () => {
+    const { loop, requests, io } = setup();
+    const round = capture(io);
+    loop.accept(requests[0]!.id, action);
+    await flush();
+    loop.cancelExecution(requests[0]!.id);
+    round.fail(Object.assign(new Error('late failure'), { code: 'BROWSER_ERROR' }));
+    await flush();
+    expect(io.finish).not.toHaveBeenCalled();
+    expect(loop.pendingId).toBe(requests[1]!.id);
+    loop.cancel();
+  });
+});
+
+it('applies the research gate when done takes over a hung execution', async () => {
+  const { loop, requests, io } = setup();
+  loop.accept(requests[0]!.id, action);
+  await vi.waitFor(() => expect(requests).toHaveLength(2));
+  io.execute.mockImplementationOnce(() => new Promise<RoundResult>(() => {}));
+  const record = {
+    method: 'record-findings',
+    params: {
+      collection: 'list',
+      targetCount: 2,
+      items: [
+        { key: 'a', title: 'A', summary: 'S', sourceUrl: 'https://example.com', position: 1 },
+      ],
+    },
+  };
+  loop.accept(requests[1]!.id, {
+    kind: 'actions',
+    actions: [record, { method: 'scroll', params: { direction: 'down' } }],
+  });
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  loop.accept(requests[1]!.id, { kind: 'done', text: 'Early' });
+  await vi.waitFor(() => expect(requests).toHaveLength(3));
+  expect(io.finish).not.toHaveBeenCalled();
+  expect(requests[2]!.execution.results).toContainEqual(
+    expect.objectContaining({ status: 'incomplete' }),
+  );
+  loop.cancel();
+});

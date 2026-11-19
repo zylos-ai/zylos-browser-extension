@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- An Agent task no longer hangs forever when a page re-renders after a click
+  and the next `observe`/`find`/`read-page` never returns
+  (zylos-browser-remote#29). Agent actions without a caller deadline now get
+  a bounded budget (60s for observe/screenshot/snapshot/wait-for-page and other
+  actions, 30s for read-page) and a hung Chrome call ends as an
+  `OPERATION_TIMEOUT` round result, so the Agent decides the next step. A hung
+  debugger attach no longer blocks the attachment queue: it times out after
+  30s and the target is dropped so the next operation re-attaches cleanly.
+  Explicit deadlines keep `COMMAND_EXPIRED`.
+- The Agent can set an optional action-level `timeoutMs` (integer,
+  1000–300000 ms) to replace the default budget for one action it expects to be
+  slow. Out-of-range or non-integer values are rejected with `BAD_DECISION`
+  rather than clamped; it is refused for recover-control,
+  inspect-recovery-frames, use-current-tab and findings actions and never
+  changes explicit deadlines. The Agent guides now say to re-observe after
+  `OPERATION_TIMEOUT`, retry a step that timed out twice once with a larger
+  `timeoutMs`, then reply blocked instead of repeating it.
+- Pairs with zylos-browser-remote PR #30: the extension handles `agent-cancel`
+  by abandoning the executing decision and sending a fresh request carrying
+  `OPERATION_CANCELLED` (unknown or stale IDs are a no-op), and accepts a
+  `done`/`blocked` decision for the still-executing request ID to end the turn
+  instead of returning `DECISION_CONFLICT`. A `done`/`blocked` for a request the
+  Relay already cancelled (the Agent's caller was killed) is accepted while its
+  follow-up request is still pending. Both paths still require the latest owner
+  input and apply the research-coverage gate. Older Relays never send these;
+  upgrade together with Remote PR #30.
+- After a timed-out operation on a busy page the extension could not re-attach
+  to its own tab ("Another debugger is already attached"). Abandoning a target
+  no longer waits on in-page cursor cleanup before detaching, and re-attaching
+  reclaims only the extension's own stale debugger session; a foreign debugger
+  is never detached.
+
 ## [0.17.6] - 2026-11-12
 
 No Remote protocol change required; `agent-task-start-v1` negotiation is unchanged.

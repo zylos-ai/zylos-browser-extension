@@ -1,6 +1,12 @@
 import { z } from 'zod';
 import { commandSchema } from './commands';
-import { browserParams, describeTools } from './tool-catalog';
+import {
+  ACTION_TIMEOUT_MAX_MS,
+  ACTION_TIMEOUT_MIN_MS,
+  UNTIMED_METHODS,
+  browserParams,
+  describeTools,
+} from './tool-catalog';
 import instructions from '../agent/decision-guide.md?raw';
 import readingInstructions from '../agent/reading-guide.md?raw';
 import progressInstructions from '../agent/progress-guide.md?raw';
@@ -62,9 +68,25 @@ export const loopActionSchema = z
   .object({
     method: z.enum(loopMethods),
     params: z.record(z.unknown()).default({}),
+    // Action-level, not a tool parameter: it bounds execution, not the page operation.
+    timeoutMs: z
+      .number({ invalid_type_error: 'timeoutMs must be an integer number of milliseconds' })
+      .int('timeoutMs must be an integer number of milliseconds')
+      .min(ACTION_TIMEOUT_MIN_MS, `timeoutMs must be at least ${ACTION_TIMEOUT_MIN_MS}`)
+      .max(ACTION_TIMEOUT_MAX_MS, `timeoutMs must be at most ${ACTION_TIMEOUT_MAX_MS}`)
+      .optional(),
   })
   .strict()
   .superRefine((action, ctx) => {
+    if (
+      action.timeoutMs !== undefined &&
+      [...UNTIMED_METHODS, 'record-findings', 'read-findings'].includes(action.method)
+    )
+      ctx.addIssue({
+        code: 'custom',
+        path: ['timeoutMs'],
+        message: `timeoutMs does not apply to ${action.method}`,
+      });
     const params = browserParams[action.method].safeParse(action.params);
     if (!params.success) {
       for (const issue of params.error.issues)
@@ -126,6 +148,13 @@ export type RoundResult = {
   mode: BrowserMode;
   recovery?: ControlRecovery;
 };
+const ownerInputRequired = () =>
+  Object.assign(
+    new Error(
+      'New owner input was sent through C4. Read that message, merge its intent, and use its replyInputId with this request. Do not execute or finalize the old goal.',
+    ),
+    { code: 'OWNER_INPUT_REQUIRED' },
+  );
 function reuseObservation(last?: RoundResult) {
   const observation = (last?.observation ?? {}) as Record<string, unknown>;
   const page = observation.page;
@@ -144,6 +173,10 @@ type Turn = {
   memory: string;
   pending?: string;
   executingRequest?: string;
+  /** Bumped whenever the executing round is abandoned or replaced; fences late work. */
+  execution?: number;
+  /** A request the Relay cancelled; its terminal decision may still arrive. */
+  cancelledRequest?: string;
   ending?: boolean;
   mode: BrowserMode;
   sentMode?: BrowserMode;
@@ -339,6 +372,30 @@ export class BrowserLoop {
     const decision = decisionSchema.parse(value);
     const signature = JSON.stringify([decision, inputId]);
     const previous = this.receipts.get(requestId);
+    const current = this.turn;
+    if (
+      previous &&
+      previous !== signature &&
+      decision.kind !== 'actions' &&
+      current &&
+      !current.ending &&
+      (current.executingRequest === requestId ||
+        (current.cancelledRequest === requestId && current.pending))
+    ) {
+      // The Agent host gave up on a hung (or Relay-cancelled) execution and sent
+      // a terminal decision for the same request ID. Abandon that round and
+      // finish through advance(), which applies the same research gate and
+      // owner-input receipts as an ordinary decision.
+      // The owner-input gate is checked here too. The superseded/steering path
+      // is skipped on purpose: it exists to avoid executing stale *actions*,
+      // and a terminal decision carrying the latest inputId is not stale.
+      if (current.inputId !== current.id && inputId !== current.inputId) throw ownerInputRequired();
+      current.cancelledRequest = undefined;
+      current.pending = undefined;
+      this.receipts.set(requestId, signature);
+      this.launch(current, decision, requestId, false);
+      return { accepted: true, replayed: false };
+    }
     if (previous) {
       if (previous !== signature)
         throw Object.assign(new Error('Decision ID already used with different contents'), {
@@ -385,12 +442,7 @@ export class BrowserLoop {
         );
     }
     if (!superseded && turn.inputId !== turn.id && inputId !== turn.inputId)
-      throw Object.assign(
-        new Error(
-          'New owner input was sent through C4. Read that message, merge its intent, and use its replyInputId with this request. Do not execute or finalize the old goal.',
-        ),
-        { code: 'OWNER_INPUT_REQUIRED' },
-      );
+      throw ownerInputRequired();
     if (
       turn.mode === 'reading' &&
       !superseded &&
@@ -415,11 +467,18 @@ export class BrowserLoop {
       (turn.recoveryAttempts ??= []).push(Date.now());
     }
     turn.pending = undefined; // Claim synchronously, before any browser work.
-    turn.executingRequest = requestId;
+    turn.cancelledRequest = undefined;
     this.receipts.set(requestId, signature);
     while (this.receipts.size > 100) this.receipts.delete(this.receipts.keys().next().value!);
-    void this.advance(turn, decision, requestId, superseded).catch((error) => {
-      if (this.turn === turn) {
+    this.launch(turn, decision, requestId, superseded);
+    return { accepted: true, replayed: false };
+  }
+  private launch(turn: Turn, decision: Decision, requestId: string, superseded: boolean) {
+    turn.executingRequest = requestId;
+    const execution = (turn.execution = (turn.execution ?? 0) + 1);
+    void this.advance(turn, decision, requestId, superseded, execution).catch((error) => {
+      // An abandoned (cancelled or replaced) execution no longer owns the turn.
+      if (this.turn === turn && turn.execution === execution) {
         if (error instanceof ControlSuspended) this.suspendRecovery(error.recovery, error.results);
         else if (turn.recovery) this.endRecovery('failed');
         else if (error instanceof ControlLoss)
@@ -433,7 +492,37 @@ export class BrowserLoop {
         else void this.endNotice(turn, { kind: 'interrupted' }, 'interrupted');
       }
     });
-    return { accepted: true, replayed: false };
+  }
+  /**
+   * The Agent host stopped waiting for the executing request. Abandon that round
+   * and ask for a fresh decision with the cancellation as round evidence.
+   * Unknown or stale IDs are a no-op.
+   */
+  cancelExecution(requestId: string, reason?: string) {
+    const turn = this.turn;
+    if (!turn || turn.ending || !requestId || turn.executingRequest !== requestId)
+      return { cancelled: false };
+    this.request(turn, {
+      mode: turn.mode,
+      failed: true,
+      observation: reuseObservation(turn.last),
+      results: [
+        {
+          method: 'execution',
+          status: 'error',
+          error: {
+            code: 'OPERATION_CANCELLED',
+            message: `The previous decision's browser execution did not finish and was abandoned${
+              reason ? ` (${reason.slice(0, 200)})` : ''
+            }. Its effect is uncertain; observe before acting and do not blindly repeat input.`,
+          },
+        },
+      ],
+    });
+    // A terminal decision for the cancelled ID may still arrive (the caller was
+    // killed after the Agent decided); accept it while the follow-up is pending.
+    turn.cancelledRequest = requestId;
+    return { cancelled: true };
   }
   private request(turn: Turn, last?: RoundResult) {
     if (this.turn !== turn || turn.ending) return;
@@ -442,6 +531,7 @@ export class BrowserLoop {
     const id = crypto.randomUUID();
     turn.pending = id;
     turn.executingRequest = undefined;
+    turn.execution = (turn.execution ?? 0) + 1; // Fence any round still in flight.
     const first = turn.round++ === 0;
     turn.requestedInputId = turn.inputId;
     const { removalReceipt, ...recoveryDescriptor } = turn.recovery ?? {};
@@ -511,7 +601,13 @@ export class BrowserLoop {
     )
       this.fail(id, 'SEND_FAILED');
   }
-  private async advance(turn: Turn, decision: Decision, requestId: string, superseded: boolean) {
+  private async advance(
+    turn: Turn,
+    decision: Decision,
+    requestId: string,
+    superseded: boolean,
+    execution: number,
+  ) {
     if (superseded) {
       this.request(turn, {
         mode: turn.mode,
@@ -548,7 +644,7 @@ export class BrowserLoop {
     turn.memory = decision.memory;
     this.io.progress?.(decision.summary);
     const assertActive = () => {
-      if (this.turn !== turn || turn.ending)
+      if (this.turn !== turn || turn.ending || turn.execution !== execution)
         throw Object.assign(new Error('Turn stopped'), { code: 'STOPPED' });
     };
     const notes: unknown[] = [];
@@ -609,7 +705,7 @@ export class BrowserLoop {
       throw error;
     }
     result.results = [...notes, ...result.results];
-    if (this.turn !== turn) return;
+    if (this.turn !== turn || turn.execution !== execution) return;
     if (
       turn.recovery &&
       result.mode === 'recovery' &&
