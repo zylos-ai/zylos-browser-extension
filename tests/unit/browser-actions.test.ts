@@ -6,6 +6,7 @@ const executor = vi.hoisted(() => ({
   execute: vi.fn(),
   currentControl: vi.fn((): null | { sessionId: string; tabId: number; tabIds: number[] } => null),
   currentGrant: vi.fn((): null | { id: number; url: string } => null),
+  abandonTarget: vi.fn(),
 }));
 vi.mock('../../utils/automation/executor', () => executor);
 const context = vi.hoisted(() => ({ readPageContext: vi.fn(), usePageContext: vi.fn() }));
@@ -293,5 +294,53 @@ describe('browser actions v2', () => {
       source: 'executor',
       level: 'warn',
     });
+  });
+});
+
+describe('default operation budget', () => {
+  it('times out a never-settling read-page at 30s without dropping the debugger target', async () => {
+    vi.useFakeTimers();
+    try {
+      context.readPageContext.mockImplementationOnce(() => new Promise(() => {}));
+      const pending = call('read-page', { contextId: '11111111-1111-4111-8111-111111111111' });
+      const settled = rejects(pending, 'OPERATION_TIMEOUT');
+      await vi.advanceTimersByTimeAsync(30_000);
+      await settled;
+      expect(executor.abandonTarget).not.toHaveBeenCalled();
+      // The shared queue is free again for the next operation.
+      context.readPageContext.mockResolvedValueOnce({ text: 'ok' });
+      await expect(
+        call('read-page', { contextId: '11111111-1111-4111-8111-111111111111' }),
+      ).resolves.toEqual({ text: 'ok' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('gives undeadlined actions a 60s execution deadline and maps its expiry to OPERATION_TIMEOUT', async () => {
+    executor.currentControl.mockReturnValue({ sessionId: 's', tabId: 7, tabIds: [7] });
+    executor.currentGrant.mockReturnValue({ id: 7, url: 'https://example.com/' });
+    const before = Date.now();
+    await call('observe');
+    const deadline = executor.execute.mock.calls[0]![1] as number;
+    expect(deadline).toBeGreaterThanOrEqual(before + 60_000);
+    expect(deadline).toBeLessThan(before + 61_000);
+    executor.execute.mockRejectedValueOnce(
+      Object.assign(new Error('Expired'), { code: 'COMMAND_EXPIRED' }),
+    );
+    await rejects(call('find', { selector: 'x' }), 'OPERATION_TIMEOUT');
+  });
+
+  it('keeps explicit deadlines and their COMMAND_EXPIRED semantics', async () => {
+    executor.currentControl.mockReturnValue({ sessionId: 's', tabId: 7, tabIds: [7] });
+    executor.currentGrant.mockReturnValue({ id: 7, url: 'https://example.com/' });
+    const deadline = Date.now() + 5_000;
+    await call('observe', {}, { deadline });
+    expect(executor.execute.mock.calls[0]![1]).toBe(deadline);
+    executor.execute.mockRejectedValueOnce(
+      Object.assign(new Error('Expired'), { code: 'COMMAND_EXPIRED' }),
+    );
+    const err = await call('find', { selector: 'x' }, { deadline }).catch((e: unknown) => e);
+    expect((err as { code: string }).code).toBe('COMMAND_EXPIRED');
   });
 });

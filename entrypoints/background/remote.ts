@@ -1541,6 +1541,18 @@ export function startRemoteBackground() {
       }
       return;
     }
+    if (m.method === 'agent-cancel') {
+      // Relay gave up waiting on an executing decision. Unknown/stale IDs are a no-op ack.
+      const parsed = z
+        .object({ id: z.string().max(128), reason: z.string().max(500).optional() })
+        .safeParse(m.params);
+      if (!parsed.success) {
+        reply({ type: 'error', code: 'BAD_PARAMS', message: 'agent-cancel requires an id' });
+        return;
+      }
+      reply({ type: 'resp', result: loop.cancelExecution(parsed.data.id, parsed.data.reason) });
+      return;
+    }
     reply({
       type: 'error',
       code: 'UNKNOWN_METHOD',

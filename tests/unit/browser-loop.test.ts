@@ -921,3 +921,77 @@ it('notes reuse the last text observation without retransmitting screenshot byte
   expect(io.execute).toHaveBeenCalledTimes(1);
   loop.cancel();
 });
+
+describe('abandoned executions', () => {
+  const hang = (io: ReturnType<typeof setup>['io']) =>
+    io.execute.mockImplementationOnce(() => new Promise<RoundResult>(() => {}));
+
+  it('agent-cancel releases the executing request and issues a fresh request', async () => {
+    const { loop, requests, io } = setup();
+    hang(io);
+    loop.accept(requests[0]!.id, action);
+    await Promise.resolve();
+    expect(loop.currentRequestId).toBe(requests[0]!.id);
+    expect(loop.cancelExecution('unknown-id')).toEqual({ cancelled: false });
+    expect(requests).toHaveLength(1);
+    expect(loop.cancelExecution(requests[0]!.id, 'caller timeout')).toEqual({ cancelled: true });
+    expect(requests).toHaveLength(2);
+    expect(loop.currentRequestId).toBe(requests[1]!.id);
+    expect(requests[1]!.execution.results).toMatchObject([
+      { status: 'error', error: { code: 'OPERATION_CANCELLED' } },
+    ]);
+    // A second cancel for the same id is stale.
+    expect(loop.cancelExecution(requests[0]!.id)).toEqual({ cancelled: false });
+    loop.cancel();
+  });
+
+  it('a late result from the abandoned round does not produce another request', async () => {
+    const { loop, requests, io } = setup();
+    let finish!: (value: RoundResult) => void;
+    io.execute.mockImplementationOnce(
+      () =>
+        new Promise<RoundResult>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    loop.accept(requests[0]!.id, action);
+    await Promise.resolve();
+    loop.cancelExecution(requests[0]!.id);
+    finish({ observation: { text: 'late' }, results: [], failed: false, mode: 'operating' });
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(requests).toHaveLength(2);
+    expect(loop.pendingId).toBe(requests[1]!.id);
+    loop.cancel();
+  });
+
+  it.each(['done', 'blocked'] as const)(
+    '%s for the executing request ends the turn instead of DECISION_CONFLICT',
+    async (kind) => {
+      const { loop, requests, io } = setup();
+      hang(io);
+      loop.accept(requests[0]!.id, action);
+      await Promise.resolve();
+      expect(loop.accept(requests[0]!.id, { kind, text: 'Gave up' })).toEqual({
+        accepted: true,
+        replayed: false,
+      });
+      await Promise.resolve();
+      expect(io.finish).toHaveBeenCalledWith('Gave up', kind, 'task-1');
+      expect(loop.taskId).toBeUndefined();
+    },
+  );
+
+  it('keeps DECISION_CONFLICT for a changed actions decision on the executing request', async () => {
+    const { loop, requests, io } = setup();
+    hang(io);
+    loop.accept(requests[0]!.id, action);
+    await Promise.resolve();
+    expect(() =>
+      loop.accept(requests[0]!.id, {
+        ...action,
+        actions: [{ method: 'open', params: { url: 'https://example.org' } }],
+      }),
+    ).toThrow('different contents');
+    loop.cancel();
+  });
+});

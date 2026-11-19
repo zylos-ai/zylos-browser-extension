@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- An Agent task no longer hangs forever when a page re-renders after a click
+  and the next `observe`/`find`/`read-page` never returns
+  (zylos-browser-remote#29). Agent actions without a caller deadline now get
+  a bounded budget (60s for observe/screenshot/snapshot/wait-for-page and other
+  actions, 30s for read-page) and a hung Chrome call ends as an
+  `OPERATION_TIMEOUT` round result, so the Agent decides the next step. A hung
+  debugger attach no longer blocks the attachment queue: it times out after
+  30s and the target is dropped so the next operation re-attaches cleanly.
+  Explicit deadlines keep `COMMAND_EXPIRED`.
+- Pairs with zylos-browser-remote PR #30: the extension handles `agent-cancel`
+  by abandoning the executing decision and sending a fresh request carrying
+  `OPERATION_CANCELLED` (unknown or stale IDs are a no-op), and accepts a
+  `done`/`blocked` decision for the still-executing request ID to end the turn
+  instead of returning `DECISION_CONFLICT`. Older Relays never send these.
+
 ## [0.17.6] - 2026-11-12
 
 No Remote protocol change required; `agent-task-start-v1` negotiation is unchanged.

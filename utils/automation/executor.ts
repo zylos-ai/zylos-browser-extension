@@ -295,10 +295,37 @@ function markTask(session: Scope, phase: Scope['phase']) {
 }
 const inspectable = (tab: chrome.tabs.Tab): tab is chrome.tabs.Tab & { id: number; url: string } =>
   typeof tab.id === 'number' && allowed(tab.url) && (!tab.pendingUrl || allowed(tab.pendingUrl));
-function serial<T>(fn: () => Promise<T>): Promise<T> {
-  const next = attachmentQueue.catch(() => {}).then(fn);
+// A Chrome debugger call that never settles must not hold the attachment queue
+// forever: the waiter times out, the target is dropped and the next operation
+// re-attaches cleanly.
+export const ATTACHMENT_TIMEOUT_MS = 30_000;
+function serial<T>(fn: () => Promise<T>, timeoutMs = ATTACHMENT_TIMEOUT_MS): Promise<T> {
+  const next = attachmentQueue
+    .catch(() => {})
+    .then(() => {
+      if (!Number.isFinite(timeoutMs)) return fn();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      return Promise.race([
+        fn(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            abandonTarget();
+            reject(
+              Object.assign(new Error('Browser debugger attachment did not respond'), {
+                code: 'OPERATION_TIMEOUT',
+              }),
+            );
+          }, timeoutMs);
+        }),
+      ]).finally(() => clearTimeout(timer));
+    });
   attachmentQueue = next.catch(() => {});
   return next;
+}
+/** Drops the debugger target after a hung operation so the next one starts clean. */
+export function abandonTarget() {
+  if (!grant) return invalidate('other');
+  void detachCurrent().catch(() => {});
 }
 
 async function groupOwnedTab(session: Scope, tabId: number) {
@@ -1352,7 +1379,9 @@ export async function recoverControl(
           blockedAttachments.add(lease.tabId);
         });
     }
-  });
+    // Recovery bounds itself by its lease deadline and must keep the queue until
+    // late completion is cleaned up.
+  }, Infinity);
   try {
     return await Promise.race([
       attempt,

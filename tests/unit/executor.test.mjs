@@ -1797,3 +1797,40 @@ test('stop during native cursor movement prevents the pending click', async () =
   assert.deepEqual(writes, ['mouseMoved']);
   assert.equal(s.executor.currentControl(), null);
 });
+
+test('a hung debugger re-attach times out, frees the attachment queue and the next operation attaches cleanly', async () => {
+  const s = await observationSetup();
+  s.executor.initializeExecutor();
+  await s.executor.execute({ op: 'finish' }, Date.now() + 10000);
+  const attach = chrome.debugger.attach;
+  // Chrome never answers the re-attach after the page re-rendered.
+  chrome.debugger.attach = () => new Promise(() => {});
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+  let error;
+  try {
+    const pending = s.executor.execute({ op: 'snapshot' }, Infinity).catch((e) => e);
+    await vi.advanceTimersByTimeAsync(s.executor.ATTACHMENT_TIMEOUT_MS + 10);
+    error = await pending;
+  } finally {
+    vi.useRealTimers();
+  }
+  assert.equal(error.code, 'OPERATION_TIMEOUT');
+  chrome.debugger.attach = attach;
+  const result = await s.executor.execute({ op: 'snapshot' }, Date.now() + 10000);
+  assert.match(result.text, /Save failed/);
+  await s.executor.release(false);
+});
+
+test('a never-settling CDP command rejects at the operation deadline', async () => {
+  const s = await observationSetup();
+  s.executor.initializeExecutor();
+  const send = chrome.debugger.sendCommand;
+  chrome.debugger.sendCommand = (target, method, params) =>
+    method === 'Page.getLayoutMetrics' ? new Promise(() => {}) : send(target, method, params);
+  const started = Date.now();
+  const error = await s.executor.execute({ op: 'wait-for-page' }, Date.now() + 300).catch((e) => e);
+  assert.equal(error.code, 'COMMAND_EXPIRED');
+  assert.ok(Date.now() - started < 5000);
+  chrome.debugger.sendCommand = send;
+  await s.executor.release(false);
+});

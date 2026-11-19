@@ -2,7 +2,13 @@
 import { actionParams, commandSchema, type Command } from './commands';
 import { recordDiagnostic } from './diagnostics';
 import { assertSiteAction, recordSiteAccess } from './site-access';
-import { createTask, currentControl, currentGrant, execute } from './automation/executor';
+import {
+  abandonTarget,
+  createTask,
+  currentControl,
+  currentGrant,
+  execute,
+} from './automation/executor';
 import { usePageContext, readPageContext } from './page-context';
 import { browserParams as paramSchemas, BROWSER_METHODS, type BrowserMethod } from './tool-catalog';
 export { BROWSER_METHODS, type BrowserMethod } from './tool-catalog';
@@ -185,8 +191,61 @@ export function dispatch(
 ): Promise<unknown> {
   return idem.run(req, (assertActive) => {
     onStart?.();
-    return dispatchNow(req, idem, assertActive, onExecute, beforeInput);
+    const timeoutMs = typeof req.deadline === 'number' ? undefined : defaultTimeout(req.method);
+    if (timeoutMs === undefined)
+      return dispatchNow(req, idem, assertActive, onExecute, beforeInput);
+    return withOperationTimeout(req.method, timeoutMs, (deadline) =>
+      dispatchNow({ ...req, deadline }, idem, assertActive, onExecute, beforeInput),
+    );
   });
+}
+
+// Agent task actions carry no caller deadline. A Chrome promise that never
+// settles (debugger, scripting, webNavigation) after a re-render must still end
+// as ordinary round evidence, so each such operation gets a bounded budget.
+// Captures may legitimately take a while on heavy pages; a text read should not.
+// Recovery and current-tab adoption keep their own lease/consent lifecycles.
+export const OPERATION_TIMEOUT_MS: Partial<Record<string, number | null>> = {
+  observe: 60_000,
+  screenshot: 60_000,
+  snapshot: 60_000,
+  'wait-for-page': 60_000,
+  'read-page': 30_000,
+  'recover-control': null,
+  'inspect-recovery-frames': null,
+  'use-current-tab': null,
+};
+const DEFAULT_OPERATION_TIMEOUT_MS = 60_000;
+function defaultTimeout(method: string) {
+  const value = Object.hasOwn(OPERATION_TIMEOUT_MS, method)
+    ? OPERATION_TIMEOUT_MS[method]
+    : DEFAULT_OPERATION_TIMEOUT_MS;
+  return value ?? undefined;
+}
+function withOperationTimeout<T>(
+  method: string,
+  timeoutMs: number,
+  work: (deadline: number) => Promise<T>,
+): Promise<T> {
+  const timeout = () =>
+    new BrowserActionError(
+      'OPERATION_TIMEOUT',
+      `${method} did not finish within ${timeoutMs / 1000}s. Its effect is uncertain; observe again before deciding. Do not blindly repeat input.`,
+      { timeoutMs },
+    );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    work(Date.now() + timeoutMs).catch((error) => {
+      throw (error as { code?: string })?.code === 'COMMAND_EXPIRED' ? timeout() : error;
+    }),
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        // A hung debugger call may be stuck on a stale target; start the next one clean.
+        if (method !== 'read-page') abandonTarget();
+        reject(timeout());
+      }, timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
 }
 async function dispatchNow(
   req: Dispatch,
@@ -211,8 +270,8 @@ async function dispatchNow(
     if (!command.success) fail('BAD_PARAMS', command.error.issues.map((i) => i.message).join('; '));
   }
 
-  // Task actions wait for a result or cancellation; only an explicitly supplied
-  // deadline (e.g. a bounded condition probe) can expire an operation.
+  // An explicit deadline keeps its COMMAND_EXPIRED semantics; dispatch() supplies
+  // a bounded default (OPERATION_TIMEOUT) when the caller gave none.
   const deadline = typeof req.deadline === 'number' ? req.deadline : Infinity;
   if (Date.now() > deadline) fail('COMMAND_EXPIRED');
 

@@ -339,6 +339,15 @@ export class BrowserLoop {
     const decision = decisionSchema.parse(value);
     const signature = JSON.stringify([decision, inputId]);
     const previous = this.receipts.get(requestId);
+    const executing = this.turn?.executingRequest === requestId ? this.turn : undefined;
+    if (previous && previous !== signature && executing && decision.kind !== 'actions') {
+      // The Agent host gave up waiting on a hung execution and ended the task.
+      // Abandon that round instead of rejecting the terminal decision.
+      executing.executingRequest = undefined;
+      this.receipts.set(requestId, signature);
+      void this.end(executing, decision.text, decision.kind);
+      return { accepted: true, replayed: false };
+    }
     if (previous) {
       if (previous !== signature)
         throw Object.assign(new Error('Decision ID already used with different contents'), {
@@ -419,7 +428,8 @@ export class BrowserLoop {
     this.receipts.set(requestId, signature);
     while (this.receipts.size > 100) this.receipts.delete(this.receipts.keys().next().value!);
     void this.advance(turn, decision, requestId, superseded).catch((error) => {
-      if (this.turn === turn) {
+      // An abandoned (cancelled) execution no longer owns the turn.
+      if (this.turn === turn && turn.executingRequest === requestId) {
         if (error instanceof ControlSuspended) this.suspendRecovery(error.recovery, error.results);
         else if (turn.recovery) this.endRecovery('failed');
         else if (error instanceof ControlLoss)
@@ -434,6 +444,35 @@ export class BrowserLoop {
       }
     });
     return { accepted: true, replayed: false };
+  }
+  /**
+   * The Agent host stopped waiting for the executing request. Abandon that round
+   * and ask for a fresh decision with the cancellation as round evidence.
+   * Unknown or stale IDs are a no-op.
+   */
+  cancelExecution(requestId: string, reason?: string) {
+    const turn = this.turn;
+    if (!turn || turn.ending || !requestId || turn.executingRequest !== requestId)
+      return { cancelled: false };
+    turn.executingRequest = undefined;
+    this.request(turn, {
+      mode: turn.mode,
+      failed: true,
+      observation: reuseObservation(turn.last),
+      results: [
+        {
+          method: 'execution',
+          status: 'error',
+          error: {
+            code: 'OPERATION_CANCELLED',
+            message: `The previous decision's browser execution did not finish and was abandoned${
+              reason ? ` (${reason.slice(0, 200)})` : ''
+            }. Its effect is uncertain; observe before acting and do not blindly repeat input.`,
+          },
+        },
+      ],
+    });
+    return { cancelled: true };
   }
   private request(turn: Turn, last?: RoundResult) {
     if (this.turn !== turn || turn.ending) return;
@@ -548,7 +587,7 @@ export class BrowserLoop {
     turn.memory = decision.memory;
     this.io.progress?.(decision.summary);
     const assertActive = () => {
-      if (this.turn !== turn || turn.ending)
+      if (this.turn !== turn || turn.ending || turn.executingRequest !== requestId)
         throw Object.assign(new Error('Turn stopped'), { code: 'STOPPED' });
     };
     const notes: unknown[] = [];
@@ -609,7 +648,7 @@ export class BrowserLoop {
       throw error;
     }
     result.results = [...notes, ...result.results];
-    if (this.turn !== turn) return;
+    if (this.turn !== turn || turn.executingRequest !== requestId) return;
     if (
       turn.recovery &&
       result.mode === 'recovery' &&

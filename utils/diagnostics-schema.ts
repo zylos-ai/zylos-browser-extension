@@ -93,6 +93,7 @@ export const diagnosticMethod = z.enum([
   'record-findings',
   'read-findings',
   'agent-decision',
+  'agent-cancel',
   'diagnostics.get',
   'other',
 ]);
