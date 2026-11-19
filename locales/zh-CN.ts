@@ -467,6 +467,8 @@ export default {
   workspaceCancel: '取消',
   workspaceOffline: '离线，无法连接',
   workspaceOnline: '在线',
+  workspaceStatusUnknown: '状态未知',
+  workspaceAgentStatusUnavailable: '暂时无法确认 Agent 状态，请稍后重试',
   workspaceAgentOffline: 'Agent 离线，无法连接',
   workspacePrepareTimeoutTitle: '准备超时',
   workspacePreparing: '正在准备…',

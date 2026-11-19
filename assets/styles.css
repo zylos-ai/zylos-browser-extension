@@ -1600,6 +1600,10 @@ html[data-theme='zylos'] > body {
   .presence-dot.is-online {
     background: var(--color-success);
   }
+  .presence-dot.is-unknown {
+    background: transparent;
+    border: 1.5px dashed var(--color-muted);
+  }
   button.agent-row.is-offline:disabled {
     opacity: 0.5;
     cursor: not-allowed;

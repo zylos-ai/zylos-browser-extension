@@ -466,10 +466,9 @@ export function ConnectView({
             <button
               key={agent.id}
               role="listitem"
-              className={`agent-row workspace-agent${agent.online === false ? ' is-offline' : ''}`}
+              className={`agent-row workspace-agent${agent.status === 'offline' ? ' is-offline' : ''}`}
               type="button"
-              disabled={busy || agent.online === false}
-              aria-disabled={agent.online === false || undefined}
+              disabled={busy || agent.status === 'offline'}
               onClick={() =>
                 setStep(
                   agent.authorized
@@ -481,16 +480,23 @@ export function ConnectView({
               <AgentAvatar name={agent.name} url={agent.avatarUrl} />
               <span className="agent-row-name">
                 <span className="agent-row-title">
-                  {typeof agent.online === 'boolean' && (
+                  {agent.status && (
                     <span
-                      className={`presence-dot${agent.online ? ' is-online' : ''}`}
+                      className={`presence-dot is-${agent.status}`}
                       role="img"
-                      aria-label={agent.online ? t('workspaceOnline') : t('workspaceOffline')}
+                      aria-label={t(
+                        agent.status === 'online'
+                          ? 'workspaceOnline'
+                          : agent.status === 'offline'
+                            ? 'workspaceOffline'
+                            : 'workspaceStatusUnknown',
+                      )}
+                      title={agent.status === 'unknown' ? t('workspaceStatusUnknown') : undefined}
                     />
                   )}
                   {agent.name}
                 </span>
-                {agent.online === false && (
+                {agent.status === 'offline' && (
                   <small className="agent-offline-hint">{t('workspaceOffline')}</small>
                 )}
               </span>

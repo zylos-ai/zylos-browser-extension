@@ -20,8 +20,11 @@ export const workspaceAgentSchema = z.object({
   avatar_url: z.string().nullish(),
   authorized: z.boolean(),
   active_connections: z.number().int().default(0),
-  /** Absent on servers older than the online-status change: treat as selectable, no status. */
-  online: z.boolean().optional(),
+  /**
+   * Presence. Absent on older servers (selectable, no status); an unrecognised
+   * value is treated like absent rather than failing the whole list.
+   */
+  online_status: z.enum(['online', 'offline', 'unknown']).optional().catch(undefined),
 });
 export type WorkspaceAgent = z.infer<typeof workspaceAgentSchema>;
 
@@ -53,6 +56,8 @@ export type ConnectionDetail = z.infer<typeof connectionDetailSchema>;
 
 /** 409 from connect/prepare when the chosen Agent is offline. */
 export const AGENT_OFFLINE_CODE = 'BROWSER_AGENT_OFFLINE';
+/** 503 from connect/prepare when the server cannot determine the Agent's presence. */
+export const AGENT_STATUS_UNAVAILABLE_CODE = 'BROWSER_AGENT_STATUS_UNAVAILABLE';
 
 export class WorkspaceApi {
   constructor(

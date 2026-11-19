@@ -6,7 +6,13 @@
 // heartbeat. The connection record holds no secret: the Key lives only in the
 // existing remote config.
 import { z } from 'zod';
-import { AGENT_OFFLINE_CODE, WorkspaceApi, WorkspaceApiError, type WorkspaceAgent } from './api';
+import {
+  AGENT_OFFLINE_CODE,
+  AGENT_STATUS_UNAVAILABLE_CODE,
+  WorkspaceApi,
+  WorkspaceApiError,
+  type WorkspaceAgent,
+} from './api';
 import { WORKSPACE_CONNECTION_KEY } from './config';
 import { WorkspaceAuthError, type AuthStatus, type KeyValueStorage } from './token-store';
 
@@ -59,7 +65,7 @@ export const workspaceViewSchema = z.object({
         avatarUrl: z.string().optional(),
         authorized: z.boolean(),
         /** Omitted when the server does not report presence (old server). */
-        online: z.boolean().optional(),
+        status: z.enum(['online', 'offline', 'unknown']).optional(),
       }),
     )
     .optional(),
@@ -170,7 +176,7 @@ export class WorkspaceConnector {
               name: a.display_name,
               ...(a.avatar_url ? { avatarUrl: a.avatar_url } : {}),
               authorized: a.authorized,
-              ...(typeof a.online === 'boolean' ? { online: a.online } : {}),
+              ...(a.online_status ? { status: a.online_status } : {}),
             })),
           }
         : {}),
@@ -229,6 +235,8 @@ export class WorkspaceConnector {
     }
     if (error instanceof WorkspaceApiError) {
       if (error.code === AGENT_OFFLINE_CODE) return 'ui.error.workspaceAgentOffline';
+      if (error.code === AGENT_STATUS_UNAVAILABLE_CODE)
+        return 'ui.error.workspaceAgentStatusUnavailable';
       if (error.status === 0 || error.status >= 500) return 'ui.error.workspaceUnreachable';
       if (error.status === 403) return 'ui.error.workspaceAgentUnavailable';
       if (error.status === 404) return 'ui.error.workspaceAgentNotFound';
@@ -306,6 +314,12 @@ export class WorkspaceConnector {
       this.error = error;
       await this.save(undefined);
       await this.loadAgents(true);
+      return;
+    }
+    // Presence could not be checked: back to the same picker (list kept), Retry offered.
+    if (error === 'ui.error.workspaceAgentStatusUnavailable') {
+      this.error = error;
+      await this.save(undefined);
       return;
     }
     await this.save({ ...this.record!, phase: 'failed', error });

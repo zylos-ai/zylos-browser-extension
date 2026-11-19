@@ -503,6 +503,8 @@ export default {
   workspaceCancel: 'Cancel',
   workspaceOffline: 'Offline — cannot connect',
   workspaceOnline: 'Online',
+  workspaceStatusUnknown: 'Status unknown',
+  workspaceAgentStatusUnavailable: "Couldn't check the Agent's status — try again shortly",
   workspaceAgentOffline: 'The Agent is offline and cannot connect.',
   workspacePrepareTimeoutTitle: 'Preparation timed out',
   workspacePreparing: 'Preparing…',

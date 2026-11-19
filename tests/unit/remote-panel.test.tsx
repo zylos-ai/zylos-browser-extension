@@ -2012,15 +2012,25 @@ test('agent picker: offline Agents are greyed out, unselectable and hinted; no s
     baseUrl: 'https://ws.example',
     auth: 'signed-in',
     agents: [
-      { id: 'ag1', name: 'max', authorized: true, online: true },
-      { id: 'ag2', name: 'peter', authorized: true, online: false },
+      { id: 'ag1', name: 'max', authorized: true, status: 'online' },
+      { id: 'ag2', name: 'peter', authorized: true, status: 'offline' },
       { id: 'ag3', name: 'old', authorized: true },
+      { id: 'ag4', name: 'unk', authorized: true, status: 'unknown' },
     ],
   };
   await mount();
   const rows = [...container.querySelectorAll<HTMLButtonElement>('.workspace-agent')];
-  expect(rows.map((row) => row.disabled)).toEqual([false, true, false]);
-  expect(rows.map((row) => row.classList.contains('is-offline'))).toEqual([false, true, false]);
+  expect(rows.map((row) => row.disabled)).toEqual([false, true, false, false]);
+  expect(rows.map((row) => row.classList.contains('is-offline'))).toEqual([
+    false,
+    true,
+    false,
+    false,
+  ]);
+  expect(rows[3]!.querySelector('.presence-dot.is-unknown')?.getAttribute('aria-label')).toBe(
+    '状态未知',
+  );
+  expect(rows[3]!.querySelector('.agent-offline-hint')).toBeNull();
   expect(rows[0]!.querySelector('.presence-dot.is-online')?.getAttribute('aria-label')).toBe(
     '在线',
   );
@@ -2038,7 +2048,7 @@ test('agent offline error shows on the picker', async () => {
   state.workspace = {
     baseUrl: 'https://ws.example',
     auth: 'signed-in',
-    agents: [{ id: 'ag1', name: 'max', authorized: true, online: false }],
+    agents: [{ id: 'ag1', name: 'max', authorized: true, status: 'offline' }],
     error: 'ui.error.workspaceAgentOffline',
   };
   await mount();
@@ -2046,6 +2056,24 @@ test('agent offline error shows on the picker', async () => {
     'Agent 离线，无法连接',
   );
   expect(container.querySelector('.workspace-agent')).not.toBeNull();
+});
+
+test('agent status unavailable: picker stays with the message and a Retry', async () => {
+  state = { ...state, configured: false, connected: false };
+  state.workspace = {
+    baseUrl: 'https://ws.example',
+    auth: 'signed-in',
+    agents: [{ id: 'ag1', name: 'max', authorized: true, status: 'unknown' }],
+    error: 'ui.error.workspaceAgentStatusUnavailable',
+  };
+  await mount();
+  expect(container.querySelector('.workspace-error')?.textContent).toBe(
+    '暂时无法确认 Agent 状态，请稍后重试重试',
+  );
+  expect(container.querySelectorAll('.workspace-agent')).toHaveLength(1);
+  send.mockClear();
+  await click('.workspace-error .link-button');
+  expect(send).toHaveBeenLastCalledWith({ type: 'workspace-agents' });
 });
 
 test('preparing offers Cancel, which sends workspace-cancel', async () => {

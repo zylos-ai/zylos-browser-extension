@@ -6,7 +6,11 @@ import {
   WorkspaceConnector,
   type ConnectorDeps,
 } from '../../utils/workspace/connector';
-import { WorkspaceApiError, type WorkspaceApi } from '../../utils/workspace/api';
+import {
+  WorkspaceApiError,
+  workspaceAgentSchema,
+  type WorkspaceApi,
+} from '../../utils/workspace/api';
 import { WorkspaceAuthError, type KeyValueStorage } from '../../utils/workspace/token-store';
 import { WORKSPACE_CONNECTION_KEY } from '../../utils/workspace/config';
 
@@ -223,7 +227,7 @@ test.each([
   expect(connector.view().error).toBe(error);
 });
 
-test('agents list carries online status; missing online (old server) stays selectable', async () => {
+test('agents list maps online_status; missing/unrecognised (old server) means no status', async () => {
   const { connector, api } = setup([]);
   api.listAgents.mockResolvedValueOnce([
     {
@@ -231,21 +235,29 @@ test('agents list carries online status; missing online (old server) stays selec
       display_name: 'Max',
       authorized: true,
       active_connections: 0,
-      online: true,
+      online_status: 'online',
     },
     {
       agent_member_id: 'ag2',
       display_name: 'Ada',
       authorized: true,
       active_connections: 0,
-      online: false,
+      online_status: 'offline',
+    },
+    {
+      agent_member_id: 'ag4',
+      display_name: 'Unk',
+      authorized: true,
+      active_connections: 0,
+      online_status: 'unknown',
     },
     { agent_member_id: 'ag3', display_name: 'Old', authorized: true, active_connections: 0 },
   ] as never);
   await connector.loadAgents();
   expect(connector.view().agents).toEqual([
-    { id: 'ag1', name: 'Max', authorized: true, online: true },
-    { id: 'ag2', name: 'Ada', authorized: true, online: false },
+    { id: 'ag1', name: 'Max', authorized: true, status: 'online' },
+    { id: 'ag2', name: 'Ada', authorized: true, status: 'offline' },
+    { id: 'ag4', name: 'Unk', authorized: true, status: 'unknown' },
     { id: 'ag3', name: 'Old', authorized: true },
   ]);
 });
@@ -364,4 +376,39 @@ test('a run ended while "applying" is saved never writes the relay settings', as
   };
   await connector.connect(input);
   expect(deps.applyRelay).not.toHaveBeenCalled();
+});
+
+test('BROWSER_AGENT_STATUS_UNAVAILABLE (503) → picker kept with the status error, no list refresh', async () => {
+  const { connector, api, deps } = setup([]);
+  await connector.loadAgents();
+  api.createConnection.mockRejectedValueOnce(
+    new WorkspaceApiError(503, 'BROWSER_AGENT_STATUS_UNAVAILABLE', 'unavailable'),
+  );
+  await connector.connect(input);
+  expect(connector.view().connection).toBeUndefined();
+  expect(connector.view().error).toBe('ui.error.workspaceAgentStatusUnavailable');
+  expect(api.listAgents).toHaveBeenCalledTimes(1);
+  expect(connector.view().agents).toHaveLength(1);
+  expect(deps.applyRelay).not.toHaveBeenCalled();
+});
+
+test('a plain 503 is still "Workspace unreachable" (failed state)', async () => {
+  const { connector, api } = setup([]);
+  api.createConnection.mockRejectedValueOnce(new WorkspaceApiError(503, 'X', 'down'));
+  await connector.connect(input);
+  expect(connector.view().connection).toMatchObject({
+    phase: 'failed',
+    error: 'ui.error.workspaceUnreachable',
+  });
+});
+
+test('agent schema: online_status parsed; unrecognised value or legacy boolean online is ignored', () => {
+  const base = { agent_member_id: 'a', display_name: 'A', authorized: true };
+  expect(workspaceAgentSchema.parse({ ...base, online_status: 'unknown' }).online_status).toBe(
+    'unknown',
+  );
+  const odd = workspaceAgentSchema.parse({ ...base, online_status: 'sleeping', online: false });
+  expect(odd.online_status).toBeUndefined();
+  expect('online' in odd).toBe(false);
+  expect(workspaceAgentSchema.parse(base).online_status).toBeUndefined();
 });
