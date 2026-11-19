@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.17.7] - 2026-11-19
+
+Requires zylos-browser-remote 0.11.2 or later for a complete fix of zylos-browser-remote#29 (upgrade both together).
+
 ### Fixed
 
 - An Agent task no longer hangs forever when a page re-renders after a click
