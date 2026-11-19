@@ -251,6 +251,7 @@ export const remoteRequestSchema = z.discriminatedUnion('type', [
     .strict(),
   z.object({ type: z.literal('workspace-reconnect') }).strict(),
   z.object({ type: z.literal('workspace-revoke') }).strict(),
+  z.object({ type: z.literal('workspace-cancel') }).strict(),
   z.object({ type: z.literal('workspace-set-url'), url: z.string().max(512) }).strict(),
   z
     .object({

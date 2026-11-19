@@ -14,6 +14,13 @@
   in the service worker's `chrome.storage.local`; Workspace sign-in failures
   never drop an established relay connection. New `identity` permission; the
   Workspace API origin comes from `WXT_WORKSPACE_URL` (development: INT).
+  The Agent picker lists only the member's own Agents with an online/offline
+  indicator; offline Agents are greyed out and cannot be selected ("Offline —
+  cannot connect"), and a `BROWSER_AGENT_OFFLINE` (409) reply returns to a
+  refreshed picker (servers without `online` keep every Agent selectable).
+  Preparing has a Cancel button (stops polling, revokes the pending connection,
+  back to the picker; a late "ready" is ignored) and is bounded at 90s, ending
+  in a "Preparation timed out" state with Retry and Back.
 - A Key change (switching Agent, Reconnect with a new Key) resets what is bound
   to `relayUrl|keyId`: custom site rules, the Agent-start grant, compatibility
   mode and diagnostics consent — same as changing the manual Key.

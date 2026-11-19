@@ -6,12 +6,18 @@
 // heartbeat. The connection record holds no secret: the Key lives only in the
 // existing remote config.
 import { z } from 'zod';
-import { WorkspaceApi, WorkspaceApiError, type WorkspaceAgent } from './api';
+import { AGENT_OFFLINE_CODE, WorkspaceApi, WorkspaceApiError, type WorkspaceAgent } from './api';
 import { WORKSPACE_CONNECTION_KEY } from './config';
 import { WorkspaceAuthError, type AuthStatus, type KeyValueStorage } from './token-store';
 
 export const POLL_INTERVAL_MS = 1500;
-export const PREPARE_TIMEOUT_MS = 180_000;
+/**
+ * Bounded wait for the Agent to prepare. An online Agent mints the relay Key in
+ * seconds; offline Agents are rejected up front (409 BROWSER_AGENT_OFFLINE), so
+ * 90s only has to absorb a slow/busy Agent turn (60 polls at 1.5s) — longer just
+ * leaves the owner staring at a spinner.
+ */
+export const PREPARE_TIMEOUT_MS = 90_000;
 export const HEARTBEAT_INTERVAL_MS = 120_000;
 
 export const workspacePhaseSchema = z.enum([
@@ -52,6 +58,8 @@ export const workspaceViewSchema = z.object({
         name: z.string(),
         avatarUrl: z.string().optional(),
         authorized: z.boolean(),
+        /** Omitted when the server does not report presence (old server). */
+        online: z.boolean().optional(),
       }),
     )
     .optional(),
@@ -94,6 +102,8 @@ export class WorkspaceConnector {
   private run = 0;
   private lastHeartbeat = 0;
   private reported = '';
+  /** Wakes the current poll sleep early (cancel) and clears its timer. */
+  private wake: (() => void) | undefined;
 
   constructor(private readonly deps: ConnectorDeps) {}
 
@@ -101,7 +111,30 @@ export class WorkspaceConnector {
     return this.deps.now?.() ?? Date.now();
   }
   private sleep(ms: number) {
-    return this.deps.sleep ? this.deps.sleep(ms) : new Promise<void>((r) => setTimeout(r, ms));
+    if (this.deps.sleep) return this.deps.sleep(ms);
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        this.wake = undefined;
+        resolve();
+      }, ms);
+      this.wake = () => {
+        clearTimeout(timer);
+        this.wake = undefined;
+        resolve();
+      };
+    });
+  }
+
+  /** Invalidate any in-flight connect/poll and stop its pending timer. */
+  private stopRun() {
+    this.run++;
+    this.wake?.();
+  }
+
+  /** Best-effort server-side abandon of a pending connection. */
+  private async abandon(connectionId: string | undefined) {
+    if (!connectionId) return;
+    await this.deps.api.revoke(connectionId).catch(() => {});
   }
 
   async init(): Promise<void> {
@@ -111,8 +144,10 @@ export class WorkspaceConnector {
     );
     this.record = parsed.success ? parsed.data : undefined;
     // A worker restart during preparation resumes polling the same connection.
-    if (this.record?.phase === 'preparing' && this.record.connectionId)
-      void this.poll(++this.run, this.record.connectionId);
+    if (this.record?.phase === 'preparing' && this.record.connectionId) {
+      this.stopRun();
+      void this.poll(this.run, this.record.connectionId);
+    }
     if (this.record?.phase === 'applying')
       await this.save({
         ...this.record,
@@ -135,6 +170,7 @@ export class WorkspaceConnector {
               name: a.display_name,
               ...(a.avatar_url ? { avatarUrl: a.avatar_url } : {}),
               authorized: a.authorized,
+              ...(typeof a.online === 'boolean' ? { online: a.online } : {}),
             })),
           }
         : {}),
@@ -192,6 +228,7 @@ export class WorkspaceConnector {
       return 'ui.error.workspaceUnreachable';
     }
     if (error instanceof WorkspaceApiError) {
+      if (error.code === AGENT_OFFLINE_CODE) return 'ui.error.workspaceAgentOffline';
       if (error.status === 0 || error.status >= 500) return 'ui.error.workspaceUnreachable';
       if (error.status === 403) return 'ui.error.workspaceAgentUnavailable';
       if (error.status === 404) return 'ui.error.workspaceAgentNotFound';
@@ -202,9 +239,9 @@ export class WorkspaceConnector {
     return 'ui.error.workspaceRequestFailed';
   }
 
-  async loadAgents(): Promise<void> {
+  async loadAgents(keepError = false): Promise<void> {
     this.busy = 'agents';
-    this.error = undefined;
+    if (!keepError) this.error = undefined;
     this.deps.publish();
     try {
       this.agents = await this.deps.api.listAgents();
@@ -233,7 +270,8 @@ export class WorkspaceConnector {
     browserName: string;
     confirm: boolean;
   }): Promise<void> {
-    const run = ++this.run;
+    this.stopRun();
+    const run = this.run;
     this.error = undefined;
     const browserName = input.browserName.trim().slice(0, 100);
     if (!browserName) throw new Error('ui.error.workspaceBrowserNameRequired');
@@ -251,13 +289,40 @@ export class WorkspaceConnector {
         browserName,
         confirm: input.confirm,
       });
-      if (run !== this.run) return;
+      // Cancelled while the create was in flight: abandon the orphan server-side.
+      if (run !== this.run) return void (await this.abandon(connection.connection_id));
       await this.save({ ...this.record!, connectionId: connection.connection_id });
       await this.poll(run, connection.connection_id);
     } catch (e) {
       if (run !== this.run) return;
-      await this.save({ ...this.record!, phase: 'failed', error: await this.fail(e) });
+      await this.failed(e);
     }
+  }
+
+  /** Failure while connecting; an offline Agent goes back to a refreshed picker. */
+  private async failed(e: unknown) {
+    const error = await this.fail(e);
+    if (error === 'ui.error.workspaceAgentOffline') {
+      this.error = error;
+      await this.save(undefined);
+      await this.loadAgents(true);
+      return;
+    }
+    await this.save({ ...this.record!, phase: 'failed', error });
+  }
+
+  /**
+   * Cancel while preparing: stop polling, abandon the pending connection
+   * server-side (revoke) and return to the picker. A late "ready" from the
+   * cancelled attempt is dropped by the run check, so it never writes the relay.
+   */
+  async cancel(): Promise<void> {
+    const r = this.record;
+    if (!r || (r.phase !== 'preparing' && r.phase !== 'idle')) return;
+    this.stopRun();
+    this.error = undefined;
+    await this.save(undefined);
+    await this.abandon(r.connectionId);
   }
 
   /** Reconnect the same Agent after its Key was rejected: no re-confirm. */
@@ -282,6 +347,8 @@ export class WorkspaceConnector {
         const state = detail.connection.state;
         if ((state === 'ready' || state === 'connected') && detail.relay_url && detail.key) {
           await this.save({ ...this.record!, phase: 'applying' });
+          // Cancelled during the save: a late "ready" must not write relay settings.
+          if (run !== this.run) return;
           const localKeyId = await this.deps.applyRelay(detail.relay_url, detail.key);
           if (run !== this.run) return;
           this.reported = '';
@@ -304,6 +371,7 @@ export class WorkspaceConnector {
           return;
         }
         if (this.now() - started > PREPARE_TIMEOUT_MS) {
+          void this.abandon(connectionId);
           await this.save({
             ...this.record!,
             phase: 'failed',
@@ -315,7 +383,7 @@ export class WorkspaceConnector {
       }
     } catch (e) {
       if (run !== this.run) return;
-      await this.save({ ...this.record!, phase: 'failed', error: await this.fail(e) });
+      await this.failed(e);
     }
   }
 
@@ -353,7 +421,7 @@ export class WorkspaceConnector {
   /** Relay closed 4004 (Key revoked/expired) or 4003 (Key bound to another browser). */
   async onKeyRejected(code: 4003 | 4004): Promise<void> {
     if (!this.ownsRelay()) return;
-    this.run++;
+    this.stopRun();
     await this.deps.clearRelay();
     await this.save({
       ...this.record!,
@@ -368,7 +436,7 @@ export class WorkspaceConnector {
   async revoke(): Promise<void> {
     const r = this.record;
     if (!r) return;
-    this.run++;
+    this.stopRun();
     if (r.connectionId) {
       try {
         await this.deps.api.revoke(r.connectionId);
@@ -386,13 +454,13 @@ export class WorkspaceConnector {
 
   /** The owner switched to manual URL + Key: forget the Workspace session locally. */
   async forgetLocal(): Promise<void> {
-    this.run++;
+    this.stopRun();
     await this.save(undefined);
   }
 
   /** Explicit sign-out ends the active Workspace session (authorization stays server-side). */
   async signedOut(): Promise<void> {
-    this.run++;
+    this.stopRun();
     if (this.ownsRelay()) await this.deps.clearRelay();
     this.agents = undefined;
     this.auth = 'signed-out';

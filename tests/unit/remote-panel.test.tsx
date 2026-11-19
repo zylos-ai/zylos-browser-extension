@@ -2006,6 +2006,87 @@ test('preparing shows the chosen Agent with a spinner, then returns to chat once
   expect(container.querySelector('.chat-panel')).not.toBeNull();
 });
 
+test('agent picker: offline Agents are greyed out, unselectable and hinted; no status from old servers', async () => {
+  state = { ...state, configured: false, connected: false };
+  state.workspace = {
+    baseUrl: 'https://ws.example',
+    auth: 'signed-in',
+    agents: [
+      { id: 'ag1', name: 'max', authorized: true, online: true },
+      { id: 'ag2', name: 'peter', authorized: true, online: false },
+      { id: 'ag3', name: 'old', authorized: true },
+    ],
+  };
+  await mount();
+  const rows = [...container.querySelectorAll<HTMLButtonElement>('.workspace-agent')];
+  expect(rows.map((row) => row.disabled)).toEqual([false, true, false]);
+  expect(rows.map((row) => row.classList.contains('is-offline'))).toEqual([false, true, false]);
+  expect(rows[0]!.querySelector('.presence-dot.is-online')?.getAttribute('aria-label')).toBe(
+    '在线',
+  );
+  expect(rows[1]!.querySelector('.agent-offline-hint')?.textContent).toBe('离线，无法连接');
+  expect(rows[2]!.querySelector('.presence-dot')).toBeNull();
+  expect(rows[2]!.querySelector('.agent-offline-hint')).toBeNull();
+  await act(async () => rows[1]!.click());
+  expect(container.querySelector('#workspace-browser-name')).toBeNull();
+  await act(async () => rows[2]!.click());
+  expect(container.querySelector('#workspace-browser-name')).not.toBeNull();
+});
+
+test('agent offline error shows on the picker', async () => {
+  state = { ...state, configured: false, connected: false };
+  state.workspace = {
+    baseUrl: 'https://ws.example',
+    auth: 'signed-in',
+    agents: [{ id: 'ag1', name: 'max', authorized: true, online: false }],
+    error: 'ui.error.workspaceAgentOffline',
+  };
+  await mount();
+  expect(container.querySelector('.workspace-error')?.textContent).toContain(
+    'Agent 离线，无法连接',
+  );
+  expect(container.querySelector('.workspace-agent')).not.toBeNull();
+});
+
+test('preparing offers Cancel, which sends workspace-cancel', async () => {
+  state = { ...state, configured: false, connected: false };
+  state.workspace = {
+    ...workspaceConnected(),
+    connection: { ...workspaceConnected().connection!, phase: 'preparing' },
+  };
+  await mount();
+  const cancel = container.querySelector<HTMLButtonElement>('#connect .workspace-cancel');
+  expect(cancel?.textContent).toBe('取消');
+  send.mockClear();
+  await act(async () => cancel!.click());
+  expect(send).toHaveBeenLastCalledWith({ type: 'workspace-cancel' });
+});
+
+test('prepare timeout: failure with Retry and Back (to the picker)', async () => {
+  state = { ...state, configured: false, connected: false };
+  state.workspace = {
+    ...workspaceConnected(),
+    connection: {
+      ...workspaceConnected().connection!,
+      phase: 'failed',
+      error: 'ui.error.workspacePrepareTimeout',
+    },
+  };
+  await mount();
+  const banner = container.querySelector('.workspace-banner')!;
+  expect(banner.textContent).toContain('准备超时');
+  const buttons = [...banner.querySelectorAll('button')];
+  expect(buttons.map((b) => b.textContent)).toEqual(['重试', '返回']);
+  send.mockClear();
+  await act(async () => buttons[0]!.click());
+  expect(send).toHaveBeenLastCalledWith({ type: 'workspace-reconnect' });
+  await act(async () => buttons[1]!.click());
+  // The failed Agent stays retryable from the picker.
+  expect(
+    [...container.querySelectorAll('.workspace-agent .agent-row-name')].map((el) => el.textContent),
+  ).toEqual(['Max', 'Ada']);
+});
+
 test('connected: compact header chip opens a menu with switch, sign-out and a confirmed revoke', async () => {
   state.workspace = workspaceConnected();
   await mount();

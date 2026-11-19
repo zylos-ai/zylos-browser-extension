@@ -61,6 +61,8 @@ export function WorkspaceFailedBanner({
   const connection = ws?.connection;
   if (!ws || !connection || !isFailed(connection)) return null;
   const signedIn = ws.auth === 'signed-in';
+  // Bounded-wait timeout reads as Retry / Back (to the picker).
+  const timedOut = connection.error === 'ui.error.workspacePrepareTimeout';
   const reason = connection.error
     ? errorText(connection.error)
     : connection.phase === 'key-rejected'
@@ -70,7 +72,8 @@ export function WorkspaceFailedBanner({
     <div className="workspace-banner" role="alert">
       <div className="workspace-banner-copy">
         <strong>
-          {t('workspacePhaseFailed')} · {connection.agentName}
+          {timedOut ? t('workspacePrepareTimeoutTitle') : t('workspacePhaseFailed')} ·{' '}
+          {connection.agentName}
         </strong>
         <span>{signedIn ? reason : t('workspaceReconnectNeedsLogin')}</span>
       </div>
@@ -83,7 +86,7 @@ export function WorkspaceFailedBanner({
               disabled={busy}
               onClick={() => onRequest({ type: 'workspace-reconnect' })}
             >
-              {t('workspaceReconnect')}
+              {timedOut ? t('workspaceRetry') : t('workspaceReconnect')}
             </button>
             <button
               className="btn btn-ghost btn-sm"
@@ -91,7 +94,7 @@ export function WorkspaceFailedBanner({
               disabled={busy}
               onClick={onSwitch}
             >
-              {t('workspaceSwitchAgent')}
+              {timedOut ? t('back') : t('workspaceSwitchAgent')}
             </button>
           </>
         ) : (
@@ -335,6 +338,16 @@ export function ConnectView({
           </span>
           <span className="loading loading-spinner loading-sm" aria-hidden="true" />
         </div>
+        {connection.phase !== 'applying' && (
+          <button
+            className="btn btn-ghost connect-secondary workspace-cancel"
+            type="button"
+            disabled={pending}
+            onClick={() => onRequest({ type: 'workspace-cancel' })}
+          >
+            {t('workspaceCancel')}
+          </button>
+        )}
         {errorLine(ws.error)}
       </div>
     );
@@ -418,7 +431,10 @@ export function ConnectView({
       </form>
     );
   } else if (showPicker) {
-    const agents = ws.agents?.filter((agent) => agent.id !== connection?.agentMemberId);
+    // Hide the current Agent only when it is actually connected (a failed one can be retried).
+    const agents = ws.agents?.filter(
+      (agent) => !(connection?.phase === 'connected' && agent.id === connection.agentMemberId),
+    );
     const loading = ws.busy === 'agents' && !agents;
     body = (
       <div className="connect-stage">
@@ -446,9 +462,10 @@ export function ConnectView({
             <button
               key={agent.id}
               role="listitem"
-              className="agent-row workspace-agent"
+              className={`agent-row workspace-agent${agent.online === false ? ' is-offline' : ''}`}
               type="button"
-              disabled={busy}
+              disabled={busy || agent.online === false}
+              aria-disabled={agent.online === false || undefined}
               onClick={() =>
                 setStep(
                   agent.authorized
@@ -458,7 +475,21 @@ export function ConnectView({
               }
             >
               <AgentAvatar name={agent.name} url={agent.avatarUrl} />
-              <span className="agent-row-name">{agent.name}</span>
+              <span className="agent-row-name">
+                <span className="agent-row-title">
+                  {typeof agent.online === 'boolean' && (
+                    <span
+                      className={`presence-dot${agent.online ? ' is-online' : ''}`}
+                      role="img"
+                      aria-label={agent.online ? t('workspaceOnline') : t('workspaceOffline')}
+                    />
+                  )}
+                  {agent.name}
+                </span>
+                {agent.online === false && (
+                  <small className="agent-offline-hint">{t('workspaceOffline')}</small>
+                )}
+              </span>
               <span className={`agent-chip${agent.authorized ? ' is-authorized' : ''}`}>
                 {agent.authorized ? t('workspaceAuthorized') : t('workspaceNeedsConfirm')}
               </span>

@@ -1916,6 +1916,9 @@ export function startRemoteBackground() {
         case 'workspace-revoke':
           await workspace.revoke();
           return snapshot();
+        case 'workspace-cancel':
+          await workspace.cancel();
+          return snapshot();
         case 'workspace-set-url': {
           // Only a build-configured environment can be selected.
           const next = normalizeWorkspaceUrl(m.url);

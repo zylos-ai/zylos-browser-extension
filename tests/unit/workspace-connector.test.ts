@@ -1,6 +1,11 @@
 // @vitest-environment node
 import { expect, test, vi } from 'vitest';
-import { WorkspaceConnector, type ConnectorDeps } from '../../utils/workspace/connector';
+import {
+  POLL_INTERVAL_MS,
+  PREPARE_TIMEOUT_MS,
+  WorkspaceConnector,
+  type ConnectorDeps,
+} from '../../utils/workspace/connector';
 import { WorkspaceApiError, type WorkspaceApi } from '../../utils/workspace/api';
 import { WorkspaceAuthError, type KeyValueStorage } from '../../utils/workspace/token-store';
 import { WORKSPACE_CONNECTION_KEY } from '../../utils/workspace/config';
@@ -216,4 +221,147 @@ test.each([
   api.listAgents.mockRejectedValueOnce(new WorkspaceApiError(status, 'X', 'x'));
   await connector.loadAgents();
   expect(connector.view().error).toBe(error);
+});
+
+test('agents list carries online status; missing online (old server) stays selectable', async () => {
+  const { connector, api } = setup([]);
+  api.listAgents.mockResolvedValueOnce([
+    {
+      agent_member_id: 'ag1',
+      display_name: 'Max',
+      authorized: true,
+      active_connections: 0,
+      online: true,
+    },
+    {
+      agent_member_id: 'ag2',
+      display_name: 'Ada',
+      authorized: true,
+      active_connections: 0,
+      online: false,
+    },
+    { agent_member_id: 'ag3', display_name: 'Old', authorized: true, active_connections: 0 },
+  ] as never);
+  await connector.loadAgents();
+  expect(connector.view().agents).toEqual([
+    { id: 'ag1', name: 'Max', authorized: true, online: true },
+    { id: 'ag2', name: 'Ada', authorized: true, online: false },
+    { id: 'ag3', name: 'Old', authorized: true },
+  ]);
+});
+
+test('BROWSER_AGENT_OFFLINE on connect → back to a refreshed picker with the offline error', async () => {
+  const { connector, api, deps } = setup([]);
+  api.createConnection.mockRejectedValueOnce(
+    new WorkspaceApiError(409, 'BROWSER_AGENT_OFFLINE', 'offline'),
+  );
+  await connector.connect(input);
+  expect(connector.view().connection).toBeUndefined();
+  expect(connector.view().error).toBe('ui.error.workspaceAgentOffline');
+  expect(api.listAgents).toHaveBeenCalledTimes(1);
+  expect(connector.view().agents).toHaveLength(1);
+  expect(deps.applyRelay).not.toHaveBeenCalled();
+});
+
+test('BROWSER_AGENT_OFFLINE while polling also returns to the picker', async () => {
+  const { connector, api } = setup([]);
+  api.getConnection.mockRejectedValueOnce(
+    new WorkspaceApiError(409, 'BROWSER_AGENT_OFFLINE', 'offline'),
+  );
+  await connector.connect(input);
+  expect(connector.view().connection).toBeUndefined();
+  expect(connector.view().error).toBe('ui.error.workspaceAgentOffline');
+});
+
+test('cancel while preparing revokes the pending connection, stops polling, ignores a late ready', async () => {
+  const { connector, api, deps, relay, storage } = setup([]);
+  let release!: (v: unknown) => void;
+  api.getConnection.mockImplementationOnce(() => new Promise((r) => (release = r)) as never);
+  const connecting = connector.connect(input);
+  await vi.waitFor(() => expect(api.getConnection).toHaveBeenCalledTimes(1));
+  await connector.cancel();
+  expect(api.revoke).toHaveBeenCalledWith('c1');
+  expect(connector.view().connection).toBeUndefined();
+  expect(storage.data.has(WORKSPACE_CONNECTION_KEY)).toBe(false);
+  // The cancelled attempt's poll now sees "ready": it must not write the relay.
+  release({ ...ready, relay_url: 'wss://late', key: 'late' });
+  await connecting;
+  expect(deps.applyRelay).not.toHaveBeenCalled();
+  expect(relay.key).toBe('');
+  expect(api.getConnection).toHaveBeenCalledTimes(1);
+  expect(connector.view().connection).toBeUndefined();
+});
+
+test('cancel while the create is in flight abandons the created connection', async () => {
+  const { connector, api, deps } = setup([]);
+  let release!: (v: unknown) => void;
+  api.createConnection.mockImplementationOnce(() => new Promise((r) => (release = r)) as never);
+  const connecting = connector.connect(input);
+  await vi.waitFor(() => expect(api.createConnection).toHaveBeenCalled());
+  await connector.cancel();
+  expect(api.revoke).not.toHaveBeenCalled();
+  release(conn('preparing').connection);
+  await connecting;
+  expect(api.revoke).toHaveBeenCalledWith('c1');
+  expect(api.getConnection).not.toHaveBeenCalled();
+  expect(deps.applyRelay).not.toHaveBeenCalled();
+});
+
+test('cancel clears the pending poll timer (real sleep)', async () => {
+  vi.useFakeTimers();
+  try {
+    const { connector, api, deps } = setup([]);
+    deps.sleep = undefined;
+    const connecting = connector.connect(input);
+    await vi.waitFor(() => expect(api.getConnection).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1));
+    await connector.cancel();
+    expect(vi.getTimerCount()).toBe(0);
+    await connecting;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(api.getConnection).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('cancel is a no-op once connected', async () => {
+  const { connector, api } = setup([{ ...ready, relay_url: 'wss://r', key: 'k1' }]);
+  await connector.connect(input);
+  await connector.cancel();
+  expect(api.revoke).not.toHaveBeenCalled();
+  expect(connector.view().connection?.phase).toBe('connected');
+});
+
+test('preparing is bounded at 90s: then failed (timeout) and the connection is abandoned', async () => {
+  expect(PREPARE_TIMEOUT_MS).toBe(90_000);
+  let t = 0;
+  const { connector, api, deps } = setup([]);
+  deps.now = () => t;
+  deps.sleep = async (ms) => {
+    t += ms;
+    // Still preparing just before the bound.
+    if (t <= PREPARE_TIMEOUT_MS) expect(connector.view().connection?.phase).toBe('preparing');
+  };
+  await connector.connect(input);
+  expect(connector.view().connection).toMatchObject({
+    phase: 'failed',
+    error: 'ui.error.workspacePrepareTimeout',
+  });
+  expect(t).toBeGreaterThan(PREPARE_TIMEOUT_MS - POLL_INTERVAL_MS);
+  expect(t).toBeLessThanOrEqual(PREPARE_TIMEOUT_MS + POLL_INTERVAL_MS);
+  await vi.waitFor(() => expect(api.revoke).toHaveBeenCalledWith('c1'));
+  expect(deps.applyRelay).not.toHaveBeenCalled();
+});
+
+test('a run ended while "applying" is saved never writes the relay settings', async () => {
+  const storage = memoryStorage();
+  const { connector, deps } = setup([{ ...ready, relay_url: 'wss://late', key: 'late' }], storage);
+  const set = storage.storage.set;
+  storage.storage.set = async (k, v) => {
+    if ((v as { phase?: string })?.phase === 'applying') await connector.forgetLocal();
+    return set(k, v);
+  };
+  await connector.connect(input);
+  expect(deps.applyRelay).not.toHaveBeenCalled();
 });
