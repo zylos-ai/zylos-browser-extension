@@ -488,6 +488,7 @@ export default {
   workspaceLoginExpiredError: 'Workspace sign-in expired. Log in again.',
   workspaceNoConnection: 'No Workspace connection to reconnect',
   workspaceSigningIn: 'Signing in…',
+  workspaceNoOwnedAgents: 'No Agents to connect: only Agents you own are shown.',
   workspaceNoOtherAgents: 'No other Agents to switch to.',
   workspaceRetry: 'Retry',
   workspaceReconnectNeedsLogin: 'Log in again to reconnect.',

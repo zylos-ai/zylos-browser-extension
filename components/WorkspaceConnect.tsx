@@ -258,6 +258,7 @@ export function ConnectView({
   saving,
   switching,
   onSwitch,
+  onBack,
   onRequest,
   onSave,
 }: {
@@ -266,6 +267,8 @@ export function ConnectView({
   saving: boolean;
   switching: boolean;
   onSwitch: () => void;
+  /** Leave the Switch Agent picker for the previous status view. */
+  onBack?: () => void;
   onRequest: (request: RemoteRequest) => void;
   onSave: (relayUrl: string, key: string) => Promise<boolean>;
 }) {
@@ -281,8 +284,9 @@ export function ConnectView({
     signedIn && !settling && (!connection || switching) && !(isFailed(connection) && !switching);
 
   useEffect(() => {
-    if (showPicker && !ws?.agents && !ws?.busy) onRequest({ type: 'workspace-agents' });
-    // Load once per entry into the picker.
+    // (Re)load on every entry into the picker so it never shows a stale list; an
+    // error already on screen (e.g. Agent offline) keeps its own Retry instead.
+    if (showPicker && !ws?.busy && !ws?.error) onRequest({ type: 'workspace-agents' });
   }, [showPicker]);
   useEffect(() => {
     if (connection?.phase === 'preparing') setStep({ kind: 'list' });
@@ -497,21 +501,30 @@ export function ConnectView({
           ))}
           {agents?.length === 0 && (
             <p className="connect-note">
-              {connection ? t('workspaceNoOtherAgents') : t('workspaceNoAgents')}
+              {connection?.phase === 'connected'
+                ? t('workspaceNoOtherAgents')
+                : t('workspaceNoOwnedAgents')}
             </p>
           )}
         </div>
         {errorLine(ws.error, ws.busy ? undefined : () => onRequest({ type: 'workspace-agents' }))}
-        {!connection && (
+        {connection && onBack && (
           <button
-            className="link-button connect-signout"
+            className="btn btn-ghost connect-secondary workspace-back"
             type="button"
-            disabled={busy}
-            onClick={() => onRequest({ type: 'workspace-sign-out' })}
+            onClick={onBack}
           >
-            {t('workspaceLogout')}
+            {t('back')}
           </button>
         )}
+        <button
+          className="link-button connect-signout"
+          type="button"
+          disabled={busy}
+          onClick={() => onRequest({ type: 'workspace-sign-out' })}
+        >
+          {t('workspaceLogout')}
+        </button>
       </div>
     );
   } else if (connection) {

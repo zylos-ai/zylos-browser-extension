@@ -334,6 +334,11 @@ export function RemotePanel() {
           saving={pending === 'remote-save'}
           switching={switching}
           onSwitch={openSwitch}
+          onBack={() => {
+            setSwitching(false);
+            setScreen(state.configured ? 'chat' : 'connect');
+            setError('');
+          }}
           onRequest={workspaceAction}
           onSave={async (relayUrl, key) => {
             const ok = await action({ type: 'remote-save', relayUrl, key });

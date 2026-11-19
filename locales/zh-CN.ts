@@ -453,6 +453,7 @@ export default {
   workspaceLoginExpiredError: 'Workspace 登录已过期，请重新登录。',
   workspaceNoConnection: '没有可重新连接的 Workspace 连接',
   workspaceSigningIn: '正在登录…',
+  workspaceNoOwnedAgents: '没有可连接的 Agent：只显示你是 owner 的 Agent。',
   workspaceNoOtherAgents: '没有其他可切换的 Agent。',
   workspaceRetry: '重试',
   workspaceReconnectNeedsLogin: '重新登录后才能重新连接。',

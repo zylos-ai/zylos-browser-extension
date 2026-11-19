@@ -21,6 +21,8 @@
   Preparing has a Cancel button (stops polling, revokes the pending connection,
   back to the picker; a late "ready" is ignored) and is bounded at 90s, ending
   in a "Preparation timed out" state with Retry and Back.
+  The Switch Agent page reloads the list on open, always has Back and Log
+  out, and an empty list explains that only Agents you own are shown.
 - A Key change (switching Agent, Reconnect with a new Key) resets what is bound
   to `relayUrl|keyId`: custom site rules, the Agent-start grant, compatibility
   mode and diagnostics consent — same as changing the manual Key.

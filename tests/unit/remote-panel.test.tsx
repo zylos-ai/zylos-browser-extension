@@ -2087,6 +2087,53 @@ test('prepare timeout: failure with Retry and Back (to the picker)', async () =>
   ).toEqual(['Max', 'Ada']);
 });
 
+test('failed → Switch Agent: refreshed list keeps the failed Agent, Back returns, Log out offered', async () => {
+  state = { ...state, configured: false, connected: false };
+  const failed = (agents: { id: string; name: string; authorized: boolean }[]) => ({
+    baseUrl: 'https://ws.example',
+    auth: 'signed-in' as const,
+    agents,
+    connection: {
+      agentMemberId: 'p1',
+      agentName: 'peter001',
+      browserName: 'Chrome',
+      phase: 'failed' as const,
+      error: 'ui.error.workspaceRevoked',
+    },
+  });
+  state.workspace = failed([{ id: 'p1', name: 'peter001', authorized: true }]);
+  await mount();
+  send.mockClear();
+  const switchButton = [
+    ...container.querySelectorAll<HTMLButtonElement>('.workspace-banner button'),
+  ].find((b) => b.textContent === '切换 Agent')!;
+  await act(async () => switchButton.click());
+  expect(container.querySelector('#connect h1')?.textContent).toBe('切换 Agent');
+  // Opening the page refreshes the list even though one is cached.
+  expect(send).toHaveBeenCalledWith({ type: 'workspace-agents' });
+  expect(
+    [...container.querySelectorAll('.workspace-agent .agent-row-name')].map((el) => el.textContent),
+  ).toEqual(['peter001']);
+  expect(container.querySelector('#connect .connect-signout')?.textContent).toBe('退出登录');
+  await click('#connect .workspace-back');
+  expect(container.querySelector('#connect h1')).toBeNull();
+  expect(container.querySelector('.workspace-banner')?.textContent).toContain('peter001');
+  // Truly empty: explains why, still offers Back and Log out.
+  state = { ...state, workspace: failed([]) };
+  await act(async () => listener({ type: 'remote-updated', state }));
+  const again = [...container.querySelectorAll<HTMLButtonElement>('.workspace-banner button')].find(
+    (b) => b.textContent === '切换 Agent',
+  )!;
+  await act(async () => again.click());
+  expect(container.querySelector('#connect .connect-note')?.textContent).toBe(
+    '没有可连接的 Agent：只显示你是 owner 的 Agent。',
+  );
+  expect(container.querySelector('#connect .workspace-back')?.textContent).toBe('返回');
+  send.mockClear();
+  await click('#connect .connect-signout');
+  expect(send).toHaveBeenLastCalledWith({ type: 'workspace-sign-out' });
+});
+
 test('connected: compact header chip opens a menu with switch, sign-out and a confirmed revoke', async () => {
   state.workspace = workspaceConnected();
   await mount();
