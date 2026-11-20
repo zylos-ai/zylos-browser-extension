@@ -449,7 +449,8 @@ export default {
   workspaceAgentUnavailable: '你没有权限使用这个 Agent，请联系组织管理员。',
   workspaceBrowserNameRequired: '请为这个浏览器填写名称',
   workspacePrepareFailed: 'Agent 未能准备好连接，请重试。',
-  workspacePrepareTimeout: 'Agent 准备超时，请重试。',
+  workspacePrepareTimeout:
+    'Agent 没有响应连接请求。可能是 Agent 的 openmax 插件版本过旧，请让 Agent 升级 openmax 后重试。',
   workspaceRevoked: '该连接已被撤销',
   workspaceKeyRevoked: '连接 Key 已被撤销或过期，重新连接以获取新的 Key。',
   workspaceKeyElsewhere: '连接 Key 已被其他浏览器使用，重新连接为这个浏览器获取 Key。',

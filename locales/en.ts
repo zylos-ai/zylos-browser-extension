@@ -483,7 +483,8 @@ export default {
     'You do not have permission to use this Agent. Contact your organization admin.',
   workspaceBrowserNameRequired: 'Enter a name for this browser',
   workspacePrepareFailed: 'The Agent could not prepare the connection. Try again.',
-  workspacePrepareTimeout: 'The Agent took too long to prepare. Try again.',
+  workspacePrepareTimeout:
+    'The Agent did not respond to the connection request. Its openmax plugin may be out of date; ask the Agent to upgrade openmax, then try again.',
   workspaceRevoked: 'This connection was revoked',
   workspaceKeyRevoked: 'The connection key was revoked or expired. Reconnect to get a new one.',
   workspaceKeyElsewhere:
