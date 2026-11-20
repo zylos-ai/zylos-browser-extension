@@ -2171,7 +2171,16 @@ test('connected: compact header chip opens a menu with switch, sign-out and a co
   expect(container.querySelector('.chat-panel')).not.toBeNull();
   await act(async () => chip().click());
   const items = [...container.querySelectorAll('.connection-menu [role="menuitem"]')];
-  expect(items.map((el) => el.textContent)).toEqual(['切换 Agent', '退出登录', '断开并撤销授权']);
+  expect(items.map((el) => el.textContent)).toEqual([
+    '切换 Agent',
+    '退出登录',
+    '断开连接',
+    '断开并撤销授权',
+  ]);
+  send.mockClear();
+  await click('.connection-menu .workspace-disconnect');
+  expect(send).toHaveBeenLastCalledWith({ type: 'remote-set-enabled', enabled: false });
+  await act(async () => chip().click());
   const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
   send.mockClear();
   await click('.connection-menu .workspace-revoke');

@@ -460,6 +460,7 @@ export default {
   workspaceSwitchAgent: 'Switch Agent',
   workspaceSwitchHint: 'Switching ends the current session. The previous Agent stays authorized.',
   workspaceReconnect: 'Reconnect',
+  workspaceDisconnect: 'Disconnect',
   workspaceRevoke: 'Disconnect and revoke',
   workspaceRevokeConfirm:
     'Disconnect from {agent} and revoke its access to this browser? Reconnecting later will ask you to confirm again.',

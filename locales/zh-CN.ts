@@ -427,6 +427,7 @@ export default {
   workspaceSwitchAgent: '切换 Agent',
   workspaceSwitchHint: '切换会结束当前会话，之前的 Agent 仍保持授权。',
   workspaceReconnect: '重新连接',
+  workspaceDisconnect: '断开连接',
   workspaceRevoke: '断开并撤销授权',
   workspaceRevokeConfirm:
     '断开与 {agent} 的连接，并撤销它对这个浏览器的授权？之后重新连接需要再次确认。',

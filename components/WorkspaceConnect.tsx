@@ -233,6 +233,15 @@ export function ConnectionChip({
           <button
             type="button"
             role="menuitem"
+            className="connection-menu-item workspace-disconnect"
+            disabled={busy || isSettling(connection)}
+            onClick={run(() => onRequest({ type: 'remote-set-enabled', enabled: !state.enabled }))}
+          >
+            {t(state.enabled ? 'workspaceDisconnect' : 'workspaceReconnect')}
+          </button>
+          <button
+            type="button"
+            role="menuitem"
             className="connection-menu-item is-danger workspace-revoke"
             disabled={busy || isSettling(connection)}
             onClick={run(() => {
