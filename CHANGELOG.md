@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.17.8] - 2026-11-20
+
 ### Fixed
 
 - Remote browser control no longer breaks for good when another extension embeds
