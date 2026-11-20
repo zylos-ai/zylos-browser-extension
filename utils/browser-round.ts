@@ -96,7 +96,23 @@ export async function runBrowserRound(
       };
     }
     if (actions.length === 1 && actions[0]!.method === 'recover-control') {
-      const value = await guarded('recover-control', actions[0]!.params, `${requestId}:0`);
+      let value: unknown;
+      try {
+        value = await guarded('recover-control', actions[0]!.params, `${requestId}:0`);
+      } catch (error) {
+        // Chrome refused a reattachment without removal because a foreign extension
+        // frame is still embedded. The executor re-armed the lease; ask again.
+        const rearmed = currentControlRecovery();
+        if (
+          errorInfo(error).code === 'FOREIGN_FRAME_PRESENT' &&
+          rearmed &&
+          rearmed.recoveryId !== actions[0]!.params?.recoveryId
+        )
+          throw new ControlSuspended(rearmed, [
+            { method: 'recover-control', outcome: 'not-executed' },
+          ]);
+        throw error;
+      }
       const recovered = value as { observation: unknown; target: unknown; removal?: unknown };
       return {
         mode: 'operating',

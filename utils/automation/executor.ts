@@ -59,14 +59,31 @@ let cursor: Cursor | null = null;
 const ownedAttachments = new Set<number>();
 const alreadyAttached = (error: unknown) =>
   /already attached/i.test(String((error as { message?: string })?.message ?? error));
+// Chrome refuses chrome.debugger on a tab that embeds another extension's page
+// (for example the Surfingkeys frontend iframe), and detaches with target_closed
+// when such a frame appears later. No CDP filter avoids this; only the frame can go.
+export const foreignExtensionFrameRefusal = (error: unknown) =>
+  /chrome-extension:\/\/ URL of different extension/i.test(
+    String((error as { message?: string })?.message ?? error),
+  );
+export const FOREIGN_FRAME_MESSAGE =
+  'Chrome refused browser control because another extension (for example Surfingkeys) has embedded its own page in this tab. Disable that extension on this site, or during recovery inspect and explicitly select its iframe for removal.';
 async function attachTab(target: { tabId: number }) {
   try {
-    await diagnosticAttach(target, '1.3');
+    try {
+      await diagnosticAttach(target, '1.3');
+    } catch (error) {
+      // Never fight a genuinely foreign debugger; only reclaim our own stale session.
+      if (!alreadyAttached(error) || !ownedAttachments.has(target.tabId)) throw error;
+      await diagnosticDetach(target).catch(() => {});
+      await diagnosticAttach(target, '1.3');
+    }
   } catch (error) {
-    // Never fight a genuinely foreign debugger; only reclaim our own stale session.
-    if (!alreadyAttached(error) || !ownedAttachments.has(target.tabId)) throw error;
-    await diagnosticDetach(target).catch(() => {});
-    await diagnosticAttach(target, '1.3');
+    if (!foreignExtensionFrameRefusal(error)) throw error;
+    throw Object.assign(new Error(FOREIGN_FRAME_MESSAGE), {
+      code: 'FOREIGN_FRAME_PRESENT',
+      cause: error,
+    });
   }
   ownedAttachments.add(target.tabId);
 }
@@ -155,29 +172,37 @@ export function abortControlRecovery(outcome: RecoveryOutcome = 'revoked') {
     void release(true, false, 'target_unavailable').catch(() => {});
   }
 }
-function suspendControl() {
+/**
+ * Suspends control into a recovery lease. `refused` is a tab whose first attach
+ * Chrome refused because a foreign extension frame is embedded: there is no grant
+ * yet, but the same inspected-removal consent path applies.
+ */
+function suspendControl(refused?: { id: number; url: string; document?: PageDocument }) {
+  const target = refused ?? grant;
   if (
     !control ||
-    !grant ||
+    !target ||
+    (refused && (grant || recovery)) ||
     !recoveryBudgetAvailable(recoveryAttempts.get(control) ?? []) ||
     !recoveryHooks?.enabled()
   )
     return false;
+  const document = refused ? refused.document : grantedDocument;
   const lease: RecoveryLease = {
     recoveryId: crypto.randomUUID(),
     expiresAt: Date.now() + CONTROL_RECOVERY_WINDOW_MS,
     reason: 'target_closed',
     cause: 'unknown',
     session: control,
-    url: grant.url,
-    tabId: grant.id,
+    url: target.url,
+    tabId: target.id,
     consent: consentRevision,
     attempted: false,
     timer: undefined as unknown as ReturnType<typeof setTimeout>,
     ...(recoveryHooks?.frameSelectionEnabled?.() &&
-    grantedDocument?.tabId === grant.id &&
-    grantedDocument.url === grant.url
-      ? { document: grantedDocument, frameSelection: true as const }
+    document?.tabId === target.id &&
+    document.url === target.url
+      ? { document, frameSelection: true as const }
       : {}),
   };
   lease.refs = new Map(refs);
@@ -446,7 +471,8 @@ export async function useExistingTab(
       borrowed: session.borrowedTabId === expected.tabId,
     };
   } catch (error) {
-    if (control === session) await completeTask().catch(() => {});
+    // A suspended lease is ended by its own recovery decision, expiry or Stop.
+    if (control === session && !recovery) await completeTask().catch(() => {});
     throw error;
   }
 }
@@ -682,7 +708,24 @@ function syncTarget() {
     await detachCurrent();
     if (control !== session || parked || session.tabId !== targetId) return;
     if (blockedAttachments.has(tab.id)) fail('DEBUGGER_DETACH_FAILED');
-    await attachTab({ tabId: tab.id });
+    try {
+      await attachTab({ tabId: tab.id });
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'FOREIGN_FRAME_PRESENT') throw error;
+      // Nothing was attached. Offer the same recovery (inspect, then explicit removal)
+      // as a later foreign-frame detach, instead of ending the task.
+      const document = recoveryHooks?.frameSelectionEnabled?.()
+        ? await getPageDocument(tab).catch(() => undefined)
+        : undefined;
+      if (
+        control === session &&
+        !parked &&
+        session.tabId === targetId &&
+        suspendControl({ id: tab.id, url: tab.url!, document })
+      )
+        fail('CONTROL_SUSPENDED', FOREIGN_FRAME_MESSAGE);
+      throw error;
+    }
     try {
       if (control !== session || parked || session.tabId !== targetId) return;
       await diagnosticSend({ tabId: tab.id }, 'Page.enable');
@@ -1423,12 +1466,48 @@ export async function recoverControl(
   } catch (error) {
     // A failed automatic attempt leaves the unexpired lease for the Agent's own decision.
     if (automatic && recovery === lease && Date.now() < lease.expiresAt) lease.attempted = false;
+    else if (rearmAfterForeignRefusal(lease, error, selectedCandidateIds)) throw error;
     else if (recovery === lease)
       abortControlRecovery(Date.now() >= deadline ? 'expired' : 'failed');
     throw error;
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * A reattachment without removal that Chrome refused because a foreign extension
+ * frame is still embedded removed nothing and ran no input. Re-arm the lease under a
+ * new recovery ID so the Agent can inspect and explicitly select that frame, instead
+ * of ending the task. Removal still needs the existing consent path.
+ */
+function rearmAfterForeignRefusal(
+  lease: RecoveryLease,
+  error: unknown,
+  selectedCandidateIds: string[] | undefined,
+) {
+  if (
+    selectedCandidateIds?.length ||
+    (error as { code?: string })?.code !== 'FOREIGN_FRAME_PRESENT' ||
+    recovery !== lease ||
+    !lease.frameSelection ||
+    lease.removal ||
+    Date.now() >= lease.expiresAt
+  )
+    return false;
+  lease.recoveryId = crypto.randomUUID();
+  lease.attempted = false;
+  lease.inspection = undefined;
+  lease.inspectionWork = undefined;
+  lease.candidateDocuments = undefined;
+  recordDiagnostic('operation-result', undefined, {
+    source: 'executor',
+    method: 'recover-control',
+    status: 'error',
+    code: 'FOREIGN_FRAME_PRESENT',
+  });
+  recoveryHooks?.onSuspended(currentControlRecovery()!);
+  return true;
 }
 
 /** Foreign extension frames still present, and whether any document could not be checked. */

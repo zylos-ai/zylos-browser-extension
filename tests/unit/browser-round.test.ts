@@ -140,6 +140,62 @@ it('recovery returns the canonical observation page without repeating snapshot o
   ]);
 });
 
+it('a recover-control refused by a foreign frame asks again under the re-armed lease', async () => {
+  const oldId = '11111111-1111-4111-8111-111111111111';
+  const rearmed = {
+    recoveryId: '22222222-2222-4222-8222-222222222222',
+    expiresAt: Date.now() + 60_000,
+    reason: 'target_closed' as const,
+    cause: 'unknown' as const,
+    frameSelection: true as const,
+  };
+  executor.currentControlRecovery.mockReturnValue(rearmed);
+  const call = vi.fn(async () => {
+    throw Object.assign(new Error('refused'), { code: 'FOREIGN_FRAME_PRESENT' });
+  });
+  const error = await runBrowserRound(
+    [{ method: 'recover-control', params: { recoveryId: oldId } }],
+    call,
+    () => {},
+    'request',
+  ).catch((e) => e);
+  expect(error).toBeInstanceOf(ControlSuspended);
+  expect(error.recovery).toEqual(rearmed);
+  expect(error.results).toEqual([{ method: 'recover-control', outcome: 'not-executed' }]);
+  expect(call).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  ['a lease that was not re-armed', 'FOREIGN_FRAME_PRESENT', true],
+  ['another failure', 'RECOVERY_UNAVAILABLE', false],
+])('a refused recover-control with %s is not re-asked', async (_, code, sameLease) => {
+  const id = '11111111-1111-4111-8111-111111111111';
+  executor.currentControlRecovery.mockReturnValue(
+    sameLease
+      ? {
+          recoveryId: id,
+          expiresAt: Date.now() + 60_000,
+          reason: 'target_closed',
+          cause: 'unknown',
+        }
+      : {
+          recoveryId: '22222222-2222-4222-8222-222222222222',
+          expiresAt: Date.now() + 60_000,
+          reason: 'target_closed',
+          cause: 'unknown',
+        },
+  );
+  const error = await runBrowserRound(
+    [{ method: 'recover-control', params: { recoveryId: id } }],
+    vi.fn(async () => {
+      throw Object.assign(new Error('refused'), { code });
+    }),
+    () => {},
+    'request',
+  ).catch((e) => e);
+  expect(error).not.toBeInstanceOf(ControlSuspended);
+});
+
 it.each(['snapshot', 'after-fill', 'during-fill', 'before-round'])(
   'terminalizes %s control loss with receipts and no new decision',
   async (stage) => {

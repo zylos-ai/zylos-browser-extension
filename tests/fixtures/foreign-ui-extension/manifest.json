@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Foreign UI frame stand-in",
+  "version": "1.0",
+  "description": "Test-only stand-in for Surfingkeys: embeds its own extension page in every top document.",
+  "content_scripts": [
+    { "matches": ["<all_urls>"], "js": ["content.js"], "run_at": "document_end" }
+  ],
+  "web_accessible_resources": [{ "resources": ["frontend.html"], "matches": ["<all_urls>"] }]
+}
