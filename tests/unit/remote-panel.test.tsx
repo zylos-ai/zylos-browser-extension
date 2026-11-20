@@ -2006,6 +2006,22 @@ test('preparing shows the chosen Agent with a spinner, then returns to chat once
   expect(container.querySelector('.chat-panel')).not.toBeNull();
 });
 
+test('logging out from the chat returns to the sign-in view', async () => {
+  state = { ...state, configured: true, connected: true, workspace: workspaceConnected() };
+  await mount();
+  expect(container.querySelector('.chat-panel')).not.toBeNull();
+  state = {
+    ...state,
+    configured: false,
+    connected: false,
+    relayUrl: '',
+    workspace: { baseUrl: 'https://ws.example', auth: 'signed-out' },
+  };
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(container.querySelector('#connect')).not.toBeNull();
+  expect(container.querySelector('.chat-panel')).toBeNull();
+});
+
 test('agent picker: offline Agents are greyed out, unselectable and hinted; no status from old servers', async () => {
   state = { ...state, configured: false, connected: false };
   state.workspace = {

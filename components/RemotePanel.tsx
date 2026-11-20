@@ -93,6 +93,15 @@ export function RemotePanel() {
       setScreen((current) => (current === 'connect' ? 'chat' : current));
   }, [state.workspace?.connection?.phase, !!state.workspace?.connection]);
 
+  // Logging out (or revoking) clears the relay configuration: leave the chat for the
+  // sign-in view instead of a chat that can no longer connect.
+  const wasConfigured = useRef(state.configured);
+  useEffect(() => {
+    if (wasConfigured.current && !state.configured)
+      setScreen((current) => (current === 'chat' ? 'connect' : current));
+    wasConfigured.current = state.configured;
+  }, [state.configured]);
+
   const chatBusy = !!(state.chatBusy || state.loopActive || pending === 'remote-stop');
   const stopping = !!state.stopping || pending === 'remote-stop';
 
