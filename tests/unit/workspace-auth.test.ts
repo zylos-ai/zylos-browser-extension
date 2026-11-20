@@ -155,6 +155,22 @@ describe('sign-in', () => {
           `https://x.chromiumapp.org/?error=access_denied&state=${new URL(u).searchParams.get('state')}`,
       }),
     ).rejects.toThrow('ui.error.workspaceSignInDenied');
+    await expect(
+      signIn({
+        ...base,
+        launch: async () => {
+          throw new Error('The user did not approve access.');
+        },
+      }),
+    ).rejects.toThrow('ui.error.workspaceSignInCancelled');
+    await expect(
+      signIn({
+        ...base,
+        launch: async () => {
+          throw new Error('Authorization page could not be loaded.');
+        },
+      }),
+    ).rejects.toThrow('ui.error.workspaceSignInUnavailable');
     expect(base.fetch).not.toHaveBeenCalled();
   });
 });

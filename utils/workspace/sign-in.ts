@@ -39,8 +39,14 @@ export async function signIn(deps: SignInDeps): Promise<void> {
   let redirect: string | undefined;
   try {
     redirect = await deps.launch(url);
-  } catch {
-    throw new Error('ui.error.workspaceSignInCancelled');
+  } catch (e) {
+    // Chrome reports a closed window as "did not approve"; anything else (for example
+    // "Authorization page could not be loaded") means the Workspace sign-in page is unavailable.
+    throw new Error(
+      /did not approve/i.test(String((e as Error)?.message ?? e))
+        ? 'ui.error.workspaceSignInCancelled'
+        : 'ui.error.workspaceSignInUnavailable',
+    );
   }
   if (!redirect) throw new Error('ui.error.workspaceSignInCancelled');
   const result = new URL(redirect);

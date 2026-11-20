@@ -472,6 +472,8 @@ export default {
   workspaceUrlRequired: 'This build has no Workspace address configured',
   workspaceUrlInvalid: 'This Workspace environment is not available in this build',
   workspaceSignInCancelled: 'The sign-in window was closed before sign-in finished.',
+  workspaceSignInUnavailable:
+    'Could not open the Workspace sign-in page. Extension sign-in may not be available in this environment yet; try again later or contact your admin.',
   workspaceSignInDenied: 'You declined the sign-in. You can log in again at any time.',
   workspaceSignInFailed:
     'Workspace sign-in did not finish. Try again; if it keeps failing, check your network or the Workspace address.',

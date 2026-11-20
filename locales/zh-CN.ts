@@ -439,6 +439,8 @@ export default {
   workspaceUrlRequired: '此版本未配置 Workspace 地址',
   workspaceUrlInvalid: '此版本不支持该 Workspace 环境',
   workspaceSignInCancelled: '登录窗口已关闭，未完成登录。',
+  workspaceSignInUnavailable:
+    '无法打开 Workspace 登录页，可能是该环境尚未开放扩展登录，请稍后再试或联系管理员。',
   workspaceSignInDenied: '你拒绝了登录授权，可以随时重新登录。',
   workspaceSignInFailed:
     '登录 Workspace 未完成。请重试；如果多次失败，请检查网络或 Workspace 地址。',
