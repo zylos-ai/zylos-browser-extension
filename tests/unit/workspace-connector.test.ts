@@ -4,7 +4,9 @@ import {
   POLL_INTERVAL_MS,
   PREPARE_TIMEOUT_MS,
   WorkspaceConnector,
+  isSecureRelayUrl,
   prepareErrorKey,
+  queuedRelayWrite,
   type ConnectorDeps,
 } from '../../utils/workspace/connector';
 import {
@@ -60,6 +62,7 @@ function setup(states: object[], storage = memoryStorage()) {
       relay.key = key;
       return `kid-${key}`;
     }),
+    keyIdOf: async (key: string) => `kid-${key}`,
     clearRelay: vi.fn(async () => {
       relay.key = '';
     }),
@@ -505,6 +508,7 @@ test('worker died after writing the relay but before "connected": init clears th
     phase: 'applying',
     connectionId: 'c1',
     relayUrl: 'wss://r',
+    localKeyId: 'kid-orphan',
   });
   const { connector, deps, relay } = setup([], storage);
   relay.url = 'wss://r';
@@ -515,7 +519,10 @@ test('worker died after writing the relay but before "connected": init clears th
   expect(connector.view().connection?.phase).toBe('failed');
 });
 
-test('init does not touch a relay that is not the recorded Workspace one', async () => {
+test.each([
+  ['a different URL', 'wss://manual'],
+  ['the same URL with a manual Key', 'wss://r'],
+])('init never touches a manual config (%s)', async (_label, url) => {
   const storage = memoryStorage();
   storage.data.set(WORKSPACE_CONNECTION_KEY, {
     agentMemberId: 'ag1',
@@ -524,12 +531,135 @@ test('init does not touch a relay that is not the recorded Workspace one', async
     phase: 'applying',
     connectionId: 'c1',
     relayUrl: 'wss://r',
+    localKeyId: 'kid-orphan',
   });
   const { connector, deps, relay } = setup([], storage);
-  relay.url = 'wss://manual';
+  relay.url = url;
   relay.key = 'manual';
   await connector.init();
   expect(deps.clearRelay).not.toHaveBeenCalled();
+  expect(relay.key).toBe('manual');
+});
+
+test('worker dies mid-write on the real poll path: restart clears exactly that Key', async () => {
+  const storage = memoryStorage();
+  const { connector, deps, relay } = setup(
+    [{ ...ready, relay_url: 'wss://r', key: 'k1' }],
+    storage,
+  );
+  let written!: () => void;
+  const landed = new Promise<void>((resolve) => (written = resolve));
+  deps.applyRelay = vi.fn(async (url: string, key: string) => {
+    relay.url = url;
+    relay.key = key;
+    written();
+    return new Promise<string>(() => {}); // the worker dies before "connected"
+  });
+  void connector.connect(input);
+  await landed;
+  expect(storage.data.get(WORKSPACE_CONNECTION_KEY)).toMatchObject({
+    phase: 'applying',
+    relayUrl: 'wss://r',
+    localKeyId: 'kid-k1',
+  });
+  const restarted = new WorkspaceConnector(deps);
+  await restarted.init();
+  expect(relay.key).toBe('');
+  expect(restarted.view().connection?.phase).toBe('failed');
+});
+
+test.each([
+  ['sign-out', (c: WorkspaceConnector) => c.signedOut()],
+  ['revoke', (c: WorkspaceConnector) => c.revoke()],
+  ['switch', (c: WorkspaceConnector) => c.connect({ ...input, agentMemberId: 'ag2' })],
+])('%s while the relay write is in flight clears the Key it wrote', async (_label, act) => {
+  const { connector, deps, relay } = setup([{ ...ready, relay_url: 'wss://r', key: 'k1' }]);
+  let entered!: () => void;
+  const inWrite = new Promise<void>((resolve) => (entered = resolve));
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  // The switched-to attempt keeps preparing (no busy loop).
+  deps.sleep = () => new Promise<void>(() => {});
+  // Past the isCurrent check, the write lands only after the session ended.
+  deps.applyRelay = vi.fn(async (url: string, key: string, isCurrent: () => boolean) => {
+    if (!isCurrent()) return undefined;
+    entered();
+    await gate;
+    relay.url = url;
+    relay.key = key;
+    return `kid-${key}`;
+  });
+  const connecting = connector.connect(input);
+  await inWrite;
+  const acting = act(connector);
+  release();
+  await connecting;
+  void acting.catch(() => {}); // a switch keeps preparing
+  await vi.waitFor(() => expect(relay.key).toBe(''));
+});
+
+test('a manual save that replaced the in-flight Workspace write is not cleared', async () => {
+  const { connector, deps, relay } = setup([{ ...ready, relay_url: 'wss://r', key: 'k1' }]);
+  deps.applyRelay = vi.fn(async (url: string, key: string) => {
+    relay.url = url;
+    relay.key = key;
+    await connector.forgetLocal();
+    // The owner's manual save lands right after.
+    relay.url = 'wss://r';
+    relay.key = 'manual';
+    return `kid-${key}`;
+  });
+  await connector.connect(input);
+  expect(deps.clearRelay).not.toHaveBeenCalled();
+  expect(relay.key).toBe('manual');
+});
+
+test('queuedRelayWrite skips the write when the run was superseded while queued', async () => {
+  const saveConnection = vi.fn(async () => {});
+  const mutate = <T>(run: () => Promise<T>) => run();
+  const apply = queuedRelayWrite(mutate, saveConnection, () => 'kid');
+  await expect(apply('wss://r', 'k', () => false)).resolves.toBeUndefined();
+  expect(saveConnection).not.toHaveBeenCalled();
+  await expect(apply('wss://r', 'k', () => true)).resolves.toBe('kid');
+  expect(saveConnection).toHaveBeenCalledWith('wss://r', 'k');
+});
+
+test('connecting again abandons the previous attempt that is still preparing', async () => {
+  const { connector, api, deps } = setup([]);
+  let release!: () => void;
+  deps.sleep = () => new Promise<void>((resolve) => (release = resolve));
+  void connector.connect(input);
+  await vi.waitFor(() => expect(api.getConnection).toHaveBeenCalled());
+  api.createConnection.mockResolvedValueOnce({
+    ...conn('preparing').connection,
+    connection_id: 'c2',
+  });
+  const second = connector.connect({ ...input, agentMemberId: 'ag2' });
+  await vi.waitFor(() => expect(api.revoke).toHaveBeenCalledWith('c1'));
+  expect(api.revoke).not.toHaveBeenCalledWith('c2');
+  release();
+  void second;
+});
+
+test('a switch whose disconnect fails reports it and keeps the current session', async () => {
+  const { connector, api, deps, relay } = setup([{ ...ready, relay_url: 'wss://r', key: 'k1' }]);
+  await connector.connect(input);
+  vi.mocked(deps.clearRelay).mockRejectedValueOnce(new Error('storage'));
+  await connector.connect({ ...input, agentMemberId: 'ag2' });
+  expect(connector.view()).toMatchObject({
+    error: 'ui.error.workspaceSwitchClearFailed',
+    connection: { phase: 'connected', agentMemberId: 'ag1' },
+  });
+  expect(api.createConnection).toHaveBeenCalledTimes(1);
+  expect(relay.key).toBe('k1');
+  expect(connector.ownsRelay()).toBe(true);
+});
+
+test('release builds accept only wss:// relays (no ws:// loopback)', () => {
+  expect(isSecureRelayUrl('wss://relay.example/ext', false)).toBe(true);
+  expect(isSecureRelayUrl('ws://localhost:8080/ext', false)).toBe(false);
+  expect(isSecureRelayUrl('ws://127.0.0.1/ext', false)).toBe(false);
+  expect(isSecureRelayUrl('ws://localhost:8080/ext', true)).toBe(true);
 });
 
 test('the relay write is skipped when the run was superseded while it was queued', async () => {

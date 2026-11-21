@@ -72,6 +72,17 @@ function workspaceEnvs(
   );
 }
 
+/**
+ * ws:// loopback relays are a development/test convenience only: a release build
+ * (just WXT_WORKSPACE_URL, no test environments) accepts Workspace relays over wss://.
+ */
+function workspaceLoopbackRelay(
+  mode: string,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return mode === 'development' || !!env.WXT_WORKSPACE_ENVS?.trim();
+}
+
 const detailBuild = JSON.stringify({
   id: randomUUID(),
   commit,
@@ -86,6 +97,7 @@ export default defineConfig({
     define: {
       __DETAIL_BUILD__: JSON.stringify(detailBuild),
       __WORKSPACE_ENVS__: JSON.stringify(JSON.stringify(workspaceEnvs(env.mode))),
+      __WORKSPACE_LOOPBACK_RELAY__: JSON.stringify(workspaceLoopbackRelay(env.mode)),
     },
     plugins: [tailwindcss()],
   }),

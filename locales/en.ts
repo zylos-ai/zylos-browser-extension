@@ -493,6 +493,8 @@ export default {
     "The Agent's public address is misconfigured. Ask the Agent to fix its public URL, then try again.",
   workspaceRelayInsecure:
     'The Agent offered an insecure (non-wss://) connection address, so it was not used. Ask the Agent to use an https public address.',
+  workspaceSwitchClearFailed:
+    'Could not disconnect the current Agent, so the switch was not started. Try again.',
   workspaceRevoked: 'This connection was revoked',
   workspaceKeyRevoked: 'The connection key was revoked or expired. Reconnect to get a new one.',
   workspaceKeyElsewhere:

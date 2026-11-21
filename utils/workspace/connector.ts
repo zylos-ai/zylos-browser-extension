@@ -35,12 +35,18 @@ export function prepareErrorKey(lastError: string | undefined): string {
   return 'ui.error.workspacePrepareFailed';
 }
 
-/** Workspace-issued Keys only travel over TLS (ws:// only for local development). */
-export function isSecureRelayUrl(value: string): boolean {
+declare const __WORKSPACE_LOOPBACK_RELAY__: boolean;
+/** Build-time: dev/test builds also accept ws:// loopback relays; release builds do not. */
+export const LOOPBACK_RELAY_ALLOWED: boolean =
+  typeof __WORKSPACE_LOOPBACK_RELAY__ === 'undefined' ? true : __WORKSPACE_LOOPBACK_RELAY__;
+
+/** Workspace-issued Keys only travel over TLS (ws:// loopback only in dev/test builds). */
+export function isSecureRelayUrl(value: string, allowLoopback = LOOPBACK_RELAY_ALLOWED): boolean {
   try {
     const url = new URL(value);
     if (url.protocol === 'wss:') return true;
     return (
+      allowLoopback &&
       url.protocol === 'ws:' &&
       (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]')
     );
@@ -48,6 +54,23 @@ export function isSecureRelayUrl(value: string): boolean {
     return false;
   }
 }
+/**
+ * The relay write as queued behind panel mutations: skipped when the Workspace
+ * run was superseded while queued (e.g. a manual save ahead of it).
+ */
+export function queuedRelayWrite(
+  mutate: <T>(run: () => Promise<T>) => Promise<T>,
+  saveConnection: (relayUrl: string, key: string) => Promise<unknown>,
+  keyId: () => string,
+): ConnectorDeps['applyRelay'] {
+  return (relayUrl, key, isCurrent) =>
+    mutate(async () => {
+      if (!isCurrent()) return undefined;
+      await saveConnection(relayUrl, key);
+      return keyId();
+    });
+}
+
 export const HEARTBEAT_INTERVAL_MS = 120_000;
 
 export const workspacePhaseSchema = z.enum([
@@ -121,6 +144,8 @@ export interface ConnectorDeps {
     key: string,
     isCurrent: () => boolean,
   ) => Promise<string | undefined>;
+  /** Local key id the remote config will report for this Key (keyIdOf). */
+  keyIdOf: (key: string) => Promise<string>;
   /** Drop the Workspace-issued Key from the remote config (disconnects). */
   clearRelay: () => Promise<void>;
   /** Whether the remote config currently holds this relay URL + local key id. */
@@ -191,7 +216,12 @@ export class WorkspaceConnector {
     if (this.record?.phase === 'applying') {
       // The worker died between writing the relay and saving "connected": the
       // Key may already be in the remote config without a record owning it.
-      if (this.record.relayUrl && this.deps.relayKeyed(this.record.relayUrl))
+      // Only that exact Key is cleared (URL + key id): a manual config is never touched.
+      if (
+        this.record.relayUrl &&
+        this.record.localKeyId &&
+        this.deps.relayMatches(this.record.relayUrl, this.record.localKeyId)
+      )
         await this.deps.clearRelay().catch(() => {});
       await this.save({
         ...this.record,
@@ -328,7 +358,18 @@ export class WorkspaceConnector {
     const browserName = input.browserName.trim().slice(0, 100);
     if (!browserName) throw new Error('ui.error.workspaceBrowserNameRequired');
     const previous = this.record;
-    if (this.ownsRelay()) await this.deps.clearRelay();
+    if (this.ownsRelay()) {
+      try {
+        await this.deps.clearRelay();
+      } catch {
+        // The current session stays as it was (it still owns its Key); say why
+        // the switch did not start instead of failing silently.
+        if (run !== this.run) return;
+        this.error = 'ui.error.workspaceSwitchClearFailed';
+        this.deps.publish();
+        return;
+      }
+    }
     // A previous attempt still preparing is abandoned server-side.
     if (previous?.phase === 'preparing') void this.abandon(previous.connectionId);
     if (run !== this.run) return;
@@ -418,9 +459,17 @@ export class WorkspaceConnector {
             });
             return;
           }
-          // relayUrl is recorded before the write so a worker restart can find
-          // (and clear) a Key written without the "connected" record.
-          await this.save({ ...this.record!, phase: 'applying', relayUrl: detail.relay_url });
+          // relayUrl + key id are recorded before the write so a worker restart
+          // (or a sign-out/revoke/switch mid-write) can find and clear exactly
+          // this Key even though "connected" was never saved.
+          const expectedKeyId = await this.deps.keyIdOf(detail.key);
+          if (run !== this.run) return;
+          await this.save({
+            ...this.record!,
+            phase: 'applying',
+            relayUrl: detail.relay_url,
+            localKeyId: expectedKeyId,
+          });
           // Cancelled during the save: a late "ready" must not write relay settings.
           if (run !== this.run) return;
           const localKeyId = await this.deps.applyRelay(
@@ -428,7 +477,18 @@ export class WorkspaceConnector {
             detail.key,
             () => run === this.run,
           );
-          if (run !== this.run || localKeyId === undefined) return;
+          if (run !== this.run || localKeyId === undefined) {
+            // Superseded after the write landed (sign-out/revoke/switch mid-write):
+            // the Key just written belongs to no record, so clear it. relayMatches
+            // keeps a manual save that replaced it untouched.
+            if (
+              run !== this.run &&
+              localKeyId !== undefined &&
+              this.deps.relayMatches(detail.relay_url, localKeyId)
+            )
+              await this.deps.clearRelay().catch(() => {});
+            return;
+          }
           this.reported = '';
           await this.save({
             ...this.record!,

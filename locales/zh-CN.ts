@@ -457,6 +457,7 @@ export default {
   workspaceAgentPublicUrlInvalid: 'Agent 的公网地址配置有误，请让 Agent 修正公网地址后重试。',
   workspaceRelayInsecure:
     'Agent 提供的连接地址不安全（不是 wss://），已拒绝使用。请让 Agent 使用 https 公网地址。',
+  workspaceSwitchClearFailed: '无法断开当前 Agent，未开始切换，请重试。',
   workspaceRevoked: '该连接已被撤销',
   workspaceKeyRevoked: '连接 Key 已被撤销或过期，重新连接以获取新的 Key。',
   workspaceKeyElsewhere: '连接 Key 已被其他浏览器使用，重新连接为这个浏览器获取 Key。',

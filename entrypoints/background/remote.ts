@@ -142,7 +142,7 @@ import {
 } from '../../utils/workspace/config';
 import { TokenStore, chromeLocalStorage } from '../../utils/workspace/token-store';
 import { WorkspaceApi } from '../../utils/workspace/api';
-import { WorkspaceConnector } from '../../utils/workspace/connector';
+import { WorkspaceConnector, queuedRelayWrite } from '../../utils/workspace/connector';
 import {
   signIn as workspaceSignIn,
   signOut as workspaceSignOut,
@@ -260,13 +260,8 @@ export function startRemoteBackground() {
     authStatus: () => workspaceTokens.status(),
     baseUrl: () => workspaceUrl,
     browserId: () => state.browserId,
-    applyRelay: (relayUrl, key, isCurrent) =>
-      mutate(async () => {
-        // A manual save queued ahead of this write ended the Workspace run.
-        if (!isCurrent()) return undefined;
-        await saveConnection(relayUrl, key);
-        return state.keyId;
-      }),
+    applyRelay: queuedRelayWrite(mutate, saveConnection, () => state.keyId),
+    keyIdOf,
     clearRelay: () => mutate(() => saveConnection(config.relayUrl, '', true)),
     relayMatches: (relayUrl, localKeyId) =>
       !!config.key && config.relayUrl === relayUrl && state.keyId === localKeyId,

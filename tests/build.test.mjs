@@ -89,3 +89,16 @@ test('ships octopus icons at the declared sizes and browser-localized metadata',
     }
   }
 });
+test('release build (WXT_WORKSPACE_URL only) drops the ws:// loopback relay allowance', () => {
+  if (process.env.WXT_WORKSPACE_ENVS) return;
+  const scripts = fs
+    .readdirSync(output, { recursive: true })
+    .filter((name) => name.endsWith('.js'))
+    .map((name) => fs.readFileSync(path.join(output, name), 'utf8'))
+    .join('\n');
+  assert.ok(scripts.includes('ui.error.workspaceRelayInsecure'));
+  // isSecureRelayUrl's loopback allowance ('[::1]' is unique to it) defaults to false.
+  const relayCheck = scripts.match(/\(\w+,\w+=([^)]+)\)\{try\{[^}]*\[::1\]/);
+  assert.ok(relayCheck, 'isSecureRelayUrl not found');
+  assert.ok(['!1', 'false'].includes(relayCheck[1]), relayCheck[0]);
+});
