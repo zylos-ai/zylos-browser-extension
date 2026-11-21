@@ -142,7 +142,7 @@ import {
 } from '../../utils/workspace/config';
 import { TokenStore, chromeLocalStorage } from '../../utils/workspace/token-store';
 import { WorkspaceApi } from '../../utils/workspace/api';
-import { WorkspaceConnector, queuedRelayWrite } from '../../utils/workspace/connector';
+import { WorkspaceConnector, queuedRelayClear, queuedRelayWrite } from '../../utils/workspace/connector';
 import {
   signIn as workspaceSignIn,
   signOut as workspaceSignOut,
@@ -254,6 +254,8 @@ export function startRemoteBackground() {
     fetch: (...args) => fetch(...args),
     baseUrl: () => workspaceUrl,
   });
+  const relayMatches = (relayUrl: string, localKeyId: string) =>
+    !!config.key && config.relayUrl === relayUrl && state.keyId === localKeyId;
   const workspace = new WorkspaceConnector({
     api: workspaceApi,
     storage: chromeLocalStorage,
@@ -262,10 +264,12 @@ export function startRemoteBackground() {
     browserId: () => state.browserId,
     applyRelay: queuedRelayWrite(mutate, saveConnection, () => state.keyId),
     keyIdOf,
-    clearRelay: () => mutate(() => saveConnection(config.relayUrl, '', true)),
-    relayMatches: (relayUrl, localKeyId) =>
-      !!config.key && config.relayUrl === relayUrl && state.keyId === localKeyId,
-    relayKeyed: (relayUrl) => !!config.key && config.relayUrl === relayUrl,
+    clearRelay: queuedRelayClear(
+      mutate,
+      (relayUrl) => saveConnection(relayUrl, '', true),
+      relayMatches,
+    ),
+    relayMatches,
     relayConnected: () => state.connected,
     publish: () => publish(),
   });

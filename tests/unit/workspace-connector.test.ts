@@ -6,6 +6,7 @@ import {
   WorkspaceConnector,
   isSecureRelayUrl,
   prepareErrorKey,
+  queuedRelayClear,
   queuedRelayWrite,
   type ConnectorDeps,
 } from '../../utils/workspace/connector';
@@ -63,11 +64,10 @@ function setup(states: object[], storage = memoryStorage()) {
       return `kid-${key}`;
     }),
     keyIdOf: async (key: string) => `kid-${key}`,
-    clearRelay: vi.fn(async () => {
-      relay.key = '';
+    clearRelay: vi.fn(async (url: string, kid: string) => {
+      if (deps.relayMatches(url, kid)) relay.key = '';
     }),
     relayMatches: (url, kid) => !!relay.key && relay.url === url && `kid-${relay.key}` === kid,
-    relayKeyed: (url) => !!relay.key && relay.url === url,
     relayConnected: () => relay.connected,
     publish: vi.fn(),
     sleep: async () => {},
@@ -610,7 +610,8 @@ test('a manual save that replaced the in-flight Workspace write is not cleared',
     return `kid-${key}`;
   });
   await connector.connect(input);
-  expect(deps.clearRelay).not.toHaveBeenCalled();
+  // The cleanup runs but finds a Key that is not the one it wrote.
+  expect(deps.clearRelay).toHaveBeenCalledWith('wss://r', 'kid-k1');
   expect(relay.key).toBe('manual');
 });
 
@@ -622,6 +623,120 @@ test('queuedRelayWrite skips the write when the run was superseded while queued'
   expect(saveConnection).not.toHaveBeenCalled();
   await expect(apply('wss://r', 'k', () => true)).resolves.toBe('kid');
   expect(saveConnection).toHaveBeenCalledWith('wss://r', 'k');
+});
+
+function queue() {
+  let tail: Promise<unknown> = Promise.resolve();
+  return <T>(run: () => Promise<T>): Promise<T> => {
+    const next = tail.then(run);
+    tail = next.catch(() => {});
+    return next;
+  };
+}
+
+/** Deps whose relay write/clear go through one mutate queue, like remote.ts. */
+function queuedSetup() {
+  const s = setup([{ ...ready, relay_url: 'wss://r', key: 'k1' }]);
+  const mutate = queue();
+  let entered!: () => void;
+  const inWrite = new Promise<void>((resolve) => (entered = resolve));
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const save = async (url: string, key: string) => {
+    s.relay.url = url;
+    s.relay.key = key;
+  };
+  s.deps.applyRelay = vi.fn((url: string, key: string, isCurrent: () => boolean) =>
+    mutate(async () => {
+      if (!isCurrent()) return undefined;
+      entered();
+      await gate;
+      await save(url, key);
+      return `kid-${key}`;
+    }),
+  );
+  s.deps.clearRelay = vi.fn(
+    queuedRelayClear(mutate, (url) => save(url, ''), s.deps.relayMatches),
+  );
+  return { ...s, mutate, save, inWrite, release };
+}
+
+test('a manual save queued between a mid-write sign-out and its cleanup keeps its Key', async () => {
+  const { connector, deps, relay, mutate, save, inWrite, release } = queuedSetup();
+  const connecting = connector.connect(input);
+  await inWrite;
+  const signingOut = connector.signedOut();
+  const manual = mutate(() => save('wss://manual', 'kM'));
+  release();
+  await Promise.all([connecting, signingOut, manual]);
+  await vi.waitFor(() => expect(deps.clearRelay).toHaveBeenCalled());
+  await mutate(async () => {});
+  expect(relay).toMatchObject({ url: 'wss://manual', key: 'kM' });
+});
+
+test("a switch to B that becomes ready fast keeps B's Key through A's cleanup", async () => {
+  const { connector, api, deps, relay, mutate, inWrite, release } = queuedSetup();
+  const connecting = connector.connect(input);
+  await inWrite;
+  api.createConnection.mockResolvedValueOnce({
+    ...conn('preparing').connection,
+    connection_id: 'c2',
+  });
+  api.getConnection.mockResolvedValueOnce({ ...ready, relay_url: 'wss://r', key: 'kB' });
+  const switching = connector.connect({ ...input, agentMemberId: 'ag2' });
+  // B's write is queued behind A's before A's cleanup is.
+  await vi.waitFor(() => expect(deps.applyRelay).toHaveBeenCalledTimes(2));
+  release();
+  await Promise.all([connecting, switching]);
+  await mutate(async () => {});
+  expect(deps.clearRelay).toHaveBeenCalledWith('wss://r', 'kid-k1');
+  expect(relay.key).toBe('kB');
+  expect(connector.view().connection).toMatchObject({ phase: 'connected', agentMemberId: 'ag2' });
+  expect(connector.ownsRelay()).toBe(true);
+});
+
+test('queuedRelayClear clears only the Key it was given, checked when it runs', async () => {
+  const clearKey = vi.fn(async () => {});
+  let current = { url: 'wss://r', kid: 'kid-a' };
+  const clear = queuedRelayClear(
+    (run) => run(),
+    clearKey,
+    (url, kid) => current.url === url && current.kid === kid,
+  );
+  await clear('wss://r', 'kid-b');
+  expect(clearKey).not.toHaveBeenCalled();
+  current = { url: 'wss://r', kid: 'kid-b' };
+  await clear('wss://r', 'kid-b');
+  expect(clearKey).toHaveBeenCalledWith('wss://r');
+});
+
+test('a sign-out while the key id is computed stops before anything is recorded or written', async () => {
+  const { connector, deps, relay, storage } = setup([{ ...ready, relay_url: 'wss://r', key: 'k1' }]);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let entered!: () => void;
+  const inKeyId = new Promise<void>((resolve) => (entered = resolve));
+  deps.keyIdOf = async (key) => {
+    entered();
+    await gate;
+    return `kid-${key}`;
+  };
+  const connecting = connector.connect(input);
+  await inKeyId;
+  await connector.signedOut();
+  release();
+  await connecting;
+  expect(deps.applyRelay).not.toHaveBeenCalled();
+  expect(relay.key).toBe('');
+  expect(storage.data.get(WORKSPACE_CONNECTION_KEY)).toBeUndefined();
+});
+
+test('the key id is computed from the trimmed Key, as saveConnection stores it', async () => {
+  const { connector, deps } = setup([{ ...ready, relay_url: 'wss://r', key: ' k1 \n' }]);
+  const keyIdOf = vi.fn(deps.keyIdOf);
+  deps.keyIdOf = keyIdOf;
+  await connector.connect(input);
+  expect(keyIdOf).toHaveBeenCalledWith('k1');
 });
 
 test('connecting again abandons the previous attempt that is still preparing', async () => {
@@ -645,6 +760,9 @@ test('a switch whose disconnect fails reports it and keeps the current session',
   const { connector, api, deps, relay } = setup([{ ...ready, relay_url: 'wss://r', key: 'k1' }]);
   await connector.connect(input);
   vi.mocked(deps.clearRelay).mockRejectedValueOnce(new Error('storage'));
+  // A switch that wrongly went ahead would park in a poll sleep and time out
+  // instead of busy-looping.
+  deps.sleep = () => new Promise<void>(() => {});
   await connector.connect({ ...input, agentMemberId: 'ag2' });
   expect(connector.view()).toMatchObject({
     error: 'ui.error.workspaceSwitchClearFailed',
@@ -673,6 +791,9 @@ test('the relay write is skipped when the run was superseded while it was queued
   await connector.connect(input);
   expect(relay.key).toBe('');
   expect(connector.view().connection).toBeUndefined();
+  // Skipped, not written and then cleared (that would wipe a manual Key).
+  expect(relay.url).toBe('');
+  expect(deps.clearRelay).not.toHaveBeenCalled();
 });
 
 test.each([

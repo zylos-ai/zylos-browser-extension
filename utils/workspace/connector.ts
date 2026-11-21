@@ -71,6 +71,24 @@ export function queuedRelayWrite(
     });
 }
 
+/**
+ * The relay clear as queued behind panel mutations: the Key is dropped only if
+ * the remote config still holds exactly this relay URL + key id when the queued
+ * clear runs, so a manual save (or another Workspace session's Key) queued
+ * ahead of it is never cleared.
+ */
+export function queuedRelayClear(
+  mutate: <T>(run: () => Promise<T>) => Promise<T>,
+  clearKey: (relayUrl: string) => Promise<unknown>,
+  relayMatches: ConnectorDeps['relayMatches'],
+): ConnectorDeps['clearRelay'] {
+  return (relayUrl, localKeyId) =>
+    mutate(async () => {
+      if (!relayMatches(relayUrl, localKeyId)) return;
+      await clearKey(relayUrl);
+    });
+}
+
 export const HEARTBEAT_INTERVAL_MS = 120_000;
 
 export const workspacePhaseSchema = z.enum([
@@ -146,12 +164,13 @@ export interface ConnectorDeps {
   ) => Promise<string | undefined>;
   /** Local key id the remote config will report for this Key (keyIdOf). */
   keyIdOf: (key: string) => Promise<string>;
-  /** Drop the Workspace-issued Key from the remote config (disconnects). */
-  clearRelay: () => Promise<void>;
+  /**
+   * Drop the Workspace-issued Key from the remote config (disconnects), only if
+   * it still holds this relay URL + local key id when the queued clear runs.
+   */
+  clearRelay: (relayUrl: string, localKeyId: string) => Promise<void>;
   /** Whether the remote config currently holds this relay URL + local key id. */
   relayMatches: (relayUrl: string, localKeyId: string) => boolean;
-  /** Whether the remote config holds a (non-empty) Key for this relay URL. */
-  relayKeyed: (relayUrl: string) => boolean;
   relayConnected: () => boolean;
   publish: () => void;
   sleep?: (ms: number) => Promise<void>;
@@ -222,7 +241,9 @@ export class WorkspaceConnector {
         this.record.localKeyId &&
         this.deps.relayMatches(this.record.relayUrl, this.record.localKeyId)
       )
-        await this.deps.clearRelay().catch(() => {});
+        await this.deps
+          .clearRelay(this.record.relayUrl, this.record.localKeyId)
+          .catch(() => {});
       await this.save({
         ...this.record,
         phase: 'failed',
@@ -360,7 +381,7 @@ export class WorkspaceConnector {
     const previous = this.record;
     if (this.ownsRelay()) {
       try {
-        await this.deps.clearRelay();
+        await this.deps.clearRelay(previous!.relayUrl!, previous!.localKeyId!);
       } catch {
         // The current session stays as it was (it still owns its Key); say why
         // the switch did not start instead of failing silently.
@@ -462,7 +483,7 @@ export class WorkspaceConnector {
           // relayUrl + key id are recorded before the write so a worker restart
           // (or a sign-out/revoke/switch mid-write) can find and clear exactly
           // this Key even though "connected" was never saved.
-          const expectedKeyId = await this.deps.keyIdOf(detail.key);
+          const expectedKeyId = await this.deps.keyIdOf(detail.key.trim());
           if (run !== this.run) return;
           await this.save({
             ...this.record!,
@@ -479,14 +500,11 @@ export class WorkspaceConnector {
           );
           if (run !== this.run || localKeyId === undefined) {
             // Superseded after the write landed (sign-out/revoke/switch mid-write):
-            // the Key just written belongs to no record, so clear it. relayMatches
-            // keeps a manual save that replaced it untouched.
-            if (
-              run !== this.run &&
-              localKeyId !== undefined &&
-              this.deps.relayMatches(detail.relay_url, localKeyId)
-            )
-              await this.deps.clearRelay().catch(() => {});
+            // the Key just written belongs to no record, so clear it. clearRelay
+            // re-checks URL + key id when the queued clear runs, so a manual save
+            // or another session's Key that landed in between is left untouched.
+            if (run !== this.run && localKeyId !== undefined)
+              await this.deps.clearRelay(detail.relay_url, localKeyId).catch(() => {});
             return;
           }
           this.reported = '';
@@ -562,7 +580,7 @@ export class WorkspaceConnector {
   async onKeyRejected(code: 4003 | 4004): Promise<void> {
     if (!this.ownsRelay()) return;
     this.stopRun();
-    await this.deps.clearRelay();
+    await this.deps.clearRelay(this.record!.relayUrl!, this.record!.localKeyId!);
     await this.save({
       ...this.record!,
       phase: 'key-rejected',
@@ -588,7 +606,7 @@ export class WorkspaceConnector {
         }
       }
     }
-    if (this.ownsRelay()) await this.deps.clearRelay();
+    if (this.ownsRelay()) await this.deps.clearRelay(r.relayUrl!, r.localKeyId!);
     await this.save(undefined);
   }
 
@@ -601,7 +619,8 @@ export class WorkspaceConnector {
   /** Explicit sign-out ends the active Workspace session (authorization stays server-side). */
   async signedOut(): Promise<void> {
     this.stopRun();
-    if (this.ownsRelay()) await this.deps.clearRelay();
+    const r = this.record;
+    if (this.ownsRelay()) await this.deps.clearRelay(r!.relayUrl!, r!.localKeyId!);
     this.agents = undefined;
     this.auth = 'signed-out';
     await this.save(undefined);
