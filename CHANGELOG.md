@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+### Added
+
+- OpenMax Workspace mode: "Log in to OpenMax Workspace" (OAuth + PKCE via
+  `chrome.identity`), choose an Agent (first-time Agents need a confirm step),
+  name this browser, and the extension waits for the Agent to prepare, then
+  writes the relay URL and Key into the existing connection settings — the
+  Remote handshake is unchanged. Reports connected plus a heartbeat, supports
+  Switch Agent, Reconnect after a revoked/expired (4004) or rebound (4003) Key,
+  Revoke and Log out. The manual URL + Key form remains available. Tokens stay
+  in the service worker's `chrome.storage.local`; Workspace sign-in failures
+  never drop an established relay connection. New `identity` permission; the
+  Workspace API origin comes from `WXT_WORKSPACE_URL` (development: INT).
+  The Agent picker lists only the member's own Agents with their
+  `online_status`: online (green dot), unknown (neutral "Status unknown",
+  still selectable) or offline (greyed out, cannot be selected — "Offline —
+  cannot connect"); servers without the field keep every Agent selectable with
+  no status. A `BROWSER_AGENT_OFFLINE` (409) reply returns to a refreshed
+  picker; `BROWSER_AGENT_STATUS_UNAVAILABLE` (503) stays on the picker with
+  "Couldn't check the Agent's status" and Retry.
+  Preparing has a Cancel button (stops polling, revokes the pending connection,
+  back to the picker; a late "ready" is ignored) and is bounded at 90s, ending
+  in a "Preparation timed out" state with Retry and Back.
+  The Switch Agent page reloads the list on open, always has Back and Log
+  out, and an empty list explains that only Agents you own are shown.
+- A Key change (switching Agent, Reconnect with a new Key) resets what is bound
+  to `relayUrl|keyId`: custom site rules, the Agent-start grant, compatibility
+  mode and diagnostics consent — same as changing the manual Key.
+
 ## [0.17.8] - 2026-11-20
 
 ### Fixed

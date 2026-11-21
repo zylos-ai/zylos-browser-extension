@@ -9,6 +9,7 @@ import { useI18n } from './LanguageProvider';
 import { ChatComposer } from './ChatComposer';
 import { Conversation } from './Conversation';
 import { ConnectionSettings } from './ConnectionSettings';
+import { ConnectView, ConnectionChip, WorkspaceFailedBanner } from './WorkspaceConnect';
 import { LivePreview } from './LivePreview';
 import { usePageSelection } from './usePageSelection';
 import { SelectionChip } from './SelectionChip';
@@ -20,7 +21,8 @@ export function RemotePanel() {
   const { t, errorText } = useI18n();
   const [state, setState] = useState<RemoteState>(initialRemoteState);
   const [draft, setDraft] = useState('');
-  const [screen, setScreen] = useState<'loading' | 'chat' | 'settings'>('loading');
+  const [screen, setScreen] = useState<'loading' | 'chat' | 'settings' | 'connect'>('loading');
+  const [switching, setSwitching] = useState(false);
   const [sending, setSending] = useState(false);
   const [pending, setPending] = useState<RemoteRequest['type'] | null>(null);
   const [error, setError] = useState('');
@@ -70,13 +72,35 @@ export function RemotePanel() {
     };
     chrome.runtime.onMessage.addListener(listener);
     void request({ type: 'remote-state' }).then((value) => {
-      if (active) setScreen(value?.configured ? 'chat' : 'settings');
+      if (active) setScreen(value?.configured ? 'chat' : 'connect');
     });
     return () => {
       active = false;
       chrome.runtime.onMessage.removeListener(listener);
     };
   }, []);
+
+  const previousPhase = useRef(state.workspace?.connection?.phase);
+  useEffect(() => {
+    const phase = state.workspace?.connection?.phase;
+    const previous = previousPhase.current;
+    previousPhase.current = phase;
+    if (phase === 'preparing' || !state.workspace?.connection) setSwitching(false);
+    if (
+      phase === 'connected' &&
+      (previous === 'preparing' || previous === 'applying' || previous === 'idle')
+    )
+      setScreen((current) => (current === 'connect' ? 'chat' : current));
+  }, [state.workspace?.connection?.phase, !!state.workspace?.connection]);
+
+  // Logging out (or revoking) clears the relay configuration: leave the chat for the
+  // sign-in view instead of a chat that can no longer connect.
+  const wasConfigured = useRef(state.configured);
+  useEffect(() => {
+    if (wasConfigured.current && !state.configured)
+      setScreen((current) => (current === 'chat' ? 'connect' : current));
+    wasConfigured.current = state.configured;
+  }, [state.configured]);
 
   const chatBusy = !!(state.chatBusy || state.loopActive || pending === 'remote-stop');
   const stopping = !!state.stopping || pending === 'remote-stop';
@@ -165,8 +189,11 @@ export function RemotePanel() {
   }
 
   const connected = state.connected;
+  const workspacePhase = state.workspace?.connection?.phase;
   const status = !state.configured
-    ? t('notConnected')
+    ? workspacePhase === 'preparing' || workspacePhase === 'applying'
+      ? t('workspacePhasePreparing')
+      : t('notConnected')
     : !state.enabled
       ? t('disabled')
       : connected
@@ -175,35 +202,55 @@ export function RemotePanel() {
           ? t('connecting')
           : t('offline');
   const settingsOpen = screen === 'settings';
+  const connection = state.workspace?.connection;
+  const openSwitch = () => {
+    setSwitching(true);
+    setScreen('connect');
+    setError('');
+  };
+  const workspaceAction = (command: RemoteRequest) => void action(command);
+  // Back from settings/connect goes to chat once configured; otherwise to the connect view.
+  const showBack = settingsOpen || (screen === 'connect' && state.configured);
   const visibleError = error || state.error;
 
   return (
     <div className={`app${connected ? ' connected' : ''}`}>
       <header className="sidebar-header">
         <div className="header-actions">
-          <span
-            className={`connection-status${connected ? ' is-connected' : ''}`}
-            title={state.relayHost}
-            role="status"
-          >
-            <span className="status-dot" aria-hidden="true" />
-            <span className="connection-status-label" title={status}>
-              {status}
+          {connection && state.configured ? (
+            <ConnectionChip
+              state={state}
+              status={status}
+              busy={pending !== null}
+              onRequest={workspaceAction}
+              onSwitch={openSwitch}
+            />
+          ) : (
+            <span
+              className={`connection-status${connected ? ' is-connected' : ''}`}
+              title={state.relayHost}
+              role="status"
+            >
+              <span className="status-dot" aria-hidden="true" />
+              <span className="connection-status-label" title={status}>
+                {status}
+              </span>
             </span>
-          </span>
+          )}
           <div className="header-tools">
             {(chatBusy || sending) && (
               <button
                 id="stop-current-task"
                 type="button"
-                className="btn btn-ghost header-button"
+                className="btn header-button header-stop"
                 disabled={stopping}
                 onClick={() => void action({ type: 'remote-stop' })}
               >
+                <span className="header-stop-icon" aria-hidden="true" />
                 {t(stopping ? 'stopping' : 'stopTask')}
               </button>
             )}
-            {state.configured && (
+            {state.configured && screen !== 'connect' && !(chatBusy || sending) && (
               <button
                 type="button"
                 className="btn btn-ghost header-button clear-chat-button"
@@ -225,15 +272,17 @@ export function RemotePanel() {
                 >
                   <path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5m4-5v5" />
                 </svg>
-                <span>{t('clearChatShort')}</span>
+                <span className="sr-only">{t('clearChatShort')}</span>
               </button>
             )}
             <button
               ref={settingsButtonRef}
               type="button"
-              className="btn btn-ghost header-button settings-button"
+              className={`btn btn-ghost header-button settings-button${showBack ? '' : ' is-icon'}`}
+              title={showBack ? undefined : t('settings')}
               onClick={() => {
-                setScreen(settingsOpen ? 'chat' : 'settings');
+                setScreen(showBack ? (state.configured ? 'chat' : 'connect') : 'settings');
+                setSwitching(false);
                 setError('');
               }}
               aria-expanded={settingsOpen}
@@ -250,7 +299,7 @@ export function RemotePanel() {
                 strokeLinejoin="round"
                 aria-hidden="true"
               >
-                {settingsOpen ? (
+                {showBack ? (
                   <path d="m14 6-6 6 6 6" />
                 ) : (
                   <>
@@ -260,7 +309,7 @@ export function RemotePanel() {
                   </>
                 )}
               </svg>
-              {settingsOpen ? t('back') : t('settings')}
+              {showBack ? t('back') : <span className="sr-only">{t('settings')}</span>}
             </button>
           </div>
         </div>
@@ -287,12 +336,19 @@ export function RemotePanel() {
           <span className="loading loading-spinner loading-sm" />
           {t('loading')}
         </main>
-      ) : settingsOpen ? (
-        <ConnectionSettings
+      ) : screen === 'connect' ? (
+        <ConnectView
           state={state}
-          onSiteAccessChange={(command) => void action(command)}
-          saving={pending === 'remote-save'}
           pending={pending !== null}
+          saving={pending === 'remote-save'}
+          switching={switching}
+          onSwitch={openSwitch}
+          onBack={() => {
+            setSwitching(false);
+            setScreen(state.configured ? 'chat' : 'connect');
+            setError('');
+          }}
+          onRequest={workspaceAction}
           onSave={async (relayUrl, key) => {
             const ok = await action({ type: 'remote-save', relayUrl, key });
             if (ok) {
@@ -301,6 +357,17 @@ export function RemotePanel() {
             }
             return ok;
           }}
+        />
+      ) : settingsOpen ? (
+        <ConnectionSettings
+          state={state}
+          status={status}
+          onOpenConnect={() => {
+            setSwitching(false);
+            setScreen('connect');
+          }}
+          onSiteAccessChange={(command) => void action(command)}
+          pending={pending !== null}
           onToggle={() => void action({ type: 'remote-set-enabled', enabled: !state.enabled })}
           onCompatibilityToggle={() =>
             void action({
@@ -330,7 +397,13 @@ export function RemotePanel() {
         />
       ) : (
         <main className="chat-panel">
-          {!connected && (
+          <WorkspaceFailedBanner
+            state={state}
+            busy={pending !== null}
+            onRequest={workspaceAction}
+            onSwitch={openSwitch}
+          />
+          {!connected && !(connection && ['failed', 'key-rejected'].includes(connection.phase)) && (
             <div className="offline-notice" role="status">
               <span>
                 {!state.configured
@@ -341,7 +414,7 @@ export function RemotePanel() {
                       ? t('connectingAgent')
                       : t('reconnecting')}
               </span>
-              <button className="btn btn-ghost" onClick={() => setScreen('settings')}>
+              <button className="btn btn-ghost" onClick={() => setScreen('connect')}>
                 {t('connectionSettings')}
               </button>
             </div>

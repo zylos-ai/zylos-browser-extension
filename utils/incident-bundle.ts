@@ -256,11 +256,7 @@ export class IncidentCapture {
         });
     }
     const document = this.document;
-    if (
-      trigger === 'control-lost' ||
-      !document ||
-      !this.sameDocument(document.scope)
-    ) {
+    if (trigger === 'control-lost' || !document || !this.sameDocument(document.scope)) {
       incident.pageState = { status: 'unavailable', observedAt: Date.now() };
       return;
     }

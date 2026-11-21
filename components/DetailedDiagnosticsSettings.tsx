@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RemoteState } from '../utils/remote';
 import { useI18n } from './LanguageProvider';
+import { SettingsItem, Switch } from './SettingsList';
 
 export function DetailedDiagnosticsSettings({
   state,
@@ -190,38 +191,35 @@ export function DetailedDiagnosticsSettings({
   };
   return (
     <section className="settings-section detailed-settings" aria-labelledby="detailed-heading">
-      <div className="settings-row">
-        <div className="settings-copy">
-          <h2 id="detailed-heading">{t('detailedDiagnostics')}</h2>
-          <p id="detailed-hint" className="settings-hint">
-            {t('detailedDiagnosticsHint')}
-          </p>
-        </div>
-        <button
-          id="detailed-enabled"
-          type="button"
-          role="switch"
-          className="connection-toggle"
-          aria-checked={!!details?.enabled}
-          aria-labelledby="detailed-heading"
-          aria-describedby="detailed-hint"
-          disabled={pending}
-          onClick={() => {
-            current.current = '';
-            localRequest.current++;
-            shareRequest.current++;
-            setLocalBusy(false);
-            setShareBusy(false);
-            setPreview(undefined);
-            setShare(undefined);
-            setAccepted(false);
-            onToggle();
-          }}
-        >
-          <span className="settings-switch-track" aria-hidden="true">
-            <span />
-          </span>
-        </button>
+      <div className="settings-list">
+        <SettingsItem
+          label={t('detailedCapture')}
+          labelId="detailed-heading"
+          htmlFor="detailed-enabled"
+          hint={t('detailedShort')}
+          hintId="detailed-hint"
+          more={t('detailedDiagnosticsHint')}
+          control={
+            <Switch
+              id="detailed-enabled"
+              checked={!!details?.enabled}
+              labelledBy="detailed-heading"
+              describedBy="detailed-hint"
+              disabled={pending}
+              onClick={() => {
+                current.current = '';
+                localRequest.current++;
+                shareRequest.current++;
+                setLocalBusy(false);
+                setShareBusy(false);
+                setPreview(undefined);
+                setShare(undefined);
+                setAccepted(false);
+                onToggle();
+              }}
+            />
+          }
+        />
       </div>
       {!!token && (
         <>

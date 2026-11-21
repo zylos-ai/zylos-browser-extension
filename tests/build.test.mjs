@@ -18,6 +18,7 @@ test('build exposes one sidebar and no toolbar popup', () => {
   assert.deepEqual([...manifest.permissions].sort(), [
     'alarms',
     'debugger',
+    'identity',
     'scripting',
     'sidePanel',
     'storage',
@@ -25,7 +26,11 @@ test('build exposes one sidebar and no toolbar popup', () => {
     'tabs',
     'webNavigation',
   ]);
-  assert.deepEqual(manifest.host_permissions, ['http://*/*', 'https://*/*']);
+  // Plus only the OpenMax Workspace API origin when the build sets one.
+  assert.deepEqual(manifest.host_permissions.slice(0, 2), ['http://*/*', 'https://*/*']);
+  assert.ok(manifest.host_permissions.length <= 3);
+  for (const origin of manifest.host_permissions.slice(2))
+    assert.match(origin, /^https:\/\/[^/*]+\/\*$/);
   assert.equal(manifest.externally_connectable, undefined);
   assert.ok(!manifest.web_accessible_resources?.length);
   const pages = fs.readdirSync(output).filter((file) => file.endsWith('.html'));
@@ -83,4 +88,17 @@ test('ships octopus icons at the declared sizes and browser-localized metadata',
       assert.ok(messages[key]?.message, `${locale}: ${value}`);
     }
   }
+});
+test('release build (WXT_WORKSPACE_URL only) drops the ws:// loopback relay allowance', () => {
+  if (process.env.WXT_WORKSPACE_ENVS) return;
+  const scripts = fs
+    .readdirSync(output, { recursive: true })
+    .filter((name) => name.endsWith('.js'))
+    .map((name) => fs.readFileSync(path.join(output, name), 'utf8'))
+    .join('\n');
+  assert.ok(scripts.includes('ui.error.workspaceRelayInsecure'));
+  // isSecureRelayUrl's loopback allowance ('[::1]' is unique to it) defaults to false.
+  const relayCheck = scripts.match(/\(\w+,\w+=([^)]+)\)\{try\{[^}]*\[::1\]/);
+  assert.ok(relayCheck, 'isSecureRelayUrl not found');
+  assert.ok(['!1', 'false'].includes(relayCheck[1]), relayCheck[0]);
 });
