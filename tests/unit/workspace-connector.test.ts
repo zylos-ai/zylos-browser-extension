@@ -4,6 +4,7 @@ import {
   POLL_INTERVAL_MS,
   PREPARE_TIMEOUT_MS,
   WorkspaceConnector,
+  prepareErrorKey,
   type ConnectorDeps,
 } from '../../utils/workspace/connector';
 import {
@@ -53,7 +54,8 @@ function setup(states: object[], storage = memoryStorage()) {
     authStatus: async () => 'signed-in',
     baseUrl: () => 'https://ws.example',
     browserId: () => 'b1',
-    applyRelay: vi.fn(async (url: string, key: string) => {
+    applyRelay: vi.fn(async (url: string, key: string, isCurrent: () => boolean) => {
+      if (!isCurrent()) return undefined;
       relay.url = url;
       relay.key = key;
       return `kid-${key}`;
@@ -62,6 +64,7 @@ function setup(states: object[], storage = memoryStorage()) {
       relay.key = '';
     }),
     relayMatches: (url, kid) => !!relay.key && relay.url === url && `kid-${relay.key}` === kid,
+    relayKeyed: (url) => !!relay.key && relay.url === url,
     relayConnected: () => relay.connected,
     publish: vi.fn(),
     sleep: async () => {},
@@ -91,7 +94,7 @@ test('connect: create → poll preparing → ready → relay config written → 
     browserInstanceId: 'b1',
   });
   expect(api.getConnection).toHaveBeenCalledTimes(2);
-  expect(deps.applyRelay).toHaveBeenCalledWith('wss://relay/ext', 'abc');
+  expect(deps.applyRelay).toHaveBeenCalledWith('wss://relay/ext', 'abc', expect.any(Function));
   expect(relay.key).toBe('abc');
   expect(connector.view().connection).toMatchObject({ phase: 'connected', agentName: 'Max' });
   expect(JSON.stringify(connector.view())).not.toContain('abc');
@@ -174,7 +177,7 @@ test('worker restart while preparing resumes polling the same connection', async
   await connector.init();
   await vi.waitFor(() => expect(connector.view().connection?.phase).toBe('connected'));
   expect(api.createConnection).not.toHaveBeenCalled();
-  expect(deps.applyRelay).toHaveBeenCalledWith('wss://r', 'k1');
+  expect(deps.applyRelay).toHaveBeenCalledWith('wss://r', 'k1', expect.any(Function));
 });
 
 test('switching Agent cancels a stale poll; revoke clears relay and record', async () => {
@@ -345,8 +348,8 @@ test('cancel is a no-op once connected', async () => {
   expect(connector.view().connection?.phase).toBe('connected');
 });
 
-test('preparing is bounded at 90s: then failed (timeout) and the connection is abandoned', async () => {
-  expect(PREPARE_TIMEOUT_MS).toBe(90_000);
+test('preparing is bounded at 300s (≤ server prepare timeout): then failed (timeout) and the connection is abandoned', async () => {
+  expect(PREPARE_TIMEOUT_MS).toBe(300_000);
   let t = 0;
   const { connector, api, deps } = setup([]);
   deps.now = () => t;
@@ -411,4 +414,178 @@ test('agent schema: online_status parsed; unrecognised value or legacy boolean o
   expect(odd.online_status).toBeUndefined();
   expect('online' in odd).toBe(false);
   expect(workspaceAgentSchema.parse(base).online_status).toBeUndefined();
+});
+
+const agentB = {
+  agentMemberId: 'ag2',
+  agentName: 'Ada',
+  browserName: 'Chrome · Mac',
+  confirm: true,
+};
+const connectedA = async (extra: object[] = []) => {
+  const h = setup([{ ...ready, relay_url: 'wss://r', key: 'kA' }, ...extra]);
+  await h.connector.connect(input);
+  expect(h.relay.key).toBe('kA');
+  expect(h.connector.ownsRelay()).toBe(true);
+  return h;
+};
+
+test("switch → B prepare fails: A's Key is cleared, and sign-out leaves nothing applied", async () => {
+  const { connector, deps, relay } = await connectedA([conn('failed')]);
+  await connector.connect(agentB);
+  expect(connector.view().connection).toMatchObject({ agentMemberId: 'ag2', phase: 'failed' });
+  expect(deps.clearRelay).toHaveBeenCalledTimes(1);
+  expect(relay.key).toBe('');
+  await connector.signedOut();
+  expect(relay.key).toBe('');
+  expect(connector.view().connection).toBeUndefined();
+});
+
+test("switch → cancelled: A's Key is cleared; a later 4004 is a no-op", async () => {
+  const { connector, api, deps, relay } = await connectedA();
+  let release!: (v: unknown) => void;
+  api.getConnection.mockImplementationOnce(() => new Promise((r) => (release = r)) as never);
+  const switching = connector.connect(agentB);
+  await vi.waitFor(() => expect(api.getConnection).toHaveBeenCalledTimes(2));
+  await connector.cancel();
+  release(conn('preparing'));
+  await switching;
+  expect(relay.key).toBe('');
+  expect(deps.clearRelay).toHaveBeenCalledTimes(1);
+  await connector.onKeyRejected(4004);
+  expect(relay.key).toBe('');
+  expect(connector.view().connection).toBeUndefined();
+});
+
+test("switch → 409 offline: A's Key is cleared before the attempt; revoke leaves nothing applied", async () => {
+  const { connector, api, deps, relay } = await connectedA();
+  api.createConnection.mockRejectedValueOnce(
+    new WorkspaceApiError(409, 'BROWSER_AGENT_OFFLINE', 'offline'),
+  );
+  await connector.connect(agentB);
+  expect(deps.clearRelay).toHaveBeenCalledTimes(1);
+  expect(relay.key).toBe('');
+  await connector.revoke();
+  expect(relay.key).toBe('');
+});
+
+test("switch → timeout: A's Key is cleared", async () => {
+  let t = 0;
+  const { connector, deps, relay } = await connectedA();
+  deps.now = () => t;
+  deps.sleep = async (ms) => void (t += ms);
+  await connector.connect(agentB);
+  expect(connector.view().connection?.error).toBe('ui.error.workspacePrepareTimeout');
+  expect(relay.key).toBe('');
+});
+
+test('signedOut clears the Workspace-owned relay', async () => {
+  const { connector, deps, relay } = await connectedA();
+  await connector.signedOut();
+  expect(deps.clearRelay).toHaveBeenCalledTimes(1);
+  expect(relay.key).toBe('');
+});
+
+test('relay 4003 on a Workspace Key clears it (Key in use elsewhere)', async () => {
+  const { connector, relay } = await connectedA();
+  await connector.onKeyRejected(4003);
+  expect(relay.key).toBe('');
+  expect(connector.view().connection).toMatchObject({
+    phase: 'key-rejected',
+    error: 'ui.error.workspaceKeyElsewhere',
+  });
+});
+
+test('worker died after writing the relay but before "connected": init clears the orphan Key', async () => {
+  const storage = memoryStorage();
+  storage.data.set(WORKSPACE_CONNECTION_KEY, {
+    agentMemberId: 'ag1',
+    agentName: 'Max',
+    browserName: 'B',
+    phase: 'applying',
+    connectionId: 'c1',
+    relayUrl: 'wss://r',
+  });
+  const { connector, deps, relay } = setup([], storage);
+  relay.url = 'wss://r';
+  relay.key = 'orphan';
+  await connector.init();
+  expect(deps.clearRelay).toHaveBeenCalledTimes(1);
+  expect(relay.key).toBe('');
+  expect(connector.view().connection?.phase).toBe('failed');
+});
+
+test('init does not touch a relay that is not the recorded Workspace one', async () => {
+  const storage = memoryStorage();
+  storage.data.set(WORKSPACE_CONNECTION_KEY, {
+    agentMemberId: 'ag1',
+    agentName: 'Max',
+    browserName: 'B',
+    phase: 'applying',
+    connectionId: 'c1',
+    relayUrl: 'wss://r',
+  });
+  const { connector, deps, relay } = setup([], storage);
+  relay.url = 'wss://manual';
+  relay.key = 'manual';
+  await connector.init();
+  expect(deps.clearRelay).not.toHaveBeenCalled();
+});
+
+test('the relay write is skipped when the run was superseded while it was queued', async () => {
+  const { connector, deps, relay } = setup([{ ...ready, relay_url: 'wss://r', key: 'k1' }]);
+  const apply = deps.applyRelay;
+  // A manual save queued ahead of the write forgets the Workspace session.
+  deps.applyRelay = vi.fn(async (url, key, isCurrent) => {
+    await connector.forgetLocal();
+    return apply(url, key, isCurrent);
+  });
+  await connector.connect(input);
+  expect(relay.key).toBe('');
+  expect(connector.view().connection).toBeUndefined();
+});
+
+test.each([
+  ['ws://relay.example/ext', false],
+  ['http://relay.example/ext', false],
+  ['ws://localhost:8080/ext', true],
+  ['ws://127.0.0.1/ext', true],
+])('Workspace relay URL %s accepted=%s', async (url, ok) => {
+  const { connector, api, deps } = setup([{ ...ready, relay_url: url, key: 'k1' }]);
+  await connector.connect(input);
+  if (ok) expect(connector.view().connection?.phase).toBe('connected');
+  else {
+    expect(connector.view().connection).toMatchObject({
+      phase: 'failed',
+      error: 'ui.error.workspaceRelayInsecure',
+    });
+    expect(deps.applyRelay).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(api.revoke).toHaveBeenCalledWith('c1'));
+  }
+});
+
+test.each([
+  [
+    'browser-remote is too old for OpenMax Browser: upgrade it to the release …',
+    'ui.error.workspaceAgentBrowserRemoteOld',
+  ],
+  [
+    'this Agent has no public domain, so OpenMax Browser cannot reach it (…); set AGENT_PUBLIC_BASE_URL=https://<public domain>',
+    'ui.error.workspaceAgentNoPublicUrl',
+  ],
+  [
+    'AGENT_PUBLIC_BASE_URL in ~/zylos/.env is not a valid http(s) URL',
+    'ui.error.workspaceAgentPublicUrlInvalid',
+  ],
+  [
+    'the platform-bound domain is not a valid http(s) URL',
+    'ui.error.workspaceAgentPublicUrlInvalid',
+  ],
+  ['something else', 'ui.error.workspacePrepareFailed'],
+  [undefined, 'ui.error.workspacePrepareFailed'],
+])('prepare last_error %s maps to %s', async (lastError, error) => {
+  expect(prepareErrorKey(lastError)).toBe(error);
+  const { connector } = setup([conn('failed', lastError ? { last_error: lastError } : {})]);
+  await connector.connect(input);
+  expect(connector.view().connection).toMatchObject({ phase: 'failed', error });
 });

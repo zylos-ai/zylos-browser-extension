@@ -484,7 +484,15 @@ export default {
   workspaceBrowserNameRequired: 'Enter a name for this browser',
   workspacePrepareFailed: 'The Agent could not prepare the connection. Try again.',
   workspacePrepareTimeout:
-    'The Agent did not respond to the connection request. Its openmax plugin may be out of date; ask the Agent to upgrade openmax, then try again.',
+    'The Agent did not finish preparing in time. It may still be installing or starting browser-remote (first use can take a few minutes), or its openmax plugin may be out of date. Try again shortly; if it keeps timing out, ask the Agent to upgrade openmax.',
+  workspaceAgentBrowserRemoteOld:
+    "The Agent's browser-remote component is too old. Ask the Agent to upgrade browser-remote, then try again.",
+  workspaceAgentNoPublicUrl:
+    'The Agent has no public address configured yet. It has been notified to set one; try again later.',
+  workspaceAgentPublicUrlInvalid:
+    "The Agent's public address is misconfigured. Ask the Agent to fix its public URL, then try again.",
+  workspaceRelayInsecure:
+    'The Agent offered an insecure (non-wss://) connection address, so it was not used. Ask the Agent to use an https public address.',
   workspaceRevoked: 'This connection was revoked',
   workspaceKeyRevoked: 'The connection key was revoked or expired. Reconnect to get a new one.',
   workspaceKeyElsewhere:

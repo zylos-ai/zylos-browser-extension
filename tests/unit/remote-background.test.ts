@@ -2452,6 +2452,37 @@ describe('OpenMax Workspace mode', () => {
     expect(JSON.stringify(await state())).not.toContain(KEY);
   });
 
+  it('clears a Workspace-issued Key on 4003 (Key bound to another browser)', async () => {
+    const relayUrl = (storage.remoteConfig as { relayUrl: string }).relayUrl;
+    storage.workspaceConnection = workspaceRecord(relayUrl);
+    const ws = await bootConnected();
+    ws.serverClose(4003);
+    await flush();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect((storage.remoteConfig as { key: string }).key).toBe('');
+    expect(sockets).toHaveLength(1);
+    expect((await state()).workspace).toMatchObject({
+      connection: { phase: 'key-rejected', error: 'ui.error.workspaceKeyElsewhere' },
+    });
+  });
+
+  it('workspace-set-url only accepts a build-configured environment', async () => {
+    vi.stubGlobal(
+      '__WORKSPACE_ENVS__',
+      JSON.stringify([
+        { name: 'A', url: 'https://ws-a.example' },
+        { name: 'B', url: 'https://ws-b.example' },
+      ]),
+    );
+    await bootConnected();
+    const evil = await ask({ type: 'workspace-set-url', url: 'https://evil.example' });
+    expect(evil.ok).toBe(false);
+    expect(storage.workspaceUrl).toBeUndefined();
+    const ok = await ask({ type: 'workspace-set-url', url: 'https://ws-b.example' });
+    expect(ok.ok).toBe(true);
+    expect(storage.workspaceUrl).toBe('https://ws-b.example');
+  });
+
   it('leaves a manual connection unchanged on 4003', async () => {
     const ws = await bootConnected();
     ws.serverClose(4003);

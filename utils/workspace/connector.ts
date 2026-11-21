@@ -18,12 +18,36 @@ import { WorkspaceAuthError, type AuthStatus, type KeyValueStorage } from './tok
 
 export const POLL_INTERVAL_MS = 1500;
 /**
- * Bounded wait for the Agent to prepare. An online Agent mints the relay Key in
- * seconds; offline Agents are rejected up front (409 BROWSER_AGENT_OFFLINE), so
- * 90s only has to absorb a slow/busy Agent turn (60 polls at 1.5s) — longer just
- * leaves the owner staring at a spinner.
+ * Bounded wait for the Agent to prepare. An online Agent usually mints the relay
+ * Key in seconds, but on first use it may first install/upgrade browser-remote
+ * (zylos add/upgrade, up to 180s) and verify it is running (up to 60s). 300s
+ * covers that and matches the server-side prepare timeout (5 min; never longer).
  */
-export const PREPARE_TIMEOUT_MS = 90_000;
+export const PREPARE_TIMEOUT_MS = 300_000;
+
+/** Known Agent-side prepare errors (connection.last_error) → specific copy. */
+export function prepareErrorKey(lastError: string | undefined): string {
+  const e = lastError ?? '';
+  if (/browser-remote is too old/i.test(e)) return 'ui.error.workspaceAgentBrowserRemoteOld';
+  if (/not a valid http\(s\) URL/i.test(e)) return 'ui.error.workspaceAgentPublicUrlInvalid';
+  if (/no public domain|AGENT_PUBLIC_BASE_URL/i.test(e))
+    return 'ui.error.workspaceAgentNoPublicUrl';
+  return 'ui.error.workspacePrepareFailed';
+}
+
+/** Workspace-issued Keys only travel over TLS (ws:// only for local development). */
+export function isSecureRelayUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (url.protocol === 'wss:') return true;
+    return (
+      url.protocol === 'ws:' &&
+      (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]')
+    );
+  } catch {
+    return false;
+  }
+}
 export const HEARTBEAT_INTERVAL_MS = 120_000;
 
 export const workspacePhaseSchema = z.enum([
@@ -87,12 +111,22 @@ export interface ConnectorDeps {
   authStatus: () => Promise<AuthStatus>;
   baseUrl: () => string;
   browserId: () => string;
-  /** Persist relay URL + Key through the existing remote config path; returns local key id. */
-  applyRelay: (relayUrl: string, key: string) => Promise<string>;
+  /**
+   * Persist relay URL + Key through the existing remote config path; returns the
+   * local key id, or undefined when `isCurrent()` turned false before the write
+   * (superseded, e.g. by a manual save queued ahead of it).
+   */
+  applyRelay: (
+    relayUrl: string,
+    key: string,
+    isCurrent: () => boolean,
+  ) => Promise<string | undefined>;
   /** Drop the Workspace-issued Key from the remote config (disconnects). */
   clearRelay: () => Promise<void>;
   /** Whether the remote config currently holds this relay URL + local key id. */
   relayMatches: (relayUrl: string, localKeyId: string) => boolean;
+  /** Whether the remote config holds a (non-empty) Key for this relay URL. */
+  relayKeyed: (relayUrl: string) => boolean;
   relayConnected: () => boolean;
   publish: () => void;
   sleep?: (ms: number) => Promise<void>;
@@ -154,12 +188,19 @@ export class WorkspaceConnector {
       this.stopRun();
       void this.poll(this.run, this.record.connectionId);
     }
-    if (this.record?.phase === 'applying')
+    if (this.record?.phase === 'applying') {
+      // The worker died between writing the relay and saving "connected": the
+      // Key may already be in the remote config without a record owning it.
+      if (this.record.relayUrl && this.deps.relayKeyed(this.record.relayUrl))
+        await this.deps.clearRelay().catch(() => {});
       await this.save({
         ...this.record,
         phase: 'failed',
+        relayUrl: undefined,
+        localKeyId: undefined,
         error: 'ui.error.workspacePrepareFailed',
       });
+    }
   }
 
   view(): WorkspaceView {
@@ -269,8 +310,11 @@ export class WorkspaceConnector {
   }
 
   /**
-   * Connect (or switch) to an Agent. Switching just starts a new connection; the
-   * previous Agent's authorization is kept server-side.
+   * Connect (or switch) to an Agent. Switching ends the current session first:
+   * the previous Workspace-issued Key is cleared from the remote config before
+   * the new attempt replaces the record, so a failed/cancelled switch never
+   * leaves an unowned Key applied. The previous Agent's authorization is kept
+   * server-side.
    */
   async connect(input: {
     agentMemberId: string;
@@ -283,6 +327,11 @@ export class WorkspaceConnector {
     this.error = undefined;
     const browserName = input.browserName.trim().slice(0, 100);
     if (!browserName) throw new Error('ui.error.workspaceBrowserNameRequired');
+    const previous = this.record;
+    if (this.ownsRelay()) await this.deps.clearRelay();
+    // A previous attempt still preparing is abandoned server-side.
+    if (previous?.phase === 'preparing') void this.abandon(previous.connectionId);
+    if (run !== this.run) return;
     await this.save({
       agentMemberId: input.agentMemberId,
       agentName: input.agentName,
@@ -360,11 +409,26 @@ export class WorkspaceConnector {
         if (run !== this.run) return;
         const state = detail.connection.state;
         if ((state === 'ready' || state === 'connected') && detail.relay_url && detail.key) {
-          await this.save({ ...this.record!, phase: 'applying' });
+          if (!isSecureRelayUrl(detail.relay_url)) {
+            void this.abandon(connectionId);
+            await this.save({
+              ...this.record!,
+              phase: 'failed',
+              error: 'ui.error.workspaceRelayInsecure',
+            });
+            return;
+          }
+          // relayUrl is recorded before the write so a worker restart can find
+          // (and clear) a Key written without the "connected" record.
+          await this.save({ ...this.record!, phase: 'applying', relayUrl: detail.relay_url });
           // Cancelled during the save: a late "ready" must not write relay settings.
           if (run !== this.run) return;
-          const localKeyId = await this.deps.applyRelay(detail.relay_url, detail.key);
-          if (run !== this.run) return;
+          const localKeyId = await this.deps.applyRelay(
+            detail.relay_url,
+            detail.key,
+            () => run === this.run,
+          );
+          if (run !== this.run || localKeyId === undefined) return;
           this.reported = '';
           await this.save({
             ...this.record!,
@@ -380,7 +444,9 @@ export class WorkspaceConnector {
             ...this.record!,
             phase: 'failed',
             error:
-              state === 'failed' ? 'ui.error.workspacePrepareFailed' : 'ui.error.workspaceRevoked',
+              state === 'failed'
+                ? prepareErrorKey(detail.connection.last_error)
+                : 'ui.error.workspaceRevoked',
           });
           return;
         }

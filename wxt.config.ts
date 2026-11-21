@@ -67,7 +67,7 @@ function workspaceEnvs(
   if (!releaseCommand) return [];
   throw new Error(
     'WXT_WORKSPACE_URL is required for release builds (no production Workspace origin is ' +
-      'defined in this repo). Example: WXT_WORKSPACE_URL=https://<workspace-origin> pnpm build. ' +
+      'defined in this repo). Example: WXT_WORKSPACE_URL=https://<workspace-origin> npm run build. ' +
       "For a test build use WXT_WORKSPACE_ENVS='INT=https://cws-int.coco.xyz,dev=https://…'.",
   );
 }

@@ -260,14 +260,17 @@ export function startRemoteBackground() {
     authStatus: () => workspaceTokens.status(),
     baseUrl: () => workspaceUrl,
     browserId: () => state.browserId,
-    applyRelay: (relayUrl, key) =>
+    applyRelay: (relayUrl, key, isCurrent) =>
       mutate(async () => {
+        // A manual save queued ahead of this write ended the Workspace run.
+        if (!isCurrent()) return undefined;
         await saveConnection(relayUrl, key);
         return state.keyId;
       }),
     clearRelay: () => mutate(() => saveConnection(config.relayUrl, '', true)),
     relayMatches: (relayUrl, localKeyId) =>
       !!config.key && config.relayUrl === relayUrl && state.keyId === localKeyId,
+    relayKeyed: (relayUrl) => !!config.key && config.relayUrl === relayUrl,
     relayConnected: () => state.connected,
     publish: () => publish(),
   });

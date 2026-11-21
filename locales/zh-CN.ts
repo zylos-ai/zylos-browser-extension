@@ -450,7 +450,13 @@ export default {
   workspaceBrowserNameRequired: '请为这个浏览器填写名称',
   workspacePrepareFailed: 'Agent 未能准备好连接，请重试。',
   workspacePrepareTimeout:
-    'Agent 没有响应连接请求。可能是 Agent 的 openmax 插件版本过旧，请让 Agent 升级 openmax 后重试。',
+    'Agent 没有在规定时间内准备好。可能仍在安装或启动 browser-remote（首次使用可能需要几分钟），也可能是 Agent 的 openmax 插件版本过旧。请稍后重试；如果反复超时，请让 Agent 升级 openmax。',
+  workspaceAgentBrowserRemoteOld:
+    'Agent 的 browser-remote 组件版本过旧，请让 Agent 升级 browser-remote 后重试。',
+  workspaceAgentNoPublicUrl: 'Agent 还没有配置公网地址，已通知它进行设置，请稍后重试。',
+  workspaceAgentPublicUrlInvalid: 'Agent 的公网地址配置有误，请让 Agent 修正公网地址后重试。',
+  workspaceRelayInsecure:
+    'Agent 提供的连接地址不安全（不是 wss://），已拒绝使用。请让 Agent 使用 https 公网地址。',
   workspaceRevoked: '该连接已被撤销',
   workspaceKeyRevoked: '连接 Key 已被撤销或过期，重新连接以获取新的 Key。',
   workspaceKeyElsewhere: '连接 Key 已被其他浏览器使用，重新连接为这个浏览器获取 Key。',

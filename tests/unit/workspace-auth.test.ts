@@ -13,7 +13,7 @@ import {
   type KeyValueStorage,
 } from '../../utils/workspace/token-store';
 import { WorkspaceApi } from '../../utils/workspace/api';
-import { buildAuthorizeUrl, signIn } from '../../utils/workspace/sign-in';
+import { buildAuthorizeUrl, signIn, signOut } from '../../utils/workspace/sign-in';
 import {
   WORKSPACE_AUTH_KEY,
   buildWorkspaceUrl,
@@ -356,5 +356,24 @@ describe('build-configured workspace environments', () => {
     expect(resolveWorkspaceUrl('https://cws-dev.example/', workspaceEnvs(envs))).toBe(
       'https://cws-dev.example',
     );
+  });
+});
+
+describe('sign-out', () => {
+  test('clears the local tokens first, then best-effort revokes the refresh token', async () => {
+    const { storage, data } = memoryStorage(signedIn(Date.now() + 600_000));
+    const tokens = new TokenStore({ storage, fetch: vi.fn(), baseUrl: () => BASE });
+    const fetch = vi.fn(async (_u: string, init?: RequestInit) => {
+      expect(data.has(WORKSPACE_AUTH_KEY)).toBe(false);
+      expect(new URLSearchParams(String(init?.body)).get('token')).toBe('r0');
+      throw new Error('offline');
+    });
+    await signOut({ baseUrl: BASE, fetch: fetch as unknown as typeof globalThis.fetch, tokens });
+    expect(fetch).toHaveBeenCalledWith(
+      `${BASE}/api/v1/browser-extension/oauth/revoke`,
+      expect.anything(),
+    );
+    expect(data.has(WORKSPACE_AUTH_KEY)).toBe(false);
+    expect(await tokens.status()).toBe('signed-out');
   });
 });
