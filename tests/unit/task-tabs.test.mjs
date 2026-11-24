@@ -336,9 +336,8 @@ test('handoff keeps the group; completion removes it without a terminal-status r
       });
     assert.equal(s.groups.has(task.groupId), false);
     assert.equal(s.executor.currentControl(), null);
-    // A user Stop hands the page back like a deliverable; only finalize closes temporaries.
-    assert.equal(s.tabs.has(task.tabId), outcome !== 'temporary');
-    if (outcome !== 'temporary') assert.equal(s.tabs.get(task.tabId).groupId, -1);
+    assert.equal(s.tabs.has(task.tabId), outcome === 'deliverable');
+    if (outcome === 'deliverable') assert.equal(s.tabs.get(task.tabId).groupId, -1);
     assert.ok(s.tabs.has(1) && s.tabs.has(2));
     assert.equal(
       s.calls.some((c) => c.method === 'tabGroups.update' && /已停止|已完成/.test(c.title)),
@@ -727,15 +726,24 @@ test('dragging the task tab to another window reports tab_moved; a new task clea
   assert.equal(s.executor.lastControlEndReason(), undefined);
 });
 
-test.each(['panel_stop', 'target_unavailable'])(
-  'release for %s hands the task tab back (panel Stop / recovery end)',
+test('release after recovery ends (target_unavailable) hands the task tab back', async () => {
+  const s = await fixture();
+  await s.start();
+  const task = s.executor.currentControl();
+  await s.executor.release(true, false, 'target_unavailable');
+  assert.equal(s.executor.currentControl(), null);
+  assert.ok(s.tabs.has(task.tabId));
+  assert.equal(s.tabs.get(task.tabId).groupId, -1);
+});
+
+test.each(['panel_stop', 'command_stop'])(
+  'user Stop (%s) keeps the 0.18.0 behavior and closes the agent-owned task tab',
   async (reason) => {
     const s = await fixture();
     await s.start();
     const task = s.executor.currentControl();
     await s.executor.release(true, false, reason);
     assert.equal(s.executor.currentControl(), null);
-    assert.ok(s.tabs.has(task.tabId));
-    assert.equal(s.tabs.get(task.tabId).groupId, -1);
+    assert.equal(s.tabs.has(task.tabId), false);
   },
 );

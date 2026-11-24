@@ -356,6 +356,7 @@ status 为 interrupted 或 stopped 时附加顶层 `reason`（不放进 `interru
 `user_stop`、`target_closed`、`canceled_by_user`、`recovery_expired`、`recovery_failed`、
 `foreign_frame`、`tab_closed`、`tab_moved`、`transport_lost` 或 `other`。
 具体原因（标签页关闭/移走、外来扩展 frame）优先；否则与 `interruption.recoveryOutcome` 一致。
+非自愿失控时任务标签页取消分组并交还用户，不关闭；用户 Stop 仍按 0.18.0 关闭 Agent 打开的标签页（借用的用户标签页只取消分组）。
 旧版 Remote 忽略该字段。
 
 控制权丢失时，`status:"interrupted"` 可附加 `interruption`：

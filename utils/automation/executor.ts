@@ -245,9 +245,10 @@ let endReason: ControlEndReason | undefined;
 let detachReason: 'target_closed' | 'canceled_by_user' | undefined;
 /** The cause of the most recent involuntary release, if any. */
 export const lastControlEndReason = () => endReason;
-// Releases that hand still-open task tabs back instead of closing them. Only a
-// normal agent finish (completeTask, which keeps its own tabs) and a replaced
-// task close temporary pages; losing control must never destroy the user's page.
+// Releases that hand still-open task tabs back instead of closing them:
+// involuntary control loss must never destroy the user's page. A user Stop
+// (panel_stop/command_stop), a normal agent finish and a replaced task keep
+// the 0.18.0 rules and close agent-owned temporary pages (owner decision, #37).
 const KEEP_TABS_ON_RELEASE: readonly DiagnosticReason[] = [
   'debugger_detach',
   'target_unavailable',
@@ -256,8 +257,6 @@ const KEEP_TABS_ON_RELEASE: readonly DiagnosticReason[] = [
   'tab_lost',
   'window_closed',
   'pause_timeout',
-  'panel_stop',
-  'command_stop',
   'consent_changed',
   'config_disabled',
 ];

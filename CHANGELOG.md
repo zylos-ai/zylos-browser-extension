@@ -4,11 +4,13 @@
 
 ### Fixed
 
-- Losing browser control (debugger detached, Chrome's Cancel bar, recovery
-  expired or failed, a password-manager frame, the task tab moved to another
-  window) and Stop no longer close the task tab: it is ungrouped and handed
-  back. `agent-turn-end` now carries a top-level `reason` for interrupted and
-  stopped tasks so the Agent learns why (#33).
+- Losing browser control involuntarily (debugger detached, Chrome's Cancel
+  bar, recovery expired or failed, a password-manager frame, the task tab
+  moved to another window) no longer closes the task tab: it is ungrouped and
+  handed back. A user Stop still closes agent-owned tabs as before (borrowed
+  tabs are only ungrouped). `agent-turn-end` now carries a top-level `reason`
+  for interrupted and stopped tasks (`user_stop` for Stop) so the Agent
+  learns why (#33).
 
 ## [0.18.0] - 2026-11-21
 
