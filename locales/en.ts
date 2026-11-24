@@ -291,6 +291,9 @@ export default {
     'The browser task was interrupted. Check the connection before trying again. Completed actions will not be replayed automatically.',
   taskRecoveryRemovalInterrupted:
     'Recovery ended. Selected extension frames may already have been removed; this change was not rolled back. Do not repeat removal or prior input without checking the page.',
+  taskAgentNotResponding:
+    'Agent not responding: no progress within 3 minutes of sending. The task was released; send your message again to retry.',
+  newTask: 'New task',
   taskCannotContinue:
     'This task cannot continue: {reason}\nCompleted actions will not be replayed automatically.',
   taskDecisionTimeout: 'Timed out waiting for the Agent’s decision.',

@@ -21,7 +21,7 @@ import {
   type ControlInterruption,
   type RecoveryOutcome,
 } from './control-loss';
-import { startDiagnosticOperation, endDiagnosticOperation } from './diagnostics';
+import { startDiagnosticOperation, endDiagnosticOperation, recordDiagnostic } from './diagnostics';
 import {
   agentMessage,
   AGENT_MESSAGE_VERSION,
@@ -31,6 +31,27 @@ import {
   type AgentInput,
 } from './agent-message';
 export type { AgentRequest } from './agent-message';
+
+/** Default per-action budget assumed by the round watchdog (see OPERATION_TIMEOUT_MS). */
+const WATCHDOG_ACTION_MS = 60_000;
+/** Allowance per action for post-action settling (hard-capped at 10s) and popup work. */
+const WATCHDOG_SETTLE_MS = 15_000;
+/** Final snapshot retries and the tabs read after the last action. */
+const WATCHDOG_SLACK_MS = 120_000;
+/**
+ * Wall-clock ceiling for one browser round: strictly above the sum of the
+ * budgets the round can legitimately use. Undefined for rounds that contain
+ * lease/consent-driven methods without an execution budget.
+ */
+export function roundWatchdogMs(actions: readonly LoopAction[]): number | undefined {
+  if (actions.some((action) => UNTIMED_METHODS.includes(action.method))) return undefined;
+  return actions.reduce((total, action) => {
+    const own = typeof action.params?.timeoutMs === 'number' ? action.params.timeoutMs : 0;
+    return (
+      total + Math.max(action.timeoutMs ?? WATCHDOG_ACTION_MS, own as number) + WATCHDOG_SETTLE_MS
+    );
+  }, WATCHDOG_SLACK_MS);
+}
 
 // The extension owns this contract. The relay transports it without a tool table.
 export const loopMethods = [
@@ -191,6 +212,9 @@ type Turn = {
   recoveryAttempted?: boolean;
   recoveryRemovalRequested?: number;
   recoveryAttempts?: number[];
+  /** Armed when the first request is sent; cleared by any Agent progress. */
+  silenceTimer?: ReturnType<typeof setTimeout>;
+  agentResponded?: boolean;
 };
 export type LoopIO = {
   send(request: AgentRequest): boolean;
@@ -216,11 +240,31 @@ export type LoopIO = {
   record?(method: string, result: unknown): void;
   progress?(summary: string | undefined): void;
 };
+/**
+ * GitHub #32: an Agent that never picks up the first request (e.g. a C4
+ * delivery lost inside the Agent host) must not leave the panel "Connecting"
+ * forever. Without any Agent progress for this long after the first request,
+ * the turn ends as `agent-not-responding` and is released to the relay.
+ * A decision that arrives later is rejected by the relay (STALE_DECISION);
+ * the Agent learns the task ended and the owner can simply resend.
+ */
+export const AGENT_FIRST_RESPONSE_TIMEOUT_MS = 3 * 60_000;
 export class BrowserLoop {
   private turn?: Turn;
   private receipts = new Map<string, string>();
   private completion = Promise.resolve();
-  constructor(private io: LoopIO) {}
+  constructor(
+    private io: LoopIO,
+    private firstResponseTimeoutMs = AGENT_FIRST_RESPONSE_TIMEOUT_MS,
+  ) {}
+  /** Any Agent-side sign of life for the task (activity, decision, input receipt). */
+  noteAgentProgress(taskId: string | undefined) {
+    const turn = this.turn;
+    if (!turn || !taskId || turn.id !== taskId) return;
+    turn.agentResponded = true;
+    clearTimeout(turn.silenceTimer);
+    turn.silenceTimer = undefined;
+  }
   get active() {
     return !!this.turn;
   }
@@ -356,6 +400,7 @@ export class BrowserLoop {
     if (!this.turn) return;
     if (this.turn.inputId !== this.turn.id) this.io.updates?.([this.turn.inputId], 'interrupted');
     clearTimeout(this.turn.recoveryTimer);
+    clearTimeout(this.turn.silenceTimer);
     this.turn = undefined;
     this.io.cancel();
   }
@@ -409,6 +454,7 @@ export class BrowserLoop {
         new Error('This decision request is no longer active; do not replay actions'),
         { code: 'STALE_DECISION' },
       );
+    this.noteAgentProgress(turn.id);
     if (turn.recovery && Date.now() >= turn.recovery.expiresAt) {
       this.endRecovery('expired');
       return { accepted: true, replayed: false };
@@ -534,6 +580,14 @@ export class BrowserLoop {
     turn.execution = (turn.execution ?? 0) + 1; // Fence any round still in flight.
     const first = turn.round++ === 0;
     turn.requestedInputId = turn.inputId;
+    if (first && !turn.agentResponded && this.firstResponseTimeoutMs > 0) {
+      clearTimeout(turn.silenceTimer);
+      turn.silenceTimer = setTimeout(() => {
+        turn.silenceTimer = undefined;
+        if (this.turn !== turn || turn.ending || turn.agentResponded) return;
+        void this.endNotice(turn, { kind: 'agent-not-responding' }, 'interrupted');
+      }, this.firstResponseTimeoutMs);
+    }
     const { removalReceipt, ...recoveryDescriptor } = turn.recovery ?? {};
     const execution: AgentRequest['execution'] = {
       protocol: 'browser-decision-v1',
@@ -681,6 +735,22 @@ export class BrowserLoop {
       }
     }
     let result: RoundResult;
+    // Backstop for OPENM-1425: if a round never reports (some Chrome call hung
+    // outside every per-operation budget), abandon it through the same path as
+    // an Agent-host cancel so the task gets OPERATION_CANCELLED evidence
+    // instead of wedging the relay on DECISION_BUSY until a manual Stop.
+    const watchdogMs = browserActions.length ? roundWatchdogMs(browserActions) : undefined;
+    const watchdog =
+      watchdogMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            if (this.turn !== turn || turn.execution !== execution) return;
+            recordDiagnostic('operation-error', 'other', { level: 'warn', code: 'ROUND_WATCHDOG' });
+            this.cancelExecution(
+              requestId,
+              `round watchdog: no browser result within ${Math.round(watchdogMs / 1000)}s`,
+            );
+          }, watchdogMs);
     try {
       result = browserActions.length
         ? await this.io.execute(
@@ -703,6 +773,8 @@ export class BrowserLoop {
           results: [{ method: first.method, outcome: 'completed' }, ...error.interruption.results],
         });
       throw error;
+    } finally {
+      clearTimeout(watchdog);
     }
     result.results = [...notes, ...result.results];
     if (this.turn !== turn || turn.execution !== execution) return;
@@ -735,6 +807,7 @@ export class BrowserLoop {
     if (this.turn !== turn || turn.ending) return Promise.resolve();
     turn.ending = true;
     clearTimeout(turn.recoveryTimer);
+    clearTimeout(turn.silenceTimer);
     turn.pending = undefined;
     return (this.completion = (async () => {
       // Keep ownership until cleanup and the final bubble are durable.

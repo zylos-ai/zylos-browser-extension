@@ -139,6 +139,15 @@ export function Conversation({
                       {formatMessageDate(message.ts, locale)}
                     </p>
                   )}
+                  {message.role === 'user' &&
+                    message.agentHistory &&
+                    chat.slice(0, index).some((entry) => entry.agentHistory) && (
+                      // Each owner message that opens a new task after an
+                      // earlier one gets an explicit boundary (GitHub #32).
+                      <p className="task-divider text-caption text-muted" role="separator">
+                        {t('newTask')}
+                      </p>
+                    )}
                   {message.toolRun ? (
                     chat.slice(0, index).findLast((entry) => entry.role === 'user' && !entry.taskId)
                       ?.agentHistory ? null : (
