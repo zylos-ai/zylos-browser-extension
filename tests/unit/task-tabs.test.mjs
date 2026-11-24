@@ -713,3 +713,29 @@ test('closing the task tab reports tab_closed; a replaced task still closes temp
   await s.start(); // A new task replacing the old one is not a control loss.
   assert.equal(s.tabs.has(second.tabId), false);
 });
+
+test('dragging the task tab to another window reports tab_moved; a new task clears the cause', async () => {
+  const s = await fixture();
+  await s.start();
+  const task = s.executor.currentControl();
+  chrome.tabs.onDetached.emit(task.tabId, { oldWindowId: 1, oldPosition: 0 });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(s.executor.currentControl(), null);
+  assert.ok(s.tabs.has(task.tabId), 'a moved task tab is handed back, not closed');
+  assert.equal(s.executor.lastControlEndReason(), 'tab_moved');
+  await s.start();
+  assert.equal(s.executor.lastControlEndReason(), undefined);
+});
+
+test.each(['panel_stop', 'target_unavailable'])(
+  'release for %s hands the task tab back (panel Stop / recovery end)',
+  async (reason) => {
+    const s = await fixture();
+    await s.start();
+    const task = s.executor.currentControl();
+    await s.executor.release(true, false, reason);
+    assert.equal(s.executor.currentControl(), null);
+    assert.ok(s.tabs.has(task.tabId));
+    assert.equal(s.tabs.get(task.tabId).groupId, -1);
+  },
+);

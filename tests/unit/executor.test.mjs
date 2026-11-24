@@ -1999,3 +1999,36 @@ test('without recovery a refused first attach reports FOREIGN_FRAME_PRESENT', as
   assert.equal(s.executor.currentControlRecovery(), undefined);
   await s.executor.release(false);
 });
+
+// #33 review: the agent-facing end reason follows the concrete release cause.
+test('closing the tab while recoverable reports tab_closed, not recovery_failed', async () => {
+  const s = await recoverySetup();
+  s.detach();
+  assert.ok(s.executor.currentControlRecovery());
+  chrome.tabs.onRemoved.emit(s.tab.id);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(s.executor.currentControl(), null);
+  assert.equal(s.executor.lastControlEndReason(), 'tab_closed');
+});
+
+test.each([
+  ['expired', 'recovery_expired'],
+  ['revoked', 'recovery_failed'],
+])('a recovery ended as %s reports %s', async (outcome, reason) => {
+  const s = await recoverySetup();
+  s.detach();
+  s.executor.abortControlRecovery(outcome);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(s.executor.currentControl(), null);
+  assert.equal(s.executor.lastControlEndReason(), reason);
+});
+
+test('a recovery refused by a foreign extension frame ends as foreign_frame', async () => {
+  const s = await frameSelectionSetup();
+  const first = s.executor.currentControlRecovery();
+  chrome.debugger.attach = foreignRefusal;
+  await assert.rejects(s.executor.recoverControl(first.recoveryId));
+  s.executor.abortControlRecovery('expired');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(s.executor.lastControlEndReason(), 'foreign_frame');
+});

@@ -106,8 +106,6 @@ type RecoveryLease = ControlRecovery & {
   consent: number;
   attempted: boolean;
   terminalOutcome?: RecoveryOutcome;
-  // Suspended because a foreign extension frame refused the first attach.
-  foreign?: true;
   timer: ReturnType<typeof setTimeout>;
   document?: PageDocument;
   inspectionWork?: Promise<RecoveryFrameInspection>;
@@ -116,6 +114,10 @@ type RecoveryLease = ControlRecovery & {
   // Refs from before the detach; only an automatic recovery may rebind them.
   refs?: Map<string, ElementRef>;
   automaticTried?: boolean;
+  // Another extension's frame was embedded when Chrome closed the debugger. Such
+  // overlays (for example a password manager's inline menu) often dismiss the
+  // page's own dialog, so a recovery reports that the page may have changed.
+  foreignFrame?: boolean;
   removal?: {
     automatic: boolean;
     nonce: string;
@@ -200,7 +202,7 @@ function suspendControl(refused?: { id: number; url: string; document?: PageDocu
     tabId: target.id,
     consent: consentRevision,
     attempted: false,
-    ...(refused ? { foreign: true as const } : {}),
+    ...(refused ? { foreignFrame: true } : {}),
     timer: undefined as unknown as ReturnType<typeof setTimeout>,
     ...(recoveryHooks?.frameSelectionEnabled?.() &&
     document?.tabId === target.id &&
@@ -263,12 +265,16 @@ function controlEndReason(
   reason: DiagnosticReason,
   suspended: RecoveryLease | undefined,
 ): ControlEndReason {
-  if (suspended?.foreign) return 'foreign_frame';
+  // The concrete release cause wins over an open recovery lease: closing or
+  // moving the tab while recoverable is still a closed/moved tab.
+  if (reason === 'tab_lost' || reason === 'window_closed') return 'tab_closed';
+  if (reason === 'tab_scope_changed') return 'tab_moved';
+  // `foreignFrame` is shared with the detach-time probe (#30): attach refusal
+  // and a target_closed detach with another extension's frame both set it.
+  if (suspended?.foreignFrame) return 'foreign_frame';
   if (suspended)
     return suspended.terminalOutcome === 'expired' ? 'recovery_expired' : 'recovery_failed';
   if (reason === 'debugger_detach') return detachReason ?? 'target_closed';
-  if (reason === 'tab_lost' || reason === 'window_closed') return 'tab_closed';
-  if (reason === 'tab_scope_changed') return 'tab_moved';
   return 'other';
 }
 const refs = new Map<string, ElementRef>();
@@ -457,6 +463,7 @@ export async function useExistingTab(
   assertActive: () => void,
 ) {
   if (recovery) fail('CONTROL_SUSPENDED');
+  endReason = undefined; // Never carry a previous task's cause into this one.
   const tab = await chrome.tabs.get(expected.tabId).catch(() => null);
   assertActive();
   if (!tab || tab.windowId !== expected.windowId || !canReadPage(tab))
@@ -660,6 +667,7 @@ export async function createTask(initial: {
   taskId: string;
 }) {
   if (recovery) fail('CONTROL_SUSPENDED');
+  endReason = undefined; // Never carry a previous task's cause into this one.
   if (!allowed(initial.url)) fail('INVALID_URL');
   assertSiteAction(initial.url, 'open');
   await recordSiteAccess(initial.url, 'open', true);
@@ -1067,16 +1075,17 @@ export function initializeExecutor() {
     });
   }
   // Browser focus is the user's, not an authorization or routing signal.
-  const lostTab = (id: number) => {
+  const lostTab = (id: number, cause: 'tab_lost' | 'tab_scope_changed' = 'tab_lost') => {
     if (!control?.tabIds.includes(id)) return;
-    if (id === control.tabId) void release(true, false, 'tab_lost');
+    if (id === control.tabId) void release(true, false, cause);
     else {
       control.tabIds = control.tabIds.filter((t) => t !== id);
       publish();
     }
   };
-  chrome.tabs.onDetached.addListener(lostTab);
-  chrome.tabs.onRemoved.addListener(lostTab);
+  // Dragging the task tab out of its window moves it; it is not closed.
+  chrome.tabs.onDetached.addListener((id) => lostTab(id, 'tab_scope_changed'));
+  chrome.tabs.onRemoved.addListener((id) => lostTab(id));
   chrome.tabGroups.onRemoved?.addListener((group) => {
     const session = control;
     if (session) forgetGroup(session, group.id);
@@ -1554,6 +1563,7 @@ function rearmAfterForeignRefusal(
   )
     return false;
   lease.recoveryId = crypto.randomUUID();
+  lease.foreignFrame = true;
   lease.attempted = false;
   lease.inspection = undefined;
   lease.inspectionWork = undefined;

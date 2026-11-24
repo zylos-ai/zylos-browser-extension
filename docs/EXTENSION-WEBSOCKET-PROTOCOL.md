@@ -346,12 +346,17 @@ Remote 通过同一 WebSocket 下发：
 | ------------- | -------------------------------------------------------------------- | ---------------------------------------------------- |
 | Remote → 插件 | `{type:"agent-status",requestId,state,code?}`                        | 队列已接收、投递失败或结果未知；不代表浏览器任务完成 |
 | 插件 → Remote | `{type:"agent-event",taskId,id,phase,method,params?,result?,error?}` | 可选诊断，phase 为 start/end                         |
-| 插件 → Remote | `{type:"agent-turn-end",taskId,status,text?}`                        | 本地最终回复已保存或任务已中断                       |
+| 插件 → Remote | `{type:"agent-turn-end",taskId,status,text?,reason?}`                | 本地最终回复已保存或任务已中断                       |
 | Remote → 插件 | `{type:"ping",ts}`                                                   | 心跳                                                 |
 | 插件 → Remote | `{type:"pong",ts}`                                                   | 心跳回复                                             |
 
 agent-event 记录真实执行步骤，工具参数和结果有体积限制，不发送截图 Base64。
 agent-turn-end 的 status 为 done、blocked、interrupted 或 stopped。
+status 为 interrupted 或 stopped 时附加顶层 `reason`（不放进 `interruption`，以免严格回执校验失败）：
+`user_stop`、`target_closed`、`canceled_by_user`、`recovery_expired`、`recovery_failed`、
+`foreign_frame`、`tab_closed`、`tab_moved`、`transport_lost` 或 `other`。
+具体原因（标签页关闭/移走、外来扩展 frame）优先；否则与 `interruption.recoveryOutcome` 一致。
+旧版 Remote 忽略该字段。
 
 控制权丢失时，`status:"interrupted"` 可附加 `interruption`：
 `{reason:"CONTROL_LOST",results:[{method:"fill",outcome:"completed"}],observation:"unavailable",resume:"new-user-message-required"}`。

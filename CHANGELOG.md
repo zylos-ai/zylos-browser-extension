@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Losing browser control (debugger detached, Chrome's Cancel bar, recovery
+  expired or failed, a password-manager frame, the task tab moved to another
+  window) and Stop no longer close the task tab: it is ungrouped and handed
+  back. `agent-turn-end` now carries a top-level `reason` for interrupted and
+  stopped tasks so the Agent learns why (#33).
+
 ## [0.18.0] - 2026-11-21
 
 Upgrade notes: Agents must run zylos-openmax 2.36.0 or later. With an older openmax the Agent times out while preparing the connection and the extension shows a hint to upgrade it. zylos-browser-remote 0.11.2 or later is also recommended; openmax upgrades it automatically when you connect.
