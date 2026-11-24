@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-11-24
+
+Upgrade notes: upgrade together with zylos-browser-remote 0.12.0 (end reasons, browser name, execution deadline and multi-session Core support need both sides). Older relays keep working but ignore the new fields.
+
 ### Added
 
 - Startup timing marks in diagnostics (#31): worker boot steps (diagnostics,
