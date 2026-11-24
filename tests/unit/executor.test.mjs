@@ -670,6 +670,53 @@ test('recovery blocks automatic unpark, uses exact original tab once and returns
   assert.equal(s.executor.currentControlRecovery(), undefined);
   assert.equal(s.executor.currentControl(), null);
 });
+test('a detach while another extension frame is embedded suspends and reports page state may have changed', async () => {
+  const s = await recoverySetup();
+  chrome.webNavigation = {
+    ...chrome.webNavigation,
+    getAllFrames: async () => [
+      { frameId: 0, url: s.tab.url },
+      { frameId: 7, url: `chrome-extension://${'c'.repeat(32)}/inline/menu.html` },
+    ],
+  };
+  s.detach();
+  const recovery = s.executor.currentControlRecovery();
+  assert.ok(recovery, 'control is suspended, not released');
+  // The relay contract keeps cause 'unknown'; the foreign frame is extension-internal.
+  assert.equal(recovery.cause, 'unknown');
+  assert.equal('foreignFrame' in recovery, false);
+  assert.ok(s.executor.currentControl());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const result = await s.executor.execute(
+    { op: 'recover-control', recoveryId: recovery.recoveryId },
+    Infinity,
+  );
+  assert.equal(result.recovered, true);
+  assert.equal(result.pageMayHaveChanged, true);
+  await s.executor.release();
+});
+
+test('our own extension frame does not mark the page as changed by another extension', async () => {
+  const s = await recoverySetup();
+  chrome.webNavigation = {
+    ...chrome.webNavigation,
+    getAllFrames: async () => [
+      { frameId: 0, url: s.tab.url },
+      { frameId: 3, url: `chrome-extension://${chrome.runtime.id}/overlay.html` },
+    ],
+  };
+  s.detach();
+  const recovery = s.executor.currentControlRecovery();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const result = await s.executor.execute(
+    { op: 'recover-control', recoveryId: recovery.recoveryId },
+    Infinity,
+  );
+  assert.equal(result.recovered, true);
+  assert.equal(result.pageMayHaveChanged, undefined);
+  await s.executor.release();
+});
+
 async function automaticSetup() {
   const s = await recoverySetup();
   s.executor.configureControlRecovery({

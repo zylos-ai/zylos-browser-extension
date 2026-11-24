@@ -114,6 +114,10 @@ type RecoveryLease = ControlRecovery & {
   // Refs from before the detach; only an automatic recovery may rebind them.
   refs?: Map<string, ElementRef>;
   automaticTried?: boolean;
+  // Another extension's frame was embedded when Chrome closed the debugger. Such
+  // overlays (for example a password manager's inline menu) often dismiss the
+  // page's own dialog, so a recovery reports that the page may have changed.
+  foreignFrame?: boolean;
   removal?: {
     automatic: boolean;
     nonce: string;
@@ -221,6 +225,29 @@ function suspendControl(refused?: { id: number; url: string; document?: PageDocu
   recoveryHooks?.onSuspended(currentControlRecovery()!);
   return true;
 }
+/** Another extension's document in the tab, read from frame URLs only (no content). */
+export async function foreignExtensionFramePresent(tabId: number) {
+  try {
+    const frames = (await chrome.webNavigation.getAllFrames({ tabId })) ?? [];
+    return frames.some((frame) => {
+      const match = /^chrome-extension:\/\/([^/]+)/.exec(frame.url);
+      return !!match && match[1] !== chrome.runtime.id;
+    });
+  } catch {
+    return false;
+  }
+}
+async function noteForeignFrameDetach(lease: RecoveryLease) {
+  if (!(await foreignExtensionFramePresent(lease.tabId)) || recovery !== lease) return;
+  lease.foreignFrame = true;
+  recordDiagnostic('detach', 'target_closed', {
+    source: 'executor',
+    level: 'warn',
+    code: 'FOREIGN_FRAME_PRESENT',
+  });
+}
+export const PAGE_STATE_NOTE =
+  "Another extension's frame (for example a password manager's inline menu) interrupted control. It may have closed a dialog or changed the page. Check the fresh observation before continuing; do not assume the previous plan still applies.";
 export const controlLossRevision = () => lossRevision;
 const refs = new Map<string, ElementRef>();
 const networkActivity = new NetworkActivity();
@@ -837,8 +864,10 @@ export function initializeExecutor() {
       !(source as { sessionId?: string }).sessionId &&
       reason === 'target_closed' &&
       suspendControl()
-    )
+    ) {
+      void noteForeignFrameDetach(recovery!);
       return;
+    }
 
     cursor = null; // The visual's short TTL also cleans up after external detachment.
     grant = null;
@@ -1428,6 +1457,7 @@ export async function recoverControl(
         observation,
         target: currentGrant(),
         replayed: false,
+        ...(lease.foreignFrame ? { pageMayHaveChanged: true as const } : {}),
         ...(selectedCandidateIds
           ? {
               removal: {
@@ -1496,6 +1526,7 @@ function rearmAfterForeignRefusal(
   )
     return false;
   lease.recoveryId = crypto.randomUUID();
+  lease.foreignFrame = true;
   lease.attempted = false;
   lease.inspection = undefined;
   lease.inspectionWork = undefined;

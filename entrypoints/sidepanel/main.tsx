@@ -4,7 +4,7 @@ import { RemotePanel } from '../../components/RemotePanel';
 import { ErrorBoundary } from '../../components/ErrorBoundary';
 import { LanguageProvider } from '../../components/LanguageProvider';
 import '../../assets/styles.css';
-import { startPanelDiagnostics } from '../../utils/diagnostics-panel';
+import { markPanelStartup, startPanelDiagnostics } from '../../utils/diagnostics-panel';
 
 startPanelDiagnostics();
 
@@ -19,3 +19,5 @@ createRoot(root).render(
     </LanguageProvider>
   </StrictMode>,
 );
+// Timing only: the first painted frame after the initial render.
+requestAnimationFrame(() => markPanelStartup('panel-first-render'));

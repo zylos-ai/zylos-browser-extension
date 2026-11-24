@@ -1868,6 +1868,25 @@ describe('decision transport background', () => {
     },
   );
 
+  it('reports the trimmed Workspace browser name in hello only for a Workspace-owned relay', async () => {
+    storage.workspaceConnection = {
+      agentMemberId: 'ag1',
+      agentName: 'Max',
+      browserName: '  Work Laptop ',
+      phase: 'connected',
+      connectionId: 'c1',
+      relayUrl: 'wss://agent.example/browser-remote/ext',
+      localKeyId: 'abababababab',
+    };
+    const ws = await bootConnected();
+    expect(ws.last('hello')!.browserName).toBe('Work Laptop');
+  });
+
+  it('omits the browser name from hello for a manual relay config', async () => {
+    const ws = await bootConnected();
+    expect(ws.last('hello')).not.toHaveProperty('browserName');
+  });
+
   it('persists a random instance identity and reuses it after reconnect, clearing chat, and worker restart', async () => {
     const ws = await bootConnected();
     expect(ws.last('hello')!.version).toBe(chrome.runtime.getManifest().version);

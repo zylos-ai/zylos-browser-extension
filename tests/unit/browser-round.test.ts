@@ -11,6 +11,7 @@ const executor = vi.hoisted(() => ({
   currentControlRecovery: vi.fn(),
   autoRecoverControl: vi.fn(),
   restoreRecoveredRefs: vi.fn(),
+  PAGE_STATE_NOTE: 'PAGE MAY HAVE CHANGED',
 }));
 vi.mock('../../utils/automation/executor', () => executor);
 import { runBrowserRound } from '../../utils/browser-round';
@@ -612,6 +613,38 @@ describe('automatic recovery inside a batch', () => {
       expect.objectContaining({ method: 'fill', status: 'uncertain' }),
       expect.objectContaining({ method: 'recover-control', automatic: true }),
       expect.objectContaining({ status: 'skipped', count: 1 }),
+    ]);
+  });
+
+  it('after a foreign-frame interruption, reports page change and asks for a fresh decision', async () => {
+    executor.autoRecoverControl.mockImplementation(async () => {
+      executor.currentControlRecovery.mockReturnValue(undefined);
+      return { ...recovered, pageMayHaveChanged: true };
+    });
+    const browser = call('@aaaaaaaa-e1', false);
+    const result = await runBrowserRound(
+      fills,
+      browser,
+      () => {},
+      'req',
+      () => false,
+      true,
+    );
+    // Never-started actions are not continued on a page that may have changed.
+    expect(browser.mock.calls.filter(([m]) => m === 'fill')).toHaveLength(1);
+    expect(executor.restoreRecoveredRefs).not.toHaveBeenCalled();
+    expect(result.observation).toMatchObject({ recovery: { pageMayHaveChanged: true } });
+    expect(result.results).toEqual([
+      { method: 'fill', status: 'success' },
+      expect.objectContaining({
+        method: 'recover-control',
+        note: expect.stringContaining('PAGE MAY HAVE CHANGED'),
+      }),
+      expect.objectContaining({
+        status: 'skipped',
+        count: 2,
+        reason: expect.stringContaining('page may have changed'),
+      }),
     ]);
   });
 

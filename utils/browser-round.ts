@@ -9,6 +9,7 @@ import {
   currentControlRecovery,
   autoRecoverControl,
   restoreRecoveredRefs,
+  PAGE_STATE_NOTE,
 } from './automation/executor';
 import type { LoopAction, RoundResult } from './browser-loop';
 import { ControlLoss, ControlSuspended, type ControlInterruption } from './control-loss';
@@ -113,7 +114,12 @@ export async function runBrowserRound(
           ]);
         throw error;
       }
-      const recovered = value as { observation: unknown; target: unknown; removal?: unknown };
+      const recovered = value as {
+        observation: unknown;
+        target: unknown;
+        removal?: unknown;
+        pageMayHaveChanged?: true;
+      };
       return {
         mode: 'operating',
         observation: {
@@ -123,9 +129,17 @@ export async function runBrowserRound(
             recovered: true,
             replayed: false,
             ...(recovered.removal ? { removal: recovered.removal } : {}),
+            ...(recovered.pageMayHaveChanged ? { pageMayHaveChanged: true } : {}),
           },
         },
-        results: [{ method: 'recover-control', status: 'success', replayed: false }],
+        results: [
+          {
+            method: 'recover-control',
+            status: 'success',
+            replayed: false,
+            ...(recovered.pageMayHaveChanged ? { note: PAGE_STATE_NOTE } : {}),
+          },
+        ],
         failed: false,
       };
     }
@@ -196,7 +210,7 @@ async function resumeAfterAutomaticRecovery(
   beforeOperation: () => Promise<void>,
 ): Promise<RoundResult | undefined> {
   const recovered = (await autoRecoverControl()) as
-    { observation: unknown; target: unknown } | undefined;
+    { observation: unknown; target: unknown; pageMayHaveChanged?: true } | undefined;
   if (!recovered) return undefined;
   assertActive();
   const done = results
@@ -209,9 +223,12 @@ async function resumeAfterAutomaticRecovery(
     status: 'success',
     automatic: true,
     replayed: false,
-    note: 'Browser control was briefly interrupted and reattached by the extension.',
+    note: recovered.pageMayHaveChanged
+      ? `Browser control was briefly interrupted and reattached by the extension. ${PAGE_STATE_NOTE}`
+      : 'Browser control was briefly interrupted and reattached by the extension.',
   };
-  if (!uncertain.length && remaining.length && !hasUpdates()) {
+  // The page may no longer match the plan the remaining actions were chosen for.
+  if (!uncertain.length && remaining.length && !hasUpdates() && !recovered.pageMayHaveChanged) {
     restoreRecoveredRefs(refsIn(remaining));
     try {
       const continued = await runBrowserRound(
@@ -241,7 +258,12 @@ async function resumeAfterAutomaticRecovery(
     observation: {
       page: recovered.observation,
       target: recovered.target,
-      recovery: { recovered: true, automatic: true, replayed: false },
+      recovery: {
+        recovered: true,
+        automatic: true,
+        replayed: false,
+        ...(recovered.pageMayHaveChanged ? { pageMayHaveChanged: true } : {}),
+      },
     },
     results: [
       ...done,
@@ -258,7 +280,9 @@ async function resumeAfterAutomaticRecovery(
               count: remaining.length,
               reason: uncertain.length
                 ? 'Remaining actions need a fresh decision after the uncertain action.'
-                : 'New owner input arrived. Remaining actions need a fresh decision.',
+                : recovered.pageMayHaveChanged
+                  ? 'The page may have changed during the interruption. Remaining actions need a fresh decision.'
+                  : 'New owner input arrived. Remaining actions need a fresh decision.',
             },
           ]
         : []),

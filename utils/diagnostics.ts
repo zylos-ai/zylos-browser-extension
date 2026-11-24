@@ -9,6 +9,7 @@ import {
   type DiagnosticEvent,
   type DiagnosticMetadata,
   type DiagnosticReason,
+  type StartupMark,
 } from './diagnostics-schema';
 export { diagnosticsQuery } from './diagnostics-schema';
 export type { DiagnosticEvent, DiagnosticReason } from './diagnostics-schema';
@@ -189,7 +190,11 @@ export async function setDiagnosticsEnabled(value: boolean) {
     throw error;
   }
   if (epoch !== changeEpoch) return;
-  if (value) append('enabled', {});
+  if (value) {
+    append('enabled', {});
+    for (const mark of startupMarks)
+      append('startup-mark', { ...mark, task: undefined, op: undefined });
+  }
   persist();
   await queue;
 }
@@ -216,6 +221,28 @@ export function recordDiagnostic(
   if (!enabled) return;
   append(event, { ...metadata, ...(reason ? { reason } : {}) });
   persist();
+}
+// Startup timing survives until diagnostics are enabled in the same worker, so a
+// slow first load can still be exported after the user turns diagnostics on.
+const STARTUP_MARK_CAP = 32;
+let startupMarks: DiagnosticMetadata[] = [];
+export function recordStartupMark(
+  mark: StartupMark,
+  elapsedMs: number,
+  source: 'background' | 'sidepanel' = 'background',
+) {
+  const metadata: DiagnosticMetadata = {
+    source,
+    level: 'info',
+    mark,
+    delayMs: Math.max(0, Math.min(Math.round(elapsedMs), Number.MAX_SAFE_INTEGER)),
+  };
+  if (startupMarks.length < STARTUP_MARK_CAP) startupMarks.push(metadata);
+  recordLifecycle('startup-mark', metadata);
+}
+export const startupTimings = () => startupMarks.map((m) => ({ ...m }));
+export function resetStartupMarks() {
+  startupMarks = [];
 }
 export function recordLifecycle(
   event: DiagnosticEvent['event'],

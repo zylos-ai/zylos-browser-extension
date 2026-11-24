@@ -655,9 +655,7 @@ function queuedSetup() {
       return `kid-${key}`;
     }),
   );
-  s.deps.clearRelay = vi.fn(
-    queuedRelayClear(mutate, (url) => save(url, ''), s.deps.relayMatches),
-  );
+  s.deps.clearRelay = vi.fn(queuedRelayClear(mutate, (url) => save(url, ''), s.deps.relayMatches));
   return { ...s, mutate, save, inWrite, release };
 }
 
@@ -711,7 +709,9 @@ test('queuedRelayClear clears only the Key it was given, checked when it runs', 
 });
 
 test('a sign-out while the key id is computed stops before anything is recorded or written', async () => {
-  const { connector, deps, relay, storage } = setup([{ ...ready, relay_url: 'wss://r', key: 'k1' }]);
+  const { connector, deps, relay, storage } = setup([
+    { ...ready, relay_url: 'wss://r', key: 'k1' },
+  ]);
   let release!: () => void;
   const gate = new Promise<void>((resolve) => (release = resolve));
   let entered!: () => void;
@@ -839,4 +839,25 @@ test.each([
   const { connector } = setup([conn('failed', lastError ? { last_error: lastError } : {})]);
   await connector.connect(input);
   expect(connector.view().connection).toMatchObject({ phase: 'failed', error });
+});
+
+test('relay browser name: only a Workspace-owned relay reports the trimmed name; rename notifies', async () => {
+  const { connector, api, deps, relay } = setup([
+    { ...ready, relay_url: 'wss://relay/ext', key: 'abc' },
+  ]);
+  const onBrowserName = vi.fn();
+  deps.onBrowserName = onBrowserName;
+  (api as Record<string, unknown>).rename = vi.fn(async () => conn('connected').connection);
+  await connector.init();
+  expect(connector.relayBrowserName()).toBeUndefined();
+  await connector.connect({ ...input, browserName: '  Work Laptop  ' });
+  expect(connector.relayBrowserName()).toBe('Work Laptop');
+  await connector.rename('  Home Mac ');
+  expect((api as any).rename).toHaveBeenCalledWith('c1', 'Home Mac');
+  expect(onBrowserName).toHaveBeenCalledWith('Home Mac');
+  expect(connector.relayBrowserName()).toBe('Home Mac');
+  await expect(connector.rename('   ')).rejects.toThrow('workspaceBrowserNameRequired');
+  // A manual relay config is not Workspace-owned: no name is reported.
+  relay.key = 'manual';
+  expect(connector.relayBrowserName()).toBeUndefined();
 });

@@ -29,6 +29,7 @@ import {
   getDiagnostics,
   initializeDiagnostics,
   recordDiagnostic,
+  recordStartupMark,
   setDiagnosticsEnabled,
 } from '../../utils/diagnostics';
 import { installRuntimeDiagnostics } from '../../utils/diagnostics-runtime';
@@ -47,7 +48,7 @@ import {
   configureCdpDiagnostics,
   refreshCdpDiagnostics,
 } from '../../utils/automation/cdp-diagnostics';
-import { safeError } from '../../utils/diagnostics-schema';
+import { safeError, type StartupMark } from '../../utils/diagnostics-schema';
 import {
   initializeSiteAccess,
   siteAccessState,
@@ -142,7 +143,11 @@ import {
 } from '../../utils/workspace/config';
 import { TokenStore, chromeLocalStorage } from '../../utils/workspace/token-store';
 import { WorkspaceApi } from '../../utils/workspace/api';
-import { WorkspaceConnector, queuedRelayClear, queuedRelayWrite } from '../../utils/workspace/connector';
+import {
+  WorkspaceConnector,
+  queuedRelayClear,
+  queuedRelayWrite,
+} from '../../utils/workspace/connector';
 import {
   signIn as workspaceSignIn,
   signOut as workspaceSignOut,
@@ -177,6 +182,9 @@ export function startRemoteBackground() {
   let lastInboundAt = 0;
   let lastOutboundAt = 0;
   const workerStartedAt = Date.now();
+  // Only the first connection of a worker is a startup milestone.
+  let firstTransportOpen = false;
+  let firstTransportReady = false;
   function transportMetadata() {
     const now = Date.now();
     return {
@@ -271,6 +279,10 @@ export function startRemoteBackground() {
     ),
     relayMatches,
     relayConnected: () => state.connected,
+    // Old relays ignore this frame; a closed socket reports the name in the next hello.
+    onBrowserName: (browserName) => {
+      if (state.connected) sendRaw({ type: 'browser-name', browserName });
+    },
     publish: () => publish(),
   });
   let stopTaskPromise: Promise<void> | undefined;
@@ -607,9 +619,13 @@ export function startRemoteBackground() {
         ? undefined
         : m.code === 'AGENT_UNAVAILABLE'
           ? 'ui.error.agentUnavailable'
-          : m.state === 'unknown'
-            ? 'ui.error.deliveryUnconfirmed'
-            : 'ui.error.chatDeliveryFailed';
+          : m.code === 'AGENT_SESSION_NOT_RUNNING'
+            ? 'ui.error.agentSessionNotRunning'
+            : m.code === 'SESSION_GROUP_UNMAPPED'
+              ? 'ui.error.sessionGroupUnmapped'
+              : m.state === 'unknown'
+                ? 'ui.error.deliveryUnconfirmed'
+                : 'ui.error.chatDeliveryFailed';
     await persistChat();
     publish();
   }
@@ -1130,12 +1146,17 @@ export function startRemoteBackground() {
       lastInboundAt = Date.now();
       armFreshnessTimer();
       recordLifecycle('transport-open', transportMetadata());
+      if (!firstTransportOpen) {
+        firstTransportOpen = true;
+        recordStartupMark('transport-open', Date.now() - workerStartedAt);
+      }
       backoff = BACKOFF_MIN_MS;
       state.connected = false;
       state.connecting = true;
       if (state.recovery !== 'failed') state.error = '';
       helloResume = recoveryDeadline ? resumeDescriptor() : undefined;
       const build = extensionBuild();
+      const workspaceBrowserName = workspace.relayBrowserName();
       sendRaw({
         type: 'hello',
         version: extensionVersion(),
@@ -1158,6 +1179,8 @@ export function startRemoteBackground() {
           RESUME_CAPABILITY,
         ],
         browserId: state.browserId,
+        // Workspace connections only; old relays ignore the field.
+        ...(workspaceBrowserName ? { browserName: workspaceBrowserName } : {}),
         runtimeEpoch,
         ...(helloResume ? { resume: helloResume } : {}),
       });
@@ -1329,6 +1352,10 @@ export function startRemoteBackground() {
         }
         state.endpointId = m.endpointId;
         recordLifecycle('transport-ready', transportMetadata());
+        if (!firstTransportReady) {
+          firstTransportReady = true;
+          recordStartupMark('transport-ready', Date.now() - workerStartedAt);
+        }
         attachmentsReady = m.capabilities.includes(ATTACHMENT_CAPABILITY);
         agentStartReady = m.capabilities.includes(AGENT_TASK_START_CAPABILITY);
         closedShadowReady = m.capabilities.includes('recovery-closed-shadow-v1');
@@ -1689,9 +1716,12 @@ export function startRemoteBackground() {
 
   // ---------------------------------------------------------------- boot
   const boot = (async () => {
+    const mark = (name: StartupMark) => recordStartupMark(name, Date.now() - workerStartedAt);
     await initializeDiagnostics().catch(() => setDiagnosticsEnabled(false).catch(() => {}));
+    mark('diagnostics-ready');
     await chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }).catch(() => {});
     await recoverTasks();
+    mark('tasks-recovered');
     const saved = await diagnosticStorage('read', () =>
       chrome.storage.local.get([
         REMOTE_CONFIG_KEY,
@@ -1700,6 +1730,7 @@ export function startRemoteBackground() {
         LANGUAGE_STORAGE_KEY,
       ]),
     );
+    mark('storage-read');
     const storedBrowserId = saved[REMOTE_BROWSER_ID_KEY];
     state.browserId =
       typeof storedBrowserId === 'string' && BROWSER_ID_RE.test(storedBrowserId)
@@ -1732,13 +1763,16 @@ export function startRemoteBackground() {
       config.enabled ? agentStartBinding(config.relayUrl, state.keyId) : '',
     ).catch(() => undefined);
     if (restored) setAgentStartGrant(restored);
+    mark('config-applied');
     const savedWorkspaceUrl = (await chrome.storage.local.get([WORKSPACE_URL_KEY]))[
       WORKSPACE_URL_KEY
     ];
     workspaceUrl = resolveWorkspaceUrl(savedWorkspaceUrl);
     await workspace.init().catch(() => {});
+    mark('workspace-restored');
     if (config.enabled && state.configured) void connect();
     publish();
+    mark('boot-complete');
   })();
   void boot.catch((e) => {
     recordLifecycle('runtime-error', { level: 'error', ...safeError(e) });

@@ -298,6 +298,10 @@ export default {
   chatDeliveryFailed: '消息未能送入 Agent 队列，请检查 Browser Remote 和 C4 服务。',
   deliveryUnconfirmed: '无法确认消息是否已进入 Agent 队列，请先检查 Agent 状态，避免重复提交任务。',
   agentUnavailable: 'Agent 暂时不可用，这条消息未进入任务队列。请通过原来的聊天入口检查状态。',
+  agentSessionNotRunning:
+    '负责这个浏览器的 Agent 会话未运行，这条消息没有发出。请先启动 Agent 再重试。',
+  sessionGroupUnmapped:
+    'Agent 还没有为这个浏览器连接配置会话，这条消息没有发出。请重新连接浏览器或检查 Agent 配置。',
   operatingBrowser: '正在操作浏览器',
   taskInProgress: '浏览器任务进行中',
   taskTab: '{count} 个工作标签页 · 可随时查看',

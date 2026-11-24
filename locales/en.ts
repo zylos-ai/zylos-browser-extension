@@ -322,6 +322,10 @@ export default {
     'Delivery to the Agent queue could not be confirmed. Check the Agent before submitting the task again.',
   agentUnavailable:
     'The Agent is temporarily unavailable. This message was not queued. Check its status through your original chat channel.',
+  agentSessionNotRunning:
+    'The Agent session that handles this browser is not running, so this message was not sent. Start the Agent and try again.',
+  sessionGroupUnmapped:
+    'The Agent has no session set up for this browser connection, so this message was not sent. Reconnect this browser or check the Agent setup.',
   operatingBrowser: 'Working in your browser',
   taskInProgress: 'Browser task in progress',
   taskTab: '{count} work tab · View anytime',

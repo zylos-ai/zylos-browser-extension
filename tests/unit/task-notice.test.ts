@@ -13,6 +13,8 @@ test('saved extension notices can switch languages without changing their text f
       'SEND_FAILED',
       'AGENT_UNAVAILABLE',
       'AGENT_STOPPING',
+      'AGENT_SESSION_NOT_RUNNING',
+      'SESSION_GROUP_UNMAPPED',
       'TURN_BUSY',
       'DECISION_BUSY',
       'C4_DELIVERY_FAILED',
@@ -46,4 +48,10 @@ test('ordinary messages and older histories are not reclassified by their text',
   expect(formatTaskNotice('en', { kind: 'request-failed', code: 'constructor' })).toContain(
     'constructor',
   );
+});
+
+test('relay session routing codes have readable reasons instead of the raw code', () => {
+  for (const code of ['AGENT_SESSION_NOT_RUNNING', 'SESSION_GROUP_UNMAPPED'])
+    for (const locale of ['en', 'zh-CN'] as const)
+      expect(formatTaskNotice(locale, { kind: 'request-failed', code })).not.toContain(code);
 });

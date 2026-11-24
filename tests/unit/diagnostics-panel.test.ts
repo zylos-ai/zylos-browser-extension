@@ -9,10 +9,12 @@ vi.mock('../../utils/diagnostics-runtime', () => ({
 let listener: (message: unknown) => void;
 let pending: (() => void)[];
 let sent: any[];
+let startup: any[];
 beforeEach(() => {
   vi.resetModules();
   pending = [];
   sent = [];
+  startup = [];
   capture.emit = undefined;
   vi.stubGlobal('chrome', {
     runtime: {
@@ -24,6 +26,11 @@ beforeEach(() => {
       sendMessage: vi.fn(async (message: any) => {
         if (message.type === 'remote-state')
           return { ok: true, value: { diagnosticsEnabled: false } };
+        // Startup timing marks are covered separately; keep queue assertions exact.
+        if (message.event?.event === 'startup-mark') {
+          startup.push(message.event);
+          return { ok: true, value: { accepted: true } };
+        }
         sent.push(message);
         await new Promise<void>((resolve) => {
           pending.push(resolve);
@@ -92,6 +99,7 @@ it('collects only after consent and reports bounded queue overflow without paylo
     type: 'remote-updated',
     state: { diagnosticsEnabled: true, diagnosticsConsent: 'token-a' },
   });
+  await flush(); // Let the startup mark sent on consent settle.
   for (let i = 0; i < 25; i++) capture.emit!({ event: 'console', level: 'warn', argCount: 1 });
   expect(sent).toHaveLength(20);
   pending.shift()!();
@@ -114,6 +122,7 @@ it('does not send an old queued loss report after off/re-enable', async () => {
     type: 'remote-updated',
     state: { diagnosticsEnabled: true, diagnosticsConsent: 'token-a' },
   });
+  await flush(); // Let the startup mark sent on consent settle.
   for (let i = 0; i < 25; i++) capture.emit!({ event: 'console', level: 'warn' });
   listener({ type: 'remote-updated', state: { diagnosticsEnabled: false } });
   listener({
@@ -126,5 +135,26 @@ it('does not send an old queued loss report after off/re-enable', async () => {
   capture.emit!({ event: 'console', level: 'info' });
   expect(sent.at(-1).consent).toBe('token-b');
   pending.at(-1)!();
+  await flush();
+});
+
+it('holds panel startup marks until consent, then sends names and durations only', async () => {
+  const d = await import('../../utils/diagnostics-panel');
+  d.startPanelDiagnostics();
+  await flush();
+  d.markPanelStartup('panel-first-render');
+  d.markPanelStartup('panel-first-render');
+  expect(startup).toHaveLength(0);
+  listener({
+    type: 'remote-updated',
+    state: { diagnosticsEnabled: true, diagnosticsConsent: 'token-a' },
+  });
+  await flush();
+  expect(startup.map((e) => e.mark).sort()).toEqual(['panel-first-render', 'panel-state-received']);
+  for (const event of startup) {
+    expect(Object.keys(event).sort()).toEqual(['delayMs', 'event', 'level', 'mark']);
+    expect(Number.isInteger(event.delayMs)).toBe(true);
+  }
+  for (const done of pending) done();
   await flush();
 });

@@ -172,6 +172,8 @@ export interface ConnectorDeps {
   /** Whether the remote config currently holds this relay URL + local key id. */
   relayMatches: (relayUrl: string, localKeyId: string) => boolean;
   relayConnected: () => boolean;
+  /** A rename succeeded; the relay may be told the new name (old relays ignore it). */
+  onBrowserName?: (browserName: string) => void;
   publish: () => void;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
@@ -241,9 +243,7 @@ export class WorkspaceConnector {
         this.record.localKeyId &&
         this.deps.relayMatches(this.record.relayUrl, this.record.localKeyId)
       )
-        await this.deps
-          .clearRelay(this.record.relayUrl, this.record.localKeyId)
-          .catch(() => {});
+        await this.deps.clearRelay(this.record.relayUrl, this.record.localKeyId).catch(() => {});
       await this.save({
         ...this.record,
         phase: 'failed',
@@ -299,6 +299,24 @@ export class WorkspaceConnector {
       (r.phase === 'connected' || r.phase === 'applying') &&
       this.deps.relayMatches(r.relayUrl, r.localKeyId)
     );
+  }
+
+  /** Trimmed browser name to report to the relay, only for a Workspace-owned relay. */
+  relayBrowserName(): string | undefined {
+    if (!this.ownsRelay()) return undefined;
+    return this.record!.browserName.trim().slice(0, 100) || undefined;
+  }
+
+  /** Rename this browser in Workspace, then tell the relay. */
+  async rename(input: string) {
+    const browserName = input.trim().slice(0, 100);
+    if (!browserName) throw new Error('ui.error.workspaceBrowserNameRequired');
+    const record = this.record;
+    if (!record?.connectionId) return;
+    await this.deps.api.rename(record.connectionId, browserName);
+    if (this.record !== record) return;
+    await this.save({ ...record, browserName });
+    if (this.ownsRelay()) this.deps.onBrowserName?.(browserName);
   }
 
   async setAuth(status: AuthStatus) {
