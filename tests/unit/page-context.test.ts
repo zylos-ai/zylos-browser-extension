@@ -138,6 +138,34 @@ test('restricted pages do not receive an executable context or injected script',
   await expect(readPageContext(id, {}, () => {})).rejects.toMatchObject({ code: 'STALE_CONTEXT' });
 });
 
+test('restricted and navigating pages report distinct reasons', async () => {
+  const get = vi.mocked(chrome.tabs.get as (id: number) => Promise<chrome.tabs.Tab>);
+  get.mockResolvedValue({ ...tab, url: 'https://js.stripe.com/v3/' });
+  const restricted = (await captureCurrentPage(id, 2, 7)).context;
+  expect(restricted.status).toBe('unavailable');
+  expect(restricted.reason).toMatch(
+    /restricted by the site access default rule "Payment providers"/,
+  );
+  expect(restricted.reason).not.toMatch(/navigating/);
+  get.mockResolvedValue({ ...tab, pendingUrl: 'https://example.com/next' });
+  const navigating = (await captureCurrentPage(id, 2, 7)).context;
+  expect(navigating.reason).toMatch(/still navigating/);
+  expect(navigating.reason).not.toMatch(/restricted/);
+});
+
+test('a people search whose query names a payment provider stays readable', async () => {
+  const url = 'https://www.linkedin.com/search/results/people/?keywords=stripe';
+  vi.mocked(chrome.tabs.get as (id: number) => Promise<chrome.tabs.Tab>).mockResolvedValue({
+    ...tab,
+    url,
+  });
+  vi.mocked(chrome.webNavigation.getFrame).mockResolvedValue({ documentId, url } as never);
+  vi.mocked(chrome.scripting.executeScript).mockResolvedValue([
+    { documentId, frameId: 0, result: { ...page(), url } },
+  ] as never);
+  expect((await captureCurrentPage(id, 2, 7)).context).toMatchObject({ status: 'overview' });
+});
+
 test('context expiry and clearing during capture cannot revive a target', async () => {
   vi.useFakeTimers();
   await captureCurrentPage(id, 2, 7);

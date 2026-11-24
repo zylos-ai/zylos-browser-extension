@@ -127,3 +127,70 @@ export async function collectFrames(
   }
   return [...frames.values()];
 }
+
+const FOCUSED_FRAME_ELEMENT = `(() => {
+  let active = document.activeElement;
+  while (active && active.shadowRoot && active.shadowRoot.activeElement)
+    active = active.shadowRoot.activeElement;
+  return active && /^(IFRAME|FRAME)$/.test(active.tagName) ? active : null;
+})()`;
+
+/**
+ * Native text input (Input.insertText) is delivered to the focused document,
+ * not to every frame in the page. Check the top frame and the focus chain down
+ * to the frame that will receive the text, so an unrelated hidden third-party
+ * iframe (for example a Stripe telemetry frame) does not block typing into the
+ * top document, while typing into a restricted iframe is still blocked.
+ * The chain is discovered only through frames that already passed assertFrame.
+ * If focus cannot be resolved, every frame is checked (fail closed).
+ */
+export async function assertInputFrames(
+  send: Send,
+  assertFrame: (frame: Frame) => void,
+  collected?: Frame[],
+) {
+  const frames = collected ?? (await collectFrames(send));
+  const all = () => {
+    for (const frame of frames) assertFrame(frame);
+  };
+  const top = frames.find((frame) => !frame.parentId);
+  if (!top) return all();
+  assertFrame(top);
+  const seen = new Set<string>([top.id]);
+  let current = top;
+  for (let depth = 0; depth < 16; depth++) {
+    let child: Frame | undefined;
+    try {
+      const world = await send(
+        'Page.createIsolatedWorld',
+        { frameId: current.id, worldName: 'coco-focus' },
+        current.sessionId,
+      );
+      if (!world?.executionContextId) return all();
+      const result = await send(
+        'Runtime.evaluate',
+        {
+          expression: FOCUSED_FRAME_ELEMENT,
+          contextId: world.executionContextId,
+          returnByValue: false,
+          objectGroup: 'coco-browser',
+        },
+        current.sessionId,
+      );
+      if (result?.exceptionDetails) return all();
+      const objectId = result?.result?.objectId;
+      if (!objectId) return; // Focus ends in this already checked frame.
+      const { node } = await send('DOM.describeNode', { objectId, depth: 0 }, current.sessionId);
+      const childId = node?.frameId || node?.contentDocument?.frameId;
+      const parentId = current.id;
+      child = frames.find((frame) => frame.id === childId && frame.parentId === parentId);
+    } catch {
+      return all();
+    }
+    if (!child || seen.has(child.id)) return all();
+    seen.add(child.id);
+    assertFrame(child);
+    current = child;
+  }
+  all();
+}

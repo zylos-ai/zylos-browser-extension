@@ -251,6 +251,13 @@ function hostOf(value: string) {
       .toLowerCase() || ''
   );
 }
+// url-regex defaults describe sites and paths, not user-chosen data. Match them
+// against origin + path only, so a query such as ?keywords=stripe on a search
+// page does not deny the page. Query and fragment are dropped before decoding,
+// so an encoded %3F in a path is still screened as path text.
+function withoutQuery(value: string) {
+  return value.replace(/[?#][\s\S]*$/, '');
+}
 export function matchingDefaultRule(
   value: unknown,
   rules: readonly DefaultSiteRule[],
@@ -259,8 +266,11 @@ export function matchingDefaultRule(
   // Chrome canonicalizes controls, backslashes and internationalized hostnames
   // before navigation. Screen both representations before any GET is issued.
   const variants = new Set(decodeVariants(value));
+  const paths = new Set(decodeVariants(withoutQuery(value)));
   try {
-    for (const decoded of decodeVariants(new URL(value).href)) variants.add(decoded);
+    const url = new URL(value);
+    for (const decoded of decodeVariants(url.href)) variants.add(decoded);
+    for (const decoded of decodeVariants(url.origin + url.pathname)) paths.add(decoded);
   } catch {
     // Invalid URLs still receive the existing raw-string screening.
   }
@@ -270,7 +280,9 @@ export function matchingDefaultRule(
     if (!rule.enabled) continue;
     const regex = new RegExp(rule.pattern, 'i');
     if (
-      [...variants].some((url) => regex.test(rule.kind === 'host-regex' ? hostOf(url) : url)) &&
+      (rule.kind === 'host-regex'
+        ? [...variants].some((url) => regex.test(hostOf(url)))
+        : [...paths].some((url) => regex.test(url))) &&
       (!found || rank[rule.mode] > rank[found.mode])
     )
       found = rule;

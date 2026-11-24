@@ -1613,9 +1613,13 @@ test('scrolled click hit tests use document coordinates while native input stays
   }
 });
 
-test.each(['denied', 'read-only'])(
-  'native text insertion rejects a child becoming %s after the last PageActions check',
-  async (mode) => {
+test.each([
+  ['denied', true],
+  ['read-only', true],
+  ['denied', false],
+])(
+  'native text insertion rechecks a child becoming %s after the last PageActions check (focused: %s)',
+  async (mode, focused) => {
     const s = await observationSetup();
     const { initializeSiteAccess, grantSiteAccess } = await import('../../utils/site-access');
     const { PageActions } = await import('../../utils/automation/page-actions');
@@ -1663,10 +1667,29 @@ test.each(['denied', 'read-only'])(
           },
         };
       if (method === 'Runtime.callFunctionOn') return { result: { value: true } };
-      if (method === 'Input.insertText') inserts++;
+      if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 };
+      // Focus moves into the new child only in the focused variant.
+      if (method === 'Runtime.evaluate' && params?.contextId === 7)
+        return { result: restricted && focused ? { objectId: 'frame-owner' } : {} };
+      if (method === 'DOM.describeNode' && params?.objectId === 'frame-owner')
+        return { node: { nodeName: 'IFRAME', frameId: 'child' } };
+      if (method === 'Input.insertText') {
+        inserts++;
+        return {};
+      }
       return originalSend(target, method, params);
     };
     try {
+      if (!focused) {
+        // An unfocused (e.g. hidden third-party) restricted frame does not receive text.
+        await s.executor.execute(
+          { op: 'fill', ref: '@12345678-e1', text: 'private draft' },
+          Date.now() + 10000,
+        );
+        assert.equal(restricted, true);
+        assert.equal(inserts, 1);
+        return;
+      }
       await assert.rejects(
         s.executor.execute(
           { op: 'fill', ref: '@12345678-e1', text: 'private draft' },
