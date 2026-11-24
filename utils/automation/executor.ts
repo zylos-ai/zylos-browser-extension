@@ -106,6 +106,8 @@ type RecoveryLease = ControlRecovery & {
   consent: number;
   attempted: boolean;
   terminalOutcome?: RecoveryOutcome;
+  // Suspended because a foreign extension frame refused the first attach.
+  foreign?: true;
   timer: ReturnType<typeof setTimeout>;
   document?: PageDocument;
   inspectionWork?: Promise<RecoveryFrameInspection>;
@@ -198,6 +200,7 @@ function suspendControl(refused?: { id: number; url: string; document?: PageDocu
     tabId: target.id,
     consent: consentRevision,
     attempted: false,
+    ...(refused ? { foreign: true as const } : {}),
     timer: undefined as unknown as ReturnType<typeof setTimeout>,
     ...(recoveryHooks?.frameSelectionEnabled?.() &&
     document?.tabId === target.id &&
@@ -222,6 +225,52 @@ function suspendControl(refused?: { id: number; url: string; document?: PageDocu
   return true;
 }
 export const controlLossRevision = () => lossRevision;
+
+/**
+ * Why control last ended, reported to the agent with `agent-turn-end`.
+ * `user_stop` is reported by the panel itself; the executor never infers it.
+ */
+export type ControlEndReason =
+  | 'target_closed'
+  | 'canceled_by_user'
+  | 'recovery_expired'
+  | 'recovery_failed'
+  | 'foreign_frame'
+  | 'tab_closed'
+  | 'tab_moved'
+  | 'other';
+let endReason: ControlEndReason | undefined;
+let detachReason: 'target_closed' | 'canceled_by_user' | undefined;
+/** The cause of the most recent involuntary release, if any. */
+export const lastControlEndReason = () => endReason;
+// Releases that hand still-open task tabs back instead of closing them. Only a
+// normal agent finish (completeTask, which keeps its own tabs) and a replaced
+// task close temporary pages; losing control must never destroy the user's page.
+const KEEP_TABS_ON_RELEASE: readonly DiagnosticReason[] = [
+  'debugger_detach',
+  'target_unavailable',
+  'target_refresh_failed',
+  'tab_scope_changed',
+  'tab_lost',
+  'window_closed',
+  'pause_timeout',
+  'panel_stop',
+  'command_stop',
+  'consent_changed',
+  'config_disabled',
+];
+function controlEndReason(
+  reason: DiagnosticReason,
+  suspended: RecoveryLease | undefined,
+): ControlEndReason {
+  if (suspended?.foreign) return 'foreign_frame';
+  if (suspended)
+    return suspended.terminalOutcome === 'expired' ? 'recovery_expired' : 'recovery_failed';
+  if (reason === 'debugger_detach') return detachReason ?? 'target_closed';
+  if (reason === 'tab_lost' || reason === 'window_closed') return 'tab_closed';
+  if (reason === 'tab_scope_changed') return 'tab_moved';
+  return 'other';
+}
 const refs = new Map<string, ElementRef>();
 const networkActivity = new NetworkActivity();
 let pendingScroll: Target | undefined;
@@ -546,6 +595,10 @@ export async function release(cleanup = true, strict = false, reason: Diagnostic
   clearTimeout(pauseTimer);
 
   const previous = control;
+  if (previous) {
+    endReason = controlEndReason(reason, suspended);
+    detachReason = undefined;
+  }
   if (
     previous &&
     [
@@ -577,7 +630,11 @@ export async function release(cleanup = true, strict = false, reason: Diagnostic
   try {
     await serial(() => detachCurrent(strict));
     // Closing temporary tabs / ungrouping retained pages removes an empty group.
-    if (previous && cleanup) await cleanupTask(previous.sessionId).catch(() => {});
+    if (previous && cleanup)
+      await cleanupTask(
+        previous.sessionId,
+        KEEP_TABS_ON_RELEASE.includes(reason) ? previous.tabIds : [],
+      ).catch(() => {});
   } finally {
     if (!control) await chrome.action.setBadgeText({ text: '' });
     publish();
@@ -845,6 +902,7 @@ export function initializeExecutor() {
 
     invalidate('debugger_detach');
     publish();
+    detachReason = reason === 'canceled_by_user' ? reason : 'target_closed';
     void release(true, false, 'debugger_detach'); // Closing the task tab / Chrome Cancel / DevTools ends control.
   });
   chrome.debugger.onEvent.addListener((source, method, params) => {

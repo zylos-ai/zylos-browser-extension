@@ -71,6 +71,7 @@ import {
 import { captureCurrentPage, clearPageContexts, forgetPageContext } from '../../utils/page-context';
 import {
   completeTask,
+  lastControlEndReason,
   createTask,
   abortControlRecovery,
   configureControlRecovery,
@@ -142,7 +143,11 @@ import {
 } from '../../utils/workspace/config';
 import { TokenStore, chromeLocalStorage } from '../../utils/workspace/token-store';
 import { WorkspaceApi } from '../../utils/workspace/api';
-import { WorkspaceConnector, queuedRelayClear, queuedRelayWrite } from '../../utils/workspace/connector';
+import {
+  WorkspaceConnector,
+  queuedRelayClear,
+  queuedRelayWrite,
+} from '../../utils/workspace/connector';
 import {
   signIn as workspaceSignIn,
   signOut as workspaceSignOut,
@@ -866,7 +871,8 @@ export function startRemoteBackground() {
         taskId,
         status,
         text,
-        ...(interruption ? { interruption } : {}),
+        // Top-level so a strict relay `interruption` receipt stays valid.
+        ...(interruption ? { interruption, reason: lastControlEndReason() ?? 'other' } : {}),
       });
       endDiagnosticTask(status);
       // BrowserLoop releases ownership after this durable completion callback.
@@ -912,6 +918,7 @@ export function startRemoteBackground() {
         taskId,
         status,
         ...(interrupt ? { interrupt: true } : {}),
+        ...(status === 'stopped' ? { reason: 'user_stop' } : {}),
         ...(removalInterruption ? { interruption: removalInterruption, text } : {}),
       });
       if (removalInterruption)

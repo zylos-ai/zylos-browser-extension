@@ -6,6 +6,7 @@ const executor = vi.hoisted(() => ({
   release: vi.fn(async () => {}),
   abandonTarget: vi.fn(),
   completeTask: vi.fn(async () => {}),
+  lastControlEndReason: vi.fn(() => 'recovery_failed'),
   currentControl: vi.fn(
     (): null | {
       sessionId: string;
@@ -927,6 +928,7 @@ describe('decision transport background', () => {
     expect(ws.last('agent-turn-end')).toMatchObject({
       taskId: request.taskId,
       status: 'stopped',
+      reason: 'user_stop',
       interruption: { recoveryRemoval: { requested: 1, outcome: 'unknown' } },
       text: expect.any(String),
     });
@@ -976,6 +978,8 @@ describe('decision transport background', () => {
     expect(ws.last('agent-turn-end')).toMatchObject({
       taskId: request.taskId,
       status: 'interrupted',
+      // The control-end cause is top-level; the strict relay receipt stays unchanged.
+      reason: 'recovery_failed',
       interruption: {
         reason: 'CONTROL_LOST',
         resume: 'new-user-message-required',

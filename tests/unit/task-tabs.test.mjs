@@ -336,8 +336,9 @@ test('handoff keeps the group; completion removes it without a terminal-status r
       });
     assert.equal(s.groups.has(task.groupId), false);
     assert.equal(s.executor.currentControl(), null);
-    assert.equal(s.tabs.has(task.tabId), outcome === 'deliverable');
-    if (outcome === 'deliverable') assert.equal(s.tabs.get(task.tabId).groupId, -1);
+    // A user Stop hands the page back like a deliverable; only finalize closes temporaries.
+    assert.equal(s.tabs.has(task.tabId), outcome !== 'temporary');
+    if (outcome !== 'temporary') assert.equal(s.tabs.get(task.tabId).groupId, -1);
     assert.ok(s.tabs.has(1) && s.tabs.has(2));
     assert.equal(
       s.calls.some((c) => c.method === 'tabGroups.update' && /已停止|已完成/.test(c.title)),
@@ -678,4 +679,37 @@ test('borrowed selection refuses navigation and never falls back to another acti
   assert.equal(s.executor.currentControl(), null);
   assert.equal(s.tabs.has(2), true);
   await s.executor.release();
+});
+
+test.each(['target_closed', 'canceled_by_user'])(
+  'involuntary debugger loss (%s) hands the open task tab back instead of closing it',
+  async (reason) => {
+    const s = await fixture();
+    await s.start();
+    const task = s.executor.currentControl();
+    await s.command({ op: 'snapshot' }).catch(() => {});
+    assert.ok(s.attached.has(task.tabId));
+    chrome.debugger.onDetach.emit({ tabId: task.tabId }, reason);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(s.executor.currentControl(), null);
+    assert.ok(s.tabs.has(task.tabId), 'still-open task tab must survive control loss');
+    assert.equal(s.tabs.get(task.tabId).groupId, -1);
+    assert.equal(s.groups.has(task.groupId), false);
+    assert.equal(s.executor.lastControlEndReason(), reason);
+  },
+);
+
+test('closing the task tab reports tab_closed; a replaced task still closes temporaries', async () => {
+  const s = await fixture();
+  await s.start();
+  const first = s.executor.currentControl();
+  chrome.tabs.onRemoved.emit(first.tabId);
+  s.tabs.delete(first.tabId);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(s.executor.currentControl(), null);
+  assert.equal(s.executor.lastControlEndReason(), 'tab_closed');
+  await s.start();
+  const second = s.executor.currentControl();
+  await s.start(); // A new task replacing the old one is not a control loss.
+  assert.equal(s.tabs.has(second.tabId), false);
 });
