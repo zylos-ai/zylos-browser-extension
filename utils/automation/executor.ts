@@ -40,7 +40,7 @@ import { screenshotAttachment } from '../attachments';
 import { translate, workerLocale } from '../i18n';
 import { recordDiagnostic, type DiagnosticReason } from '../diagnostics';
 import { safeError, type DiagnosticEvent } from '../diagnostics-schema';
-import { markInputRecovery } from './input-checkpoint';
+import { markInputRecovery, markRecoveredWithoutInput } from './input-checkpoint';
 type DiagnosticCode = NonNullable<DiagnosticEvent['code']>;
 import {
   CONTROL_RECOVERY_WINDOW_MS,
@@ -1784,6 +1784,22 @@ export async function execute(
     const recovered = await autoRecoverControl();
     validate();
     if (!recovered?.recovered) fail('CONTROL_SUSPENDED');
+    if (recovered.pageMayHaveChanged)
+      // Another extension's frame interrupted (#30): do not type into a page
+      // that may have lost its dialog; hand back fresh evidence instead.
+      return markRecoveredWithoutInput(
+        { inputSent: false, pageMayHaveChanged: true },
+        {
+          scope: session,
+          beforeLoss,
+          afterLoss: lossRevision,
+          recovered: recovered as {
+            observation: unknown;
+            target: unknown;
+            pageMayHaveChanged?: true;
+          },
+        },
+      );
     restoreRecoveredRefs([ref]);
   }
   await assertPageDocument(document);

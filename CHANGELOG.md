@@ -19,7 +19,9 @@
 - When another extension's frame (for example a password manager's inline
   menu) makes Chrome drop control, the Agent is now told after recovery that the
   page may have changed (a dialog may have closed), and remaining batched
-  actions wait for a fresh decision instead of running on the old plan (#30).
+  actions wait for a fresh decision instead of running on the old plan. If
+  this happens while focusing a field for `fill`/`type`, the text is not
+  typed (#30).
 - Readable messages for the relay's `AGENT_SESSION_NOT_RUNNING` and
   `SESSION_GROUP_UNMAPPED` codes, in task notices and message delivery errors.
 

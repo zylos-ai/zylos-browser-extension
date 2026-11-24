@@ -2152,6 +2152,20 @@ describe('decision transport background', () => {
     });
   });
 
+  it.each([
+    ['AGENT_SESSION_NOT_RUNNING', 'ui.error.agentSessionNotRunning'],
+    ['SESSION_GROUP_UNMAPPED', 'ui.error.sessionGroupUnmapped'],
+  ])('maps relay delivery code %s to a readable error', async (code, error) => {
+    const ws = await bootConnected();
+    const request = await begin(ws);
+    ws.receive({ type: 'agent-status', requestId: request.id, state: 'failed', code });
+    await flush();
+    expect((storage.remoteChatLog as ChatEntry[])[0]).toMatchObject({
+      delivery: 'failed',
+      deliveryError: error,
+    });
+  });
+
   it('disconnect ends the turn, reconnect negotiates again, and a replaced connection stays closed', async () => {
     const ws = await bootConnected();
     await begin(ws);

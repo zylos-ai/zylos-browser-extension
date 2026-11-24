@@ -13,7 +13,7 @@ import {
 } from './automation/executor';
 import type { LoopAction, RoundResult } from './browser-loop';
 import { ControlLoss, ControlSuspended, type ControlInterruption } from './control-loss';
-import { consumeInputRecovery } from './automation/input-checkpoint';
+import { consumeInputRecovery, consumeRecoveredWithoutInput } from './automation/input-checkpoint';
 
 type Call = (
   method: string,
@@ -64,6 +64,19 @@ export async function runBrowserRound(
     const value = await (timeoutMs === undefined
       ? call(method, params, id)
       : call(method, params, id, timeoutMs));
+    const skipped = consumeRecoveredWithoutInput(value);
+    if (
+      index >= 0 &&
+      ['fill', 'type'].includes(method) &&
+      skipped &&
+      matchesCurrentControlScope(skipped.scope) &&
+      skipped.beforeLoss === startLoss &&
+      skipped.afterLoss === controlLossRevision()
+    ) {
+      results[index]!.outcome = 'not-executed';
+      startLoss = skipped.afterLoss;
+      throw new RecoveredPageChanged(skipped.recovered);
+    }
     const recoveryProof = consumeInputRecovery(value);
     if (
       index >= 0 &&
@@ -162,6 +175,10 @@ export async function runBrowserRound(
       throw Object.assign(new Error('Control lost'), { code: 'STOPPED' });
     return result;
   } catch (error) {
+    if (error instanceof RecoveredPageChanged) {
+      assertActive();
+      return recoveredRound(error.recovered, results);
+    }
     const suspended = currentControlRecovery();
     if (suspended && !actions.some((action) => action.method === 'recover-control')) {
       const resumed = await resumeAfterAutomaticRecovery(
@@ -200,6 +217,71 @@ const refsIn = (actions: LoopAction[]) =>
  * never started continue only when nothing before them is uncertain; an uncertain
  * action is reported for the Agent to verify and is never repeated here.
  */
+class RecoveredPageChanged extends Error {
+  constructor(
+    readonly recovered: { observation: unknown; target: unknown; pageMayHaveChanged?: true },
+  ) {
+    super('Recovered; page may have changed');
+  }
+}
+
+/** Fresh evidence after an automatic recovery that does not continue the batch. */
+function recoveredRound(
+  recovered: { observation: unknown; target: unknown; pageMayHaveChanged?: true },
+  results: ControlInterruption['results'],
+): RoundResult {
+  const done = results
+    .filter((r) => r.outcome === 'completed')
+    .map((r) => ({ method: r.method, status: 'success' }));
+  const uncertain = results.filter((r) => r.outcome === 'uncertain');
+  const remaining = results.filter((r) => r.outcome === 'not-executed');
+  const automatic = {
+    method: 'recover-control',
+    status: 'success',
+    automatic: true,
+    replayed: false,
+    note: recovered.pageMayHaveChanged
+      ? `Browser control was briefly interrupted and reattached by the extension. ${PAGE_STATE_NOTE}`
+      : 'Browser control was briefly interrupted and reattached by the extension.',
+  };
+  return {
+    mode: 'operating',
+    observation: {
+      page: recovered.observation,
+      target: recovered.target,
+      recovery: {
+        recovered: true,
+        automatic: true,
+        replayed: false,
+        ...(recovered.pageMayHaveChanged ? { pageMayHaveChanged: true } : {}),
+      },
+    },
+    results: [
+      ...done,
+      ...uncertain.map((r) => ({
+        method: r.method,
+        status: 'uncertain',
+        note: 'Control was interrupted while this action ran. Verify the page before repeating it.',
+      })),
+      automatic,
+      ...(remaining.length
+        ? [
+            {
+              status: 'skipped',
+              count: remaining.length,
+              reason: uncertain.length
+                ? 'Remaining actions need a fresh decision after the uncertain action.'
+                : recovered.pageMayHaveChanged
+                  ? 'The page may have changed during the interruption. Remaining actions need a fresh decision.'
+                  : 'New owner input arrived. Remaining actions need a fresh decision.',
+            },
+          ]
+        : []),
+    ],
+    failed: uncertain.length > 0,
+  };
+}
+
 async function resumeAfterAutomaticRecovery(
   actions: LoopAction[],
   results: ControlInterruption['results'],
@@ -253,42 +335,7 @@ async function resumeAfterAutomaticRecovery(
       throw error;
     }
   }
-  return {
-    mode: 'operating',
-    observation: {
-      page: recovered.observation,
-      target: recovered.target,
-      recovery: {
-        recovered: true,
-        automatic: true,
-        replayed: false,
-        ...(recovered.pageMayHaveChanged ? { pageMayHaveChanged: true } : {}),
-      },
-    },
-    results: [
-      ...done,
-      ...uncertain.map((r) => ({
-        method: r.method,
-        status: 'uncertain',
-        note: 'Control was interrupted while this action ran. Verify the page before repeating it.',
-      })),
-      automatic,
-      ...(remaining.length
-        ? [
-            {
-              status: 'skipped',
-              count: remaining.length,
-              reason: uncertain.length
-                ? 'Remaining actions need a fresh decision after the uncertain action.'
-                : recovered.pageMayHaveChanged
-                  ? 'The page may have changed during the interruption. Remaining actions need a fresh decision.'
-                  : 'New owner input arrived. Remaining actions need a fresh decision.',
-            },
-          ]
-        : []),
-    ],
-    failed: uncertain.length > 0,
-  };
+  return recoveredRound(recovered, results);
 }
 
 async function executeRound(
@@ -370,6 +417,7 @@ async function executeRound(
       }
     } catch (error) {
       assertActive();
+      if (error instanceof RecoveredPageChanged) throw error;
       if (['STOPPED', 'TASK_TAB_UNAVAILABLE'].includes(errorInfo(error).code)) throw error;
       failed = true;
       results.push({

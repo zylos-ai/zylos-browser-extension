@@ -225,24 +225,16 @@ export function recordDiagnostic(
 // Startup timing survives until diagnostics are enabled in the same worker, so a
 // slow first load can still be exported after the user turns diagnostics on.
 const STARTUP_MARK_CAP = 32;
-let startupMarks: DiagnosticMetadata[] = [];
-export function recordStartupMark(
-  mark: StartupMark,
-  elapsedMs: number,
-  source: 'background' | 'sidepanel' = 'background',
-) {
+const startupMarks: DiagnosticMetadata[] = [];
+export function recordStartupMark(mark: StartupMark, elapsedMs: number) {
   const metadata: DiagnosticMetadata = {
-    source,
+    source: 'background',
     level: 'info',
     mark,
     delayMs: Math.max(0, Math.min(Math.round(elapsedMs), Number.MAX_SAFE_INTEGER)),
   };
   if (startupMarks.length < STARTUP_MARK_CAP) startupMarks.push(metadata);
   recordLifecycle('startup-mark', metadata);
-}
-export const startupTimings = () => startupMarks.map((m) => ({ ...m }));
-export function resetStartupMarks() {
-  startupMarks = [];
 }
 export function recordLifecycle(
   event: DiagnosticEvent['event'],

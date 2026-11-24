@@ -179,6 +179,16 @@ export interface ConnectorDeps {
   now?: () => number;
 }
 
+/**
+ * A user label, sent to the relay as untrusted display text: control characters
+ * become spaces and truncation never splits a surrogate pair.
+ */
+export function cleanBrowserName(input: string) {
+  // eslint-disable-next-line no-control-regex
+  const flat = input.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim();
+  return Array.from(flat).slice(0, 100).join('').trim();
+}
+
 export class WorkspaceConnector {
   private record: ConnectionRecord | undefined;
   private auth: AuthStatus = 'signed-out';
@@ -304,12 +314,12 @@ export class WorkspaceConnector {
   /** Trimmed browser name to report to the relay, only for a Workspace-owned relay. */
   relayBrowserName(): string | undefined {
     if (!this.ownsRelay()) return undefined;
-    return this.record!.browserName.trim().slice(0, 100) || undefined;
+    return cleanBrowserName(this.record!.browserName) || undefined;
   }
 
   /** Rename this browser in Workspace, then tell the relay. */
   async rename(input: string) {
-    const browserName = input.trim().slice(0, 100);
+    const browserName = cleanBrowserName(input);
     if (!browserName) throw new Error('ui.error.workspaceBrowserNameRequired');
     const record = this.record;
     if (!record?.connectionId) return;
