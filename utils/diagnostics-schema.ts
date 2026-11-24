@@ -30,6 +30,7 @@ export const diagnosticEventName = z.enum([
   'storage-error',
   'worker-start',
   'capture-overflow',
+  'startup-mark',
 ]);
 export const diagnosticReason = z.enum([
   'consent_changed',
@@ -156,6 +157,20 @@ export const diagnosticErrorKind = z.enum([
   'AggregateError',
   'Other',
 ]);
+// Fixed milestone names only: startup timing carries durations, never content.
+export const startupMark = z.enum([
+  'diagnostics-ready',
+  'tasks-recovered',
+  'storage-read',
+  'config-applied',
+  'workspace-restored',
+  'boot-complete',
+  'transport-open',
+  'transport-ready',
+  'panel-first-render',
+  'panel-state-received',
+]);
+export type StartupMark = z.infer<typeof startupMark>;
 const integer = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 export const diagnosticMetadata = z
   .object({
@@ -182,6 +197,8 @@ export const diagnosticMetadata = z
       .enum(['disconnected', 'reconnecting', 'restored', 'failed', 'cleared', 'scheduled'])
       .optional(),
     visibility: z.enum(['visible', 'hidden']).optional(),
+    // Startup timing milestone; paired with delayMs (elapsed since worker or panel start).
+    mark: startupMark.optional(),
     resumeCategory: z
       .enum([
         'state_missing',
@@ -217,7 +234,6 @@ export const panelDiagnosticSchema = diagnosticMetadata
     generation: true,
     scheduledAt: true,
     firedAt: true,
-    delayMs: true,
     inboundAgeMs: true,
     outboundAgeMs: true,
     workerUptimeMs: true,
@@ -232,6 +248,7 @@ export const panelDiagnosticSchema = diagnosticMetadata
       'console',
       'capture-overflow',
       'panel-visibility',
+      'startup-mark',
     ]),
   })
   .strict();

@@ -260,3 +260,49 @@ it('marks a corrupt or older persisted ring as incomplete rather than a fresh ca
   );
   expect(JSON.stringify(result)).not.toContain('PRIVATE');
 });
+
+it('keeps startup timing marks until diagnostics are enabled, carrying only names and durations', async () => {
+  const d = await import('../../utils/diagnostics');
+  await d.initializeDiagnostics();
+  d.recordStartupMark('diagnostics-ready', 12.4);
+  d.recordStartupMark('boot-complete', 61_000);
+  expect((await d.getDiagnostics({})).events).toEqual([]);
+  await d.setDiagnosticsEnabled(true);
+  d.recordStartupMark('transport-ready', 61_500);
+  const marks = (await d.getDiagnostics({})).events.filter(
+    (e: { event: string }) => e.event === 'startup-mark',
+  );
+  expect(marks.map((e: { mark?: string; delayMs?: number }) => [e.mark, e.delayMs])).toEqual([
+    ['diagnostics-ready', 12],
+    ['boot-complete', 61_000],
+    ['transport-ready', 61_500],
+  ]);
+  const allowed = ['at', 'delayMs', 'event', 'level', 'mark', 'op', 'seq', 'source', 'task'];
+  for (const mark of marks)
+    expect(Object.keys(mark).filter((k) => !allowed.includes(k))).toEqual([]);
+});
+
+it('accepts a panel first-render mark but rejects unknown mark names', async () => {
+  const d = await import('../../utils/diagnostics');
+  await d.initializeDiagnostics();
+  await d.setDiagnosticsEnabled(true);
+  const token = d.diagnosticsConsent();
+  expect(
+    d.acceptPanelDiagnostic(token, {
+      event: 'startup-mark',
+      level: 'info',
+      mark: 'panel-first-render',
+      delayMs: 340,
+    }),
+  ).toBe(true);
+  expect(
+    d.acceptPanelDiagnostic(token, { event: 'startup-mark', level: 'info', mark: 'https://x' }),
+  ).toBe(false);
+  const events = (await d.getDiagnostics({})).events;
+  expect(events.at(-1)).toMatchObject({
+    event: 'startup-mark',
+    source: 'sidepanel',
+    mark: 'panel-first-render',
+    delayMs: 340,
+  });
+});

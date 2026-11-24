@@ -41,6 +41,10 @@ Remote 验证 Key 和浏览器身份，返回：
 但不能追加指令；更新后的输入框始终显示发送箭头，停止操作在顶部和预览窗口。
 `hello.version` 是现有实现标识，`agent-request.version` 才是本文的消息结构版本。
 
+通过 OpenMax Workspace 建立的连接，`hello` 可附加 `browserName`（用户自定义的浏览器名称，
+去掉控制字符、最多 100 个字符）；改名成功后插件发送 `{type:"browser-name",browserName}`。
+Remote 应将其视为不可信的显示文本；旧版 Remote 忽略这两者。
+
 ### 临时断线恢复：`task-resume-v1`
 
 双方声明此能力后，仅在同一个插件 background 实例和同一个 Remote 进程仍存活时恢复。

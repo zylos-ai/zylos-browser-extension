@@ -13,6 +13,27 @@ function flushSuppressed() {
   suppressed = 0;
   reportPanelDiagnostic({ event: 'capture-overflow', level: 'warn', count });
 }
+// Panel startup marks wait for consent, which arrives with the first state.
+let startupPending: PanelDiagnostic[] = [];
+const startupSent = new Set<string>();
+export function markPanelStartup(mark: 'panel-first-render' | 'panel-state-received') {
+  if (startupSent.has(mark)) return;
+  startupSent.add(mark);
+  const elapsed = typeof performance !== 'undefined' ? performance.now() : 0;
+  startupPending.push({
+    event: 'startup-mark',
+    level: 'info',
+    mark,
+    delayMs: Math.max(0, Math.round(elapsed)),
+  });
+  flushStartupMarks();
+}
+function flushStartupMarks() {
+  if (!consent) return;
+  const marks = startupPending;
+  startupPending = [];
+  for (const mark of marks) reportPanelDiagnostic(mark);
+}
 export function reportPanelDiagnostic(event: PanelDiagnostic) {
   if (!consent) return;
   if (pending >= 20) {
@@ -130,16 +151,19 @@ export function startPanelDiagnostics() {
     const changed = consent !== next;
     consent = next;
     if (changed && consent) reportVisibility();
+    flushStartupMarks();
   };
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type === 'remote-updated' && message.state) {
       receivedUpdate = true;
+      markPanelStartup('panel-state-received');
       update(message.state);
     }
   });
   void chrome.runtime
     .sendMessage({ type: 'remote-state' })
     .then((reply) => {
+      if (reply?.ok && reply.value) markPanelStartup('panel-state-received');
       if (!receivedUpdate && reply?.ok && reply.value) update(reply.value);
     })
     .catch(() => {});

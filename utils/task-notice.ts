@@ -25,6 +25,8 @@ const reasonKeys: Record<string, TranslationKey> = {
   SEND_FAILED: 'sendFailed',
   AGENT_UNAVAILABLE: 'agentUnavailable',
   AGENT_STOPPING: 'taskAgentStopping',
+  AGENT_SESSION_NOT_RUNNING: 'agentSessionNotRunning',
+  SESSION_GROUP_UNMAPPED: 'sessionGroupUnmapped',
   TURN_BUSY: 'chatBusy',
   DECISION_BUSY: 'chatBusy',
   C4_DELIVERY_FAILED: 'chatDeliveryFailed',

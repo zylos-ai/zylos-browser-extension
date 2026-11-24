@@ -670,6 +670,53 @@ test('recovery blocks automatic unpark, uses exact original tab once and returns
   assert.equal(s.executor.currentControlRecovery(), undefined);
   assert.equal(s.executor.currentControl(), null);
 });
+test('a detach while another extension frame is embedded suspends and reports page state may have changed', async () => {
+  const s = await recoverySetup();
+  chrome.webNavigation = {
+    ...chrome.webNavigation,
+    getAllFrames: async () => [
+      { frameId: 0, url: s.tab.url },
+      { frameId: 7, url: `chrome-extension://${'c'.repeat(32)}/inline/menu.html` },
+    ],
+  };
+  s.detach();
+  const recovery = s.executor.currentControlRecovery();
+  assert.ok(recovery, 'control is suspended, not released');
+  // The relay contract keeps cause 'unknown'; the foreign frame is extension-internal.
+  assert.equal(recovery.cause, 'unknown');
+  assert.equal('foreignFrame' in recovery, false);
+  assert.ok(s.executor.currentControl());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const result = await s.executor.execute(
+    { op: 'recover-control', recoveryId: recovery.recoveryId },
+    Infinity,
+  );
+  assert.equal(result.recovered, true);
+  assert.equal(result.pageMayHaveChanged, true);
+  await s.executor.release();
+});
+
+test('our own extension frame does not mark the page as changed by another extension', async () => {
+  const s = await recoverySetup();
+  chrome.webNavigation = {
+    ...chrome.webNavigation,
+    getAllFrames: async () => [
+      { frameId: 0, url: s.tab.url },
+      { frameId: 3, url: `chrome-extension://${chrome.runtime.id}/overlay.html` },
+    ],
+  };
+  s.detach();
+  const recovery = s.executor.currentControlRecovery();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const result = await s.executor.execute(
+    { op: 'recover-control', recoveryId: recovery.recoveryId },
+    Infinity,
+  );
+  assert.equal(result.recovered, true);
+  assert.equal(result.pageMayHaveChanged, undefined);
+  await s.executor.release();
+});
+
 async function automaticSetup() {
   const s = await recoverySetup();
   s.executor.configureControlRecovery({
@@ -853,6 +900,42 @@ test.each([
     }
   },
 );
+
+test('a foreign-frame detach during the fill focus step recovers without typing (#30)', async () => {
+  const s = await automaticRemovalSetup();
+  await s.executor.recoverControl(s.executor.currentControlRecovery().recoveryId);
+  const snapshot = await s.executor.execute({ op: 'snapshot' }, Infinity);
+  const ref = snapshot.text.match(/@[a-f0-9]{8}-e\d+/)[0];
+  const { PageActions } = await import('../../utils/automation/page-actions');
+  const { consumeRecoveredWithoutInput, consumeInputRecovery } =
+    await import('../../utils/automation/input-checkpoint');
+  chrome.webNavigation.getAllFrames = async () => [
+    { frameId: 0, url: s.tab.url },
+    { frameId: 7, url: `chrome-extension://${'c'.repeat(32)}/inline/menu.html` },
+  ];
+  let inserted = 0;
+  const prepare = vi
+    .spyOn(PageActions.prototype, 'prepareInput')
+    .mockImplementation(async function () {
+      this.io.onInputPrepared?.({ value: '', selectionStart: 0, selectionEnd: 0 });
+      s.detach();
+    });
+  const commit = vi.spyOn(PageActions.prototype, 'commitInput').mockImplementation(async () => {
+    inserted++;
+    return { done: true };
+  });
+  try {
+    const result = await s.executor.execute({ op: 'fill', ref, text: 'fixture' }, Infinity);
+    assert.equal(inserted, 0, 'no text is typed into a page that may have changed');
+    assert.deepEqual(result, { inputSent: false, pageMayHaveChanged: true });
+    assert.equal(consumeInputRecovery(result), undefined);
+    assert.equal(consumeRecoveredWithoutInput(result).recovered.pageMayHaveChanged, true);
+  } finally {
+    prepare.mockRestore();
+    commit.mockRestore();
+    await s.executor.release(false);
+  }
+});
 
 test('automatic reattachment runs once per detach outside the Agent budget and restores its own refs', async () => {
   const s = await automaticSetup();
@@ -1951,6 +2034,8 @@ test('a reattachment without selection refused by a foreign frame re-arms the le
   ]);
   assert.equal(result.recovered, true);
   assert.deepEqual(result.removal, { requested: 1, removed: 1, outcome: 'completed' });
+  // The refusal itself proves a foreign frame was embedded.
+  assert.equal(result.pageMayHaveChanged, true);
   await s.executor.release(false);
 });
 

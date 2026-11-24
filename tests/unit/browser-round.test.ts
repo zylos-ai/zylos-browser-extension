@@ -11,12 +11,16 @@ const executor = vi.hoisted(() => ({
   currentControlRecovery: vi.fn(),
   autoRecoverControl: vi.fn(),
   restoreRecoveredRefs: vi.fn(),
+  PAGE_STATE_NOTE: 'PAGE MAY HAVE CHANGED',
 }));
 vi.mock('../../utils/automation/executor', () => executor);
 import { runBrowserRound } from '../../utils/browser-round';
 import { BrowserLoop, type AgentRequest } from '../../utils/browser-loop';
 import { ControlSuspended } from '../../utils/control-loss';
-import { markInputRecovery } from '../../utils/automation/input-checkpoint';
+import {
+  markInputRecovery,
+  markRecoveredWithoutInput,
+} from '../../utils/automation/input-checkpoint';
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -682,6 +686,96 @@ describe('automatic recovery inside a batch', () => {
       expect.objectContaining({ method: 'fill', status: 'uncertain' }),
       expect.objectContaining({ method: 'recover-control', automatic: true }),
       expect.objectContaining({ status: 'skipped', count: 1 }),
+    ]);
+  });
+
+  it('a foreign-frame recovery during a fill focus step sends no text and stops the batch (#30)', async () => {
+    const scope = { sessionId: 'task', tabId: 1, tabIds: [1] };
+    executor.currentControl.mockImplementation(() => ({ ...scope, tabIds: [1] }));
+    executor.matchesCurrentControlScope.mockImplementation((candidate) => candidate === scope);
+    const browser = vi.fn(async (method: string) => {
+      if (method === 'fill') {
+        executor.controlLossRevision.mockReturnValue(1);
+        return markRecoveredWithoutInput(
+          { inputSent: false, pageMayHaveChanged: true },
+          {
+            scope,
+            beforeLoss: 0,
+            afterLoss: 1,
+            recovered: { observation: { text: 'fresh' }, target: {}, pageMayHaveChanged: true },
+          },
+        );
+      }
+      return {};
+    });
+    const result = await runBrowserRound(
+      [
+        { method: 'fill', params: { ref: '@aaaaaaaa-e1', text: 'secret' } },
+        { method: 'click', params: { ref: '@aaaaaaaa-e2' } },
+      ],
+      browser,
+      () => {},
+      'req',
+    );
+    expect(browser.mock.calls.map(([m]) => m)).toEqual(['fill']);
+    expect(executor.restoreRecoveredRefs).not.toHaveBeenCalled();
+    expect(result.observation).toMatchObject({
+      page: { text: 'fresh' },
+      recovery: { automatic: true, pageMayHaveChanged: true },
+    });
+    expect(result.results).toEqual([
+      expect.objectContaining({
+        method: 'recover-control',
+        note: expect.stringContaining('PAGE MAY HAVE CHANGED'),
+      }),
+      expect.objectContaining({ status: 'skipped', count: 2 }),
+    ]);
+  });
+  it('manual recover-control passes pageMayHaveChanged to the Agent', async () => {
+    const browser = vi.fn(async () => ({
+      recovered: true,
+      observation: { text: 'fresh' },
+      target: {},
+      pageMayHaveChanged: true,
+    }));
+    const result = await runBrowserRound(
+      [{ method: 'recover-control', params: { recoveryId: 'r' } }],
+      browser,
+      () => {},
+      'req',
+    );
+    expect(result.observation).toMatchObject({ recovery: { pageMayHaveChanged: true } });
+    expect(JSON.stringify(result.results)).toContain('PAGE MAY HAVE CHANGED');
+  });
+  it('after a foreign-frame interruption, reports page change and asks for a fresh decision', async () => {
+    executor.autoRecoverControl.mockImplementation(async () => {
+      executor.currentControlRecovery.mockReturnValue(undefined);
+      return { ...recovered, pageMayHaveChanged: true };
+    });
+    const browser = call('@aaaaaaaa-e1', false);
+    const result = await runBrowserRound(
+      fills,
+      browser,
+      () => {},
+      'req',
+      () => false,
+      true,
+    );
+    // Never-started actions are not continued on a page that may have changed.
+    expect(browser.mock.calls.filter(([m]) => m === 'fill')).toHaveLength(1);
+    expect(executor.restoreRecoveredRefs).not.toHaveBeenCalled();
+    expect(result.observation).toMatchObject({ recovery: { pageMayHaveChanged: true } });
+    expect(result.results).toEqual([
+      { method: 'fill', status: 'success' },
+      expect.objectContaining({
+        method: 'recover-control',
+        note: expect.stringContaining('PAGE MAY HAVE CHANGED'),
+      }),
+      expect.objectContaining({
+        status: 'skipped',
+        count: 2,
+        reason: expect.stringContaining('page may have changed'),
+      }),
     ]);
   });
 

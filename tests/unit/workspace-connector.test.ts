@@ -840,3 +840,49 @@ test.each([
   await connector.connect(input);
   expect(connector.view().connection).toMatchObject({ phase: 'failed', error });
 });
+
+test('relay browser name: only a Workspace-owned relay reports the trimmed name; rename notifies', async () => {
+  const { connector, api, deps, relay } = setup([
+    { ...ready, relay_url: 'wss://relay/ext', key: 'abc' },
+  ]);
+  const onBrowserName = vi.fn();
+  deps.onBrowserName = onBrowserName;
+  (api as Record<string, unknown>).rename = vi.fn(async () => conn('connected').connection);
+  await connector.init();
+  expect(connector.relayBrowserName()).toBeUndefined();
+  await connector.connect({ ...input, browserName: '  Work Laptop  ' });
+  expect(connector.relayBrowserName()).toBe('Work Laptop');
+  await connector.rename('  Home Mac ');
+  expect((api as any).rename).toHaveBeenCalledWith('c1', 'Home Mac');
+  expect(onBrowserName).toHaveBeenCalledWith('Home Mac');
+  expect(connector.relayBrowserName()).toBe('Home Mac');
+  await expect(connector.rename('   ')).rejects.toThrow('workspaceBrowserNameRequired');
+  // A manual relay config is not Workspace-owned: no name is reported.
+  relay.key = 'manual';
+  expect(connector.relayBrowserName()).toBeUndefined();
+});
+
+test('browser names are cleaned as untrusted display text', async () => {
+  const { cleanBrowserName } = await import('../../utils/workspace/connector');
+  expect(cleanBrowserName(' Work\nLaptop\u0007 ')).toBe('Work Laptop');
+  const long = '\u{1F600}'.repeat(150);
+  const cleaned = cleanBrowserName(long);
+  expect(Array.from(cleaned)).toHaveLength(100);
+  expect(cleaned.endsWith('\u{1F600}')).toBe(true);
+  expect(cleanBrowserName('x'.repeat(120))).toHaveLength(100);
+});
+
+test('rename does not notify the relay when the relay is not Workspace-owned', async () => {
+  const { connector, api, deps, relay } = setup([
+    { ...ready, relay_url: 'wss://relay/ext', key: 'abc' },
+  ]);
+  const onBrowserName = vi.fn();
+  deps.onBrowserName = onBrowserName;
+  (api as Record<string, unknown>).rename = vi.fn(async () => conn('connected').connection);
+  await connector.init();
+  await connector.connect({ ...input, browserName: 'Work' });
+  relay.key = 'manual';
+  await connector.rename('Home');
+  expect((api as any).rename).toHaveBeenCalledWith('c1', 'Home');
+  expect(onBrowserName).not.toHaveBeenCalled();
+});

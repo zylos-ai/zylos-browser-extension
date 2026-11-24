@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Startup timing marks in diagnostics (#31): worker boot steps (diagnostics,
+  task recovery, storage read, config, Workspace sign-in restore, boot complete,
+  first relay open/ready) and side panel first render / first state, as
+  milestone names and elapsed milliseconds only. Marks taken before diagnostics
+  are enabled are kept for the worker's lifetime and added when you turn
+  diagnostics on, so a slow first load can still be exported.
+- The relay is told this browser's OpenMax Workspace name (#34): an optional
+  `browserName` in `hello` for Workspace connections, and a `browser-name`
+  frame after a rename. Older relays ignore both.
+
 ### Fixed
 
 - The payment-provider and banking keyword rules now match only the site and
@@ -32,6 +44,14 @@
   tabs are only ungrouped). `agent-turn-end` now carries a top-level `reason`
   for interrupted and stopped tasks (`user_stop` for Stop) so the Agent
   learns why (#33).
+- When another extension's frame (for example a password manager's inline
+  menu) makes Chrome drop control, the Agent is now told after recovery that the
+  page may have changed (a dialog may have closed), and remaining batched
+  actions wait for a fresh decision instead of running on the old plan. If
+  this happens while focusing a field for `fill`/`type`, the text is not
+  typed (#30).
+- Readable messages for the relay's `AGENT_SESSION_NOT_RUNNING` and
+  `SESSION_GROUP_UNMAPPED` codes, in task notices and message delivery errors.
 
 ### Known limitations
 
