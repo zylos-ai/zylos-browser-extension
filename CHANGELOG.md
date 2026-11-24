@@ -8,8 +8,6 @@
   (OPENM-1425): page settling is capped at 10s, popup adoption steps at 3s
   each, and a round watchdog (action budgets + 15s per action + 120s) cancels
   a round that never reports, returning `OPERATION_CANCELLED` to the Agent.
-  `agent-cancel` with any reason, including the Relay's `execution-timeout`,
-  abandons the running round.
 - A task whose first request gets no Agent progress within 3 minutes now ends
   with "Agent not responding" instead of showing "Connecting" forever (#32).
   A "New task" divider separates tasks in the panel.
