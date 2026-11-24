@@ -168,6 +168,7 @@ export async function assertInputFrames(
   let current = top;
   for (let depth = 0; depth < 16; depth++) {
     let childId: string | undefined;
+    let hidden = false;
     try {
       const world = await send(
         'Page.createIsolatedWorld',
@@ -188,12 +189,22 @@ export async function assertInputFrames(
       if (result?.exceptionDetails) return all();
       const objectId = result?.result?.objectId;
       if (!objectId) return; // Nothing focused: input stays in this checked frame.
-      const { node } = await send('DOM.describeNode', { objectId, depth: 0 }, current.sessionId);
+      const { node } = await send(
+        'DOM.describeNode',
+        { objectId, depth: 1, pierce: true },
+        current.sessionId,
+      );
       if (!node) return all();
+      // A closed shadow root hides its activeElement, so focus may be in a frame
+      // inside it that this walk cannot see. Check every frame instead.
+      hidden = !!node.shadowRoots?.some(
+        (root: { shadowRootType?: string }) => root.shadowRootType === 'closed',
+      );
       childId = node.frameId || node.contentDocument?.frameId;
     } catch {
       return all();
     }
+    if (hidden) return all();
     if (!childId) return; // Focus ends on an element of this already checked frame.
     const parentId = current.id;
     const child = frames.find((frame) => frame.id === childId && frame.parentId === parentId);

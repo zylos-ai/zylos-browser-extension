@@ -372,9 +372,14 @@ describe('focus chain resolution', () => {
   ];
   const contexts: Record<string, number> = { top: 1, a: 2, b: 3, hidden: 4 };
   const frameOf = Object.fromEntries(Object.entries(contexts).map(([id, n]) => [n, id]));
-  function chain(focus: Record<string, { nodeName: string; frameId?: string; content?: boolean }>) {
+  function chain(
+    focus: Record<
+      string,
+      { nodeName: string; frameId?: string; content?: boolean; closedShadow?: boolean }
+    >,
+  ) {
     const evaluated: string[] = [];
-    const send = vi.fn(async (method: string, params: any = {}) => {
+    const send = vi.fn(async (method: string, params: any = {}): Promise<any> => {
       if (method === 'Page.createIsolatedWorld')
         return { executionContextId: contexts[params.frameId] };
       if (method === 'Runtime.evaluate') {
@@ -385,6 +390,13 @@ describe('focus chain resolution', () => {
       if (method === 'DOM.describeNode') {
         const owner = focus[String(params.objectId).slice('active-in-'.length)];
         if (!owner) return { node: { nodeName: 'INPUT' } };
+        if (owner.closedShadow)
+          return {
+            node: {
+              nodeName: owner.nodeName,
+              shadowRoots: [{ nodeName: '#document-fragment', shadowRootType: 'closed' }],
+            },
+          };
         return {
           node: owner.content
             ? { nodeName: owner.nodeName, contentDocument: { frameId: owner.frameId } }
@@ -432,6 +444,31 @@ describe('focus chain resolution', () => {
       expect(evaluated).toEqual(['top', 'a']);
     },
   );
+
+  test('focus hidden in a closed shadow root checks every frame', async () => {
+    const { send } = chain({ top: { nodeName: 'PAYMENT-WIDGET', closedShadow: true } });
+    await expect(assertInputFrames(send, assertFrame, frames)).rejects.toMatchObject({
+      code: 'BLOCKED_URL',
+    });
+    expect(checked).toEqual(['top', 'top', 'a', 'b']);
+    expect(send).toHaveBeenCalledWith(
+      'DOM.describeNode',
+      expect.objectContaining({ pierce: true }),
+      undefined,
+    );
+  });
+
+  test('a user-agent shadow root on a focused input does not widen the check', async () => {
+    const { send } = chain({});
+    const original = send.getMockImplementation()!;
+    send.mockImplementation(async (method: string, params: any = {}) =>
+      method === 'DOM.describeNode'
+        ? { node: { nodeName: 'INPUT', shadowRoots: [{ shadowRootType: 'user-agent' }] } }
+        : original(method, params),
+    );
+    await assertInputFrames(send, assertFrame, frames);
+    expect(checked).toEqual(['top']);
+  });
 
   test('a focused frame missing from the collected frames fails closed', async () => {
     const { send } = chain({ top: { nodeName: 'OBJECT', frameId: 'unknown' } });
