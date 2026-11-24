@@ -294,12 +294,7 @@ export function startRemoteBackground() {
     relayMatches,
     relayConnected: () => state.connected,
     // Old relays ignore this frame; a closed socket reports the name in the next hello.
-    onBrowserName: (browserName) => {
-      if (state.connected) {
-        sentBrowserName = browserName;
-        sendRaw({ type: 'browser-name', browserName });
-      }
-    },
+    onBrowserName: () => syncBrowserName(),
     publish: () => publish(),
   });
   let stopTaskPromise: Promise<void> | undefined;

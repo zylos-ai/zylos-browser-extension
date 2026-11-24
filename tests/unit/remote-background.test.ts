@@ -2017,9 +2017,14 @@ describe('decision transport background', () => {
     expect(ws.last('hello')!.browserName).toBe('Work Laptop');
   });
 
-  it.each([true, false])(
-    'reports the Workspace browser name when the first hello after a worker restart precedes Workspace restore (workspace=%s)',
-    async (workspaceOwned) => {
+  it.each([
+    [true, 'ready-before-restore'],
+    [true, 'restore-before-ready'],
+    [false, 'ready-before-restore'],
+    [false, 'restore-before-ready'],
+  ] as const)(
+    'reports the Workspace browser name once when the first hello after a worker restart precedes Workspace restore (workspace=%s, %s)',
+    async (workspaceOwned, order) => {
       if (workspaceOwned)
         storage.workspaceConnection = {
           agentMemberId: 'ag1',
@@ -2031,21 +2036,26 @@ describe('decision transport background', () => {
           localKeyId: 'abababababab',
         };
       startRemoteBackground();
-      // Open and handshake the socket as soon as it exists, before boot restores Workspace.
+      // Open the socket as soon as it exists, before boot restores Workspace.
       for (let i = 0; i < 1000 && !sockets[0]; i++) await Promise.resolve();
       const ws = sockets[0]!;
       ws.open();
       expect(ws.last('hello')).not.toHaveProperty('browserName');
+      const named = () => ws.frames.filter((f) => f.type === 'browser-name');
+      if (order === 'restore-before-ready') {
+        await flush();
+        // The relay has not acknowledged hello yet: nothing may be sent before ready.
+        expect(named()).toEqual([]);
+      }
       ws.receive({
         type: 'ready',
         capabilities: ['agent-loop-v1', 'browser-instance-v1', 'agent-message-v2'],
         endpointId: `abababababab.${storage.remoteBrowserId}`,
       });
       await flush();
-      const named = ws.frames.filter((f) => f.type === 'browser-name');
       if (workspaceOwned)
-        expect(named).toEqual([{ type: 'browser-name', browserName: 'Work Laptop' }]);
-      else expect(named).toEqual([]);
+        expect(named()).toEqual([{ type: 'browser-name', browserName: 'Work Laptop' }]);
+      else expect(named()).toEqual([]);
     },
   );
 
