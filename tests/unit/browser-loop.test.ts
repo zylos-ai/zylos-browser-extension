@@ -1,8 +1,10 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  AGENT_FIRST_RESPONSE_TIMEOUT_MS,
   BrowserLoop,
   decisionSchema,
+  roundWatchdogMs,
   type AgentRequest,
   type RoundResult,
   type LoopAction,
@@ -632,17 +634,25 @@ describe('extension-owned loop', () => {
     expect(loop.active).toBe(true);
     expect(io.finish).not.toHaveBeenCalled();
     expect(io.execute).toHaveBeenCalledTimes(1);
+    // The round watchdog abandons the hung round, but the task itself stays
+    // active and waits for the Agent's next decision.
+    expect(requests).toHaveLength(2);
+    expect(requests[1]!.execution.results).toMatchObject([
+      { error: { code: 'OPERATION_CANCELLED' } },
+    ]);
     loop.cancel();
     release({ observation: {}, results: [], failed: false, mode: 'operating' });
     await vi.advanceTimersByTimeAsync(0);
     expect(loop.active).toBe(false);
     expect(io.cancel).toHaveBeenCalledOnce();
-    expect(requests).toHaveLength(1);
+    expect(requests).toHaveLength(2);
     expect(io.finish).not.toHaveBeenCalled();
   });
   it('continues past former time/round limits and receipt eviction, then finishes normally', async () => {
     vi.useFakeTimers();
     const { loop, requests, io } = setup();
+    // Once the Agent has shown progress, time alone never ends the task.
+    loop.noteAgentProgress('task-1');
     for (let i = 0; i < 105; i++) {
       await vi.advanceTimersByTimeAsync(30 * 60_000);
       expect(loop.active).toBe(true);
@@ -779,6 +789,8 @@ describe('extension-owned loop', () => {
     const { loop, requests, io } = setup();
     expect(() => loop.accept(requests[0]!.id, { kind: 'done', text: '' })).toThrow();
     expect(() => loop.accept('unknown', action)).toThrow('no longer active');
+    // An Agent that has shown progress may take arbitrarily long to decide.
+    loop.noteAgentProgress('task-1');
     await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
     expect(loop.active).toBe(true);
     expect(loop.pendingId).toBe(requests[0]!.id);
@@ -1159,4 +1171,108 @@ it('applies the research gate when done takes over a hung execution', async () =
     expect.objectContaining({ status: 'incomplete' }),
   );
   loop.cancel();
+});
+
+describe('round watchdog (OPENM-1425)', () => {
+  afterEach(() => vi.useRealTimers());
+  it('budgets strictly above every per-action budget and skips untimed rounds', () => {
+    const open = { method: 'open', params: { url: 'https://example.com' } } as LoopAction;
+    expect(roundWatchdogMs([open])).toBe(60_000 + 15_000 + 120_000);
+    expect(roundWatchdogMs([{ ...open, timeoutMs: 300_000 }])).toBe(300_000 + 15_000 + 120_000);
+    expect(
+      roundWatchdogMs([{ method: 'use-current-tab', params: {} } as unknown as LoopAction]),
+    ).toBeUndefined();
+  });
+  it('abandons a round that never reports, via the OPERATION_CANCELLED path', async () => {
+    vi.useFakeTimers();
+    const { loop, requests, io } = setup();
+    io.execute.mockImplementationOnce(() => new Promise<RoundResult>(() => {}));
+    loop.accept(requests[0]!.id, action);
+    await vi.advanceTimersByTimeAsync(roundWatchdogMs(action.actions as LoopAction[])! - 1);
+    expect(requests).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(requests).toHaveLength(2);
+    expect(requests[1]!.execution.results).toMatchObject([
+      {
+        status: 'error',
+        error: { code: 'OPERATION_CANCELLED', message: expect.stringContaining('round watchdog') },
+      },
+    ]);
+    expect(loop.active).toBe(true);
+    loop.cancel();
+  });
+  it('is cleared when the round reports in time', async () => {
+    vi.useFakeTimers();
+    const { loop, requests } = setup();
+    loop.accept(requests[0]!.id, action);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(requests).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(requests).toHaveLength(2);
+    loop.cancel();
+  });
+  it('relay agent-cancel with reason execution-timeout abandons the executing round', async () => {
+    const { loop, requests, io } = setup();
+    io.execute.mockImplementationOnce(() => new Promise<RoundResult>(() => {}));
+    loop.accept(requests[0]!.id, action);
+    await Promise.resolve();
+    expect(loop.cancelExecution(requests[0]!.id, 'execution-timeout')).toEqual({
+      cancelled: true,
+    });
+    expect(requests[1]!.execution.results).toMatchObject([
+      {
+        error: {
+          code: 'OPERATION_CANCELLED',
+          message: expect.stringContaining('execution-timeout'),
+        },
+      },
+    ]);
+    loop.cancel();
+  });
+});
+
+describe('first-response timeout (GitHub #32)', () => {
+  afterEach(() => vi.useRealTimers());
+  it('ends a turn whose first request gets no Agent progress', async () => {
+    vi.useFakeTimers();
+    const { loop, requests, io } = setup();
+    await vi.advanceTimersByTimeAsync(AGENT_FIRST_RESPONSE_TIMEOUT_MS - 1);
+    expect(io.finish).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(io.finish).toHaveBeenCalledWith(expect.any(String), 'interrupted', 'task-1', {
+      kind: 'agent-not-responding',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(loop.active).toBe(false);
+    expect(() => loop.accept(requests[0]!.id, action)).toThrow(
+      expect.objectContaining({ code: 'STALE_DECISION' }),
+    );
+  });
+  it.each(['activity', 'decision'])('any Agent %s disarms it', async (kind) => {
+    vi.useFakeTimers();
+    const { loop, requests, io } = setup();
+    io.execute.mockImplementationOnce(() => new Promise<RoundResult>(() => {}));
+    if (kind === 'activity') loop.noteAgentProgress('task-1');
+    else
+      loop.accept(requests[0]!.id, {
+        ...action,
+        actions: [
+          {
+            method: 'use-current-tab',
+            params: { contextId: '11111111-1111-4111-8111-111111111111' },
+          },
+        ],
+      });
+    await vi.advanceTimersByTimeAsync(AGENT_FIRST_RESPONSE_TIMEOUT_MS * 2);
+    expect(io.finish).not.toHaveBeenCalled();
+    expect(loop.active).toBe(true);
+    loop.cancel();
+  });
+  it('cancel clears the timer', async () => {
+    vi.useFakeTimers();
+    const { loop, io } = setup();
+    loop.cancel();
+    await vi.advanceTimersByTimeAsync(AGENT_FIRST_RESPONSE_TIMEOUT_MS);
+    expect(io.finish).not.toHaveBeenCalled();
+  });
 });

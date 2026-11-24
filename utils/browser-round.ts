@@ -13,6 +13,7 @@ import {
 import type { LoopAction, RoundResult } from './browser-loop';
 import { ControlLoss, ControlSuspended, type ControlInterruption } from './control-loss';
 import { consumeInputRecovery } from './automation/input-checkpoint';
+import { DeadlineExceeded, drainWithin, withDeadline } from './deadline';
 
 type Call = (
   method: string,
@@ -430,6 +431,22 @@ async function executeRound(
   };
 }
 
+/** Wall-clock cap for post-action settling; never let one round wedge the task. */
+export const SETTLE_HARD_LIMIT_MS = 10_000;
+/** Popup adoption is mechanical bookkeeping; settle waits for it only briefly. */
+export const POPUP_FLUSH_LIMIT_MS = 2_000;
+/** A single tab lookup should be instant; a hung one means the tab is wedged. */
+const TAB_LOOKUP_LIMIT_MS = 2_000;
+const settleLoading = (started: number, extra: Record<string, unknown> = {}) => ({
+  status: 'loading',
+  note: 'Load settling budget reached; inspect current evidence, do not repeat the preceding action.',
+  durationMs: Date.now() - started,
+  ...extra,
+});
+
+// The 8s loop budget is only checked between iterations; any awaited Chrome
+// call inside can hang indefinitely (OPENM-1425). The hard race guarantees the
+// round reports evidence, and the abandoned flag stops the loser from acting.
 async function settle(
   before: ReturnType<typeof currentControl>,
   method: string,
@@ -438,6 +455,38 @@ async function settle(
   requestId: string,
 ) {
   const started = Date.now();
+  let abandoned = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = () => {
+    if (abandoned) throw Object.assign(new Error('Settle abandoned'), { code: 'SETTLE_ABANDONED' });
+    assertActive();
+  };
+  const work = settleLoop(before, method, call, guard, requestId, started);
+  try {
+    return await Promise.race([
+      work,
+      new Promise<ReturnType<typeof settleLoading>>((resolve) => {
+        timer = setTimeout(() => {
+          abandoned = true;
+          resolve(settleLoading(started, { timedOut: true }));
+        }, SETTLE_HARD_LIMIT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    abandoned = true;
+    work.catch(() => {});
+  }
+}
+
+async function settleLoop(
+  before: ReturnType<typeof currentControl>,
+  method: string,
+  call: Call,
+  assertActive: () => void,
+  requestId: string,
+  started: number,
+) {
   const initial = currentControl();
   if (!initial) return { status: 'unavailable' };
   let selectedPopup = false;
@@ -446,9 +495,10 @@ async function settle(
   // Brief grace for delayed redirects/popups; no invented URL or mandatory
   // navigation. An unchanged loaded page is a valid in-page interaction.
   const grace = ['click', 'keypress', 'check', 'select', 'hover'].includes(method) ? 650 : 250;
+  const getTab = (id: number) => withDeadline(chrome.tabs.get(id), TAB_LOOKUP_LIMIT_MS, 'tabs.get');
   while (Date.now() - started < 8000) {
     assertActive();
-    await flushTaskPopups();
+    await drainWithin(flushTaskPopups(), POPUP_FLUSH_LIMIT_MS);
     assertActive();
     const control = currentControl();
     if (!control || control.sessionId !== initial.sessionId)
@@ -456,7 +506,7 @@ async function settle(
     if (before && !selectedPopup && ['click', 'keypress'].includes(method)) {
       const added = control.tabIds.filter((id) => !before.tabIds.includes(id));
       const candidates = (
-        await Promise.all(added.map((id) => chrome.tabs.get(id).catch(() => null)))
+        await Promise.all(added.map((id) => getTab(id).catch(() => null)))
       ).filter(
         (tab) =>
           tab && taskPopupOpener(tab.id!) === before.tabId && tab.url && tab.url !== 'about:blank',
@@ -474,8 +524,16 @@ async function settle(
       }
     }
     assertActive();
-    const tab = await chrome.tabs.get(currentControl()!.tabId);
+    const tab = await getTab(currentControl()!.tabId).catch((error) => {
+      if (error instanceof DeadlineExceeded) return null;
+      throw error;
+    });
     assertActive();
+    if (!tab) {
+      // Lookup wedged: keep polling within budget; the hard race caps the total.
+      await delay(100);
+      continue;
+    }
     const state = JSON.stringify([
       tab.id,
       tab.url,
@@ -502,9 +560,5 @@ async function settle(
       };
     await delay(100);
   }
-  return {
-    status: 'loading',
-    note: 'Load settling budget reached; inspect current evidence, do not repeat the preceding action.',
-    durationMs: Date.now() - started,
-  };
+  return settleLoading(started);
 }

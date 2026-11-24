@@ -142,6 +142,8 @@ export const diagnosticCode = z.enum([
   'SENSITIVE_INPUT',
   'REQUEST_ID_CONFLICT',
   'PAGE_CONTENT_CHANGED',
+  'POPUP_ADOPT_TIMEOUT',
+  'ROUND_WATCHDOG',
 ]);
 export const diagnosticErrorKind = z.enum([
   'Error',

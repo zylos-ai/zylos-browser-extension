@@ -15,6 +15,7 @@ import {
   frameSessions,
   enableFrames,
   clearFrameSessions,
+  assertInputFrames,
   collectFrames,
   frameAllowed,
 } from './frames';
@@ -25,6 +26,7 @@ import {
 } from '../site-access';
 import { cursorExpression } from './cursor';
 import { cleanupTask, recordTask } from './task-lifecycle';
+import { DeadlineExceeded, drainWithin, withDeadline } from '../deadline';
 import { PointerMotion } from './pointer-motion';
 import { assertPointPermissions, hitTestPoint } from './point-permissions';
 import type { Command } from '../commands';
@@ -313,6 +315,14 @@ export const matchesCurrentControlScope = (scope: object) =>
   control === scope && !!grant && !recovery;
 export const browserPageVersion = () =>
   `${control?.sessionId}:${control?.tabId}:${navigationRevision}`;
+/**
+ * Each awaited step of popup adoption is bounded so a hung Chrome call cannot
+ * wedge popupQueue (and every flush/tabs/wait behind it). OPENM-1425.
+ */
+export const POPUP_STEP_LIMIT_MS = 3_000;
+const step = <T>(work: Promise<T>, label: string) =>
+  withDeadline(work, POPUP_STEP_LIMIT_MS, `popup ${label}`);
+/** Resolves when queued popup adoption drains; callers bound how long they wait. */
 export const flushTaskPopups = () => popupQueue;
 export const onState = (fn: typeof changed) => {
   changed = fn;
@@ -1015,8 +1025,8 @@ export function initializeExecutor() {
         session.tabIds.length >= 8
       )
         return;
-      const parent = await chrome.tabs.get(opener).catch(() => null);
-      let fresh = await chrome.tabs.get(id).catch(() => null);
+      const parent = await step(chrome.tabs.get(opener), 'tabs.get').catch(() => null);
+      let fresh = await step(chrome.tabs.get(id), 'tabs.get').catch(() => null);
       if (
         control !== session ||
         recovery ||
@@ -1034,20 +1044,23 @@ export function initializeExecutor() {
       )
         return;
       if (fresh.windowId !== session.windowId) {
-        await chrome.tabs.move(id, { windowId: session.windowId, index: -1 });
-        fresh = await chrome.tabs.get(id);
+        await step(chrome.tabs.move(id, { windowId: session.windowId, index: -1 }), 'tabs.move');
+        fresh = await step(chrome.tabs.get(id), 'tabs.get');
       }
       if (control !== session || recovery) return;
-      await recordTask(session.sessionId, session.windowId, session.groupId, id, true);
+      await step(
+        recordTask(session.sessionId, session.windowId, session.groupId, id, true),
+        'recordTask',
+      );
       if (control !== session || recovery) {
         if (recovery) return;
-        await cleanupTask(session.sessionId).catch(() => {});
+        await step(cleanupTask(session.sessionId), 'cleanupTask').catch(() => {});
         return;
       }
-      await groupOwnedTab(session, id);
+      await step(groupOwnedTab(session, id), 'groupOwnedTab');
       if (control !== session || recovery) {
         if (recovery) return;
-        await cleanupTask(session.sessionId).catch(() => {});
+        await step(cleanupTask(session.sessionId), 'cleanupTask').catch(() => {});
         return;
       }
       session.tabIds.push(id);
@@ -1058,7 +1071,15 @@ export function initializeExecutor() {
     popupQueue = popupQueue
       .catch(() => {})
       .then(work)
-      .catch(() => {});
+      .catch((error) => {
+        // A wedged Chrome call abandons only this popup; the queue moves on.
+        if (error instanceof DeadlineExceeded)
+          recordDiagnostic('operation-error', 'other', {
+            source: 'executor',
+            level: 'warn',
+            code: 'POPUP_ADOPT_TIMEOUT',
+          });
+      });
   }
   if (chrome.webNavigation?.onCreatedNavigationTarget) {
     // Navigation source is authoritative even for noopener/background tabs;
@@ -1919,7 +1940,7 @@ async function executeInternal(
       );
   };
   if (command.op === 'tabs') {
-    await popupQueue;
+    await drainWithin(popupQueue, POPUP_STEP_LIMIT_MS);
     const tabs = await chrome.tabs.query({ windowId: session.windowId });
     checkSession();
     return {
@@ -1960,7 +1981,7 @@ async function executeInternal(
       checkSession();
       if (dialog) fail('DIALOG_OPEN', `${dialog.type}: ${dialog.message}; use dialog`);
       if (command.condition === 'new-tab') {
-        await popupQueue;
+        await drainWithin(popupQueue, POPUP_STEP_LIMIT_MS);
         const id = newPopups.find((id) => session.tabIds.includes(id));
         if (id !== undefined) {
           newPopups.splice(newPopups.indexOf(id), 1);
@@ -2227,7 +2248,8 @@ async function executeInternal(
     if (sessionId && frameSessions().get(sessionId)?.tabId !== lease.id) fail('FRAME_UNAVAILABLE');
     if (dialog) fail('DIALOG_OPEN', `${dialog.type}: ${dialog.message}; use dialog`);
     if (method === 'Input.insertText') {
-      for (const frame of await collectFrames(actionCdp)) assertSiteAction(frame.url, command.op);
+      // Text goes to the focused frame; unrelated hidden frames must not block it.
+      await assertInputFrames(actionCdp, (frame) => assertSiteAction(frame.url, command.op));
       check();
     }
     const target = { tabId: lease.id, ...(sessionId ? { sessionId } : {}) };

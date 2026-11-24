@@ -21,7 +21,7 @@ export default {
   siteAccessDefaults: '默认访问规则',
   siteAccessPatternDetails: '匹配表达式',
   siteAccessDefaultsHint:
-    '账务等页面由这些默认规则禁止访问。可在此关闭规则或修改权限；自定义规则优先。',
+    '账务等页面由这些默认规则禁止访问。支付服务商和银行名称规则只检查站点和路径，不检查搜索词。可在此关闭规则或修改权限；自定义规则优先。',
   siteAccessDefaultMode: '{rule} 的访问权限',
   siteDefaultBilling: '账务与结账页面',
   siteDefaultPaymentProviders: '支付平台',
@@ -276,6 +276,9 @@ export default {
   taskInterrupted: '浏览器任务中断，请检查连接后重新发起；已执行的动作不会自动重放。',
   taskRecoveryRemovalInterrupted:
     '恢复已结束。选中的扩展框架可能已经被移除，此改动未回滚。请先检查页面，不要直接重复移除或之前的输入。',
+  taskAgentNotResponding:
+    'Agent 未响应：发送后 5 分钟内没有任何进展，任务已释放。请重新发送消息重试。',
+  newTask: '新任务',
   taskCannotContinue: '无法继续本次任务：{reason}\n已执行的操作不会自动重放。',
   taskDecisionTimeout: '等待 Agent 决策超时。',
   taskAgentStopping: 'Agent 正在停止上一项任务，请稍后重试。',

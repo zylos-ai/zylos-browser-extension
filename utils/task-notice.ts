@@ -11,6 +11,7 @@ export const taskNoticeSchema = z.discriminatedUnion('kind', [
         'execution-limit',
         'interrupted',
         'recovery-removal-interrupted',
+        'agent-not-responding',
       ]),
     })
     .strict(),
@@ -47,6 +48,8 @@ export function formatTaskNotice(locale: Locale, notice: TaskNotice): string {
       return translate(locale, 'taskInterrupted');
     case 'recovery-removal-interrupted':
       return translate(locale, 'taskRecoveryRemovalInterrupted');
+    case 'agent-not-responding':
+      return translate(locale, 'taskAgentNotResponding');
     case 'request-failed': {
       const key = Object.hasOwn(reasonKeys, notice.code) ? reasonKeys[notice.code] : undefined;
       const reason = key

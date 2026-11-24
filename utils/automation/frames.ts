@@ -127,3 +127,91 @@ export async function collectFrames(
   }
   return [...frames.values()];
 }
+
+/** Deepest focused element, through open shadow roots. Serialized for CDP. */
+export const FOCUSED_ELEMENT = `(() => {
+  let active = document.activeElement;
+  while (active && active.shadowRoot && active.shadowRoot.activeElement)
+    active = active.shadowRoot.activeElement;
+  return active;
+})()`;
+
+function frameUnavailable(): never {
+  throw Object.assign(new Error('Focused frame unavailable'), { code: 'FRAME_UNAVAILABLE' });
+}
+
+/**
+ * Native text input (Input.insertText) and keys are delivered to the focused
+ * document, not to every frame in the page. Check the top frame and the focus
+ * chain down to the frame that will receive the input, so an unrelated hidden
+ * third-party iframe (for example a Stripe telemetry frame) does not block
+ * typing into the top document, while typing into a restricted frame is still
+ * blocked. Any focused frame owner is followed (iframe, frame, object, embed).
+ * The chain is discovered only through frames that already passed assertFrame.
+ * If the focused element cannot be inspected, every collected frame is
+ * checked; a focused child frame missing from the collected list fails with
+ * FRAME_UNAVAILABLE.
+ */
+export async function assertInputFrames(
+  send: Send,
+  assertFrame: (frame: Frame) => void,
+  collected?: Frame[],
+) {
+  const frames = collected ?? (await collectFrames(send));
+  const all = () => {
+    for (const frame of frames) assertFrame(frame);
+  };
+  const top = frames.find((frame) => !frame.parentId);
+  if (!top) return all();
+  assertFrame(top);
+  const seen = new Set<string>([top.id]);
+  let current = top;
+  for (let depth = 0; depth < 16; depth++) {
+    let childId: string | undefined;
+    let hidden = false;
+    try {
+      const world = await send(
+        'Page.createIsolatedWorld',
+        { frameId: current.id, worldName: 'coco-focus' },
+        current.sessionId,
+      );
+      if (!world?.executionContextId) return all();
+      const result = await send(
+        'Runtime.evaluate',
+        {
+          expression: FOCUSED_ELEMENT,
+          contextId: world.executionContextId,
+          returnByValue: false,
+          objectGroup: 'coco-browser',
+        },
+        current.sessionId,
+      );
+      if (result?.exceptionDetails) return all();
+      const objectId = result?.result?.objectId;
+      if (!objectId) return; // Nothing focused: input stays in this checked frame.
+      const { node } = await send(
+        'DOM.describeNode',
+        { objectId, depth: 1, pierce: true },
+        current.sessionId,
+      );
+      if (!node) return all();
+      // A closed shadow root hides its activeElement, so focus may be in a frame
+      // inside it that this walk cannot see. Check every frame instead.
+      hidden = !!node.shadowRoots?.some(
+        (root: { shadowRootType?: string }) => root.shadowRootType === 'closed',
+      );
+      childId = node.frameId || node.contentDocument?.frameId;
+    } catch {
+      return all();
+    }
+    if (hidden) return all();
+    if (!childId) return; // Focus ends on an element of this already checked frame.
+    const parentId = current.id;
+    const child = frames.find((frame) => frame.id === childId && frame.parentId === parentId);
+    if (!child || seen.has(child.id)) frameUnavailable();
+    seen.add(child.id);
+    assertFrame(child);
+    current = child;
+  }
+  all();
+}

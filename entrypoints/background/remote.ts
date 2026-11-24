@@ -1388,6 +1388,7 @@ export function startRemoteBackground() {
           return;
         if (state.agentActivity?.taskId === m.taskId && m.sequence <= state.agentActivity.sequence)
           return;
+        loop.noteAgentProgress(m.taskId);
         {
           const { events, dropped, ...current } = m;
           state.agentActivity = { ...current, receivedAt: Date.now() };
