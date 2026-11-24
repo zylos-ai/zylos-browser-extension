@@ -128,21 +128,29 @@ export async function collectFrames(
   return [...frames.values()];
 }
 
-const FOCUSED_FRAME_ELEMENT = `(() => {
+/** Deepest focused element, through open shadow roots. Serialized for CDP. */
+export const FOCUSED_ELEMENT = `(() => {
   let active = document.activeElement;
   while (active && active.shadowRoot && active.shadowRoot.activeElement)
     active = active.shadowRoot.activeElement;
-  return active && /^(IFRAME|FRAME)$/.test(active.tagName) ? active : null;
+  return active;
 })()`;
 
+function frameUnavailable(): never {
+  throw Object.assign(new Error('Focused frame unavailable'), { code: 'FRAME_UNAVAILABLE' });
+}
+
 /**
- * Native text input (Input.insertText) is delivered to the focused document,
- * not to every frame in the page. Check the top frame and the focus chain down
- * to the frame that will receive the text, so an unrelated hidden third-party
- * iframe (for example a Stripe telemetry frame) does not block typing into the
- * top document, while typing into a restricted iframe is still blocked.
+ * Native text input (Input.insertText) and keys are delivered to the focused
+ * document, not to every frame in the page. Check the top frame and the focus
+ * chain down to the frame that will receive the input, so an unrelated hidden
+ * third-party iframe (for example a Stripe telemetry frame) does not block
+ * typing into the top document, while typing into a restricted frame is still
+ * blocked. Any focused frame owner is followed (iframe, frame, object, embed).
  * The chain is discovered only through frames that already passed assertFrame.
- * If focus cannot be resolved, every frame is checked (fail closed).
+ * If the focused element cannot be inspected, every collected frame is
+ * checked; a focused child frame missing from the collected list fails with
+ * FRAME_UNAVAILABLE.
  */
 export async function assertInputFrames(
   send: Send,
@@ -159,7 +167,7 @@ export async function assertInputFrames(
   const seen = new Set<string>([top.id]);
   let current = top;
   for (let depth = 0; depth < 16; depth++) {
-    let child: Frame | undefined;
+    let childId: string | undefined;
     try {
       const world = await send(
         'Page.createIsolatedWorld',
@@ -170,7 +178,7 @@ export async function assertInputFrames(
       const result = await send(
         'Runtime.evaluate',
         {
-          expression: FOCUSED_FRAME_ELEMENT,
+          expression: FOCUSED_ELEMENT,
           contextId: world.executionContextId,
           returnByValue: false,
           objectGroup: 'coco-browser',
@@ -179,15 +187,17 @@ export async function assertInputFrames(
       );
       if (result?.exceptionDetails) return all();
       const objectId = result?.result?.objectId;
-      if (!objectId) return; // Focus ends in this already checked frame.
+      if (!objectId) return; // Nothing focused: input stays in this checked frame.
       const { node } = await send('DOM.describeNode', { objectId, depth: 0 }, current.sessionId);
-      const childId = node?.frameId || node?.contentDocument?.frameId;
-      const parentId = current.id;
-      child = frames.find((frame) => frame.id === childId && frame.parentId === parentId);
+      if (!node) return all();
+      childId = node.frameId || node.contentDocument?.frameId;
     } catch {
       return all();
     }
-    if (!child || seen.has(child.id)) return all();
+    if (!childId) return; // Focus ends on an element of this already checked frame.
+    const parentId = current.id;
+    const child = frames.find((frame) => frame.id === childId && frame.parentId === parentId);
+    if (!child || seen.has(child.id)) frameUnavailable();
     seen.add(child.id);
     assertFrame(child);
     current = child;

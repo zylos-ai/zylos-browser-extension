@@ -56,7 +56,8 @@ function setup(focus: { child: boolean } = { child: false }) {
         result: { value: action === 'inspect' ? { disabled: false, clickable: false } : true },
       };
     }
-    if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 };
+    if (method === 'Page.createIsolatedWorld')
+      return { executionContextId: params.frameId === 'main' ? 1 : 2 };
     if (method === 'Accessibility.getFullAXTree')
       return {
         nodes: [
@@ -356,5 +357,104 @@ describe('default payment-provider rule and hidden Stripe frames', () => {
       code: 'BLOCKED_URL',
       message: 'BLOCKED_URL: restricted origin https://js.stripe.com',
     });
+  });
+});
+
+describe('focus chain resolution', () => {
+  // Frames: top (public) > a (public) > b (stripe, restricted). Each frame has
+  // its own execution context; `focus` maps a frame to the frame its focused
+  // element owns (or a plain element when absent).
+  const frames = [
+    { id: 'top', url: 'https://www.linkedin.com/feed/' },
+    { id: 'a', parentId: 'top', url: 'https://widgets.example/a' },
+    { id: 'b', parentId: 'a', url: 'https://js.stripe.com/v3/card', sessionId: 'oopif' },
+    { id: 'hidden', parentId: 'top', url: 'https://m.stripe.network/inner.html' },
+  ];
+  const contexts: Record<string, number> = { top: 1, a: 2, b: 3, hidden: 4 };
+  const frameOf = Object.fromEntries(Object.entries(contexts).map(([id, n]) => [n, id]));
+  function chain(focus: Record<string, { nodeName: string; frameId?: string; content?: boolean }>) {
+    const evaluated: string[] = [];
+    const send = vi.fn(async (method: string, params: any = {}) => {
+      if (method === 'Page.createIsolatedWorld')
+        return { executionContextId: contexts[params.frameId] };
+      if (method === 'Runtime.evaluate') {
+        const frame = frameOf[params.contextId]!;
+        evaluated.push(frame);
+        return { result: { objectId: `active-in-${frame}` } };
+      }
+      if (method === 'DOM.describeNode') {
+        const owner = focus[String(params.objectId).slice('active-in-'.length)];
+        if (!owner) return { node: { nodeName: 'INPUT' } };
+        return {
+          node: owner.content
+            ? { nodeName: owner.nodeName, contentDocument: { frameId: owner.frameId } }
+            : { nodeName: owner.nodeName, frameId: owner.frameId },
+        };
+      }
+      throw new Error(`unexpected ${method}`);
+    });
+    return { send, evaluated };
+  }
+  const checked: string[] = [];
+  const assertFrame = (frame: { id: string; url?: string }) => {
+    checked.push(frame.id);
+    assertSiteAction(frame.url, 'fill');
+  };
+  beforeEach(() => {
+    checked.length = 0;
+  });
+
+  test('focus on a top-frame input checks only the top frame', async () => {
+    const { send, evaluated } = chain({});
+    await assertInputFrames(send, assertFrame, frames);
+    expect(checked).toEqual(['top']);
+    expect(evaluated).toEqual(['top']);
+  });
+
+  test('focus inside a permitted child frame checks top and that child only', async () => {
+    const { send } = chain({ top: { nodeName: 'IFRAME', frameId: 'a' } });
+    await assertInputFrames(send, assertFrame, frames);
+    expect(checked).toEqual(['top', 'a']);
+  });
+
+  test.each(['IFRAME', 'OBJECT', 'EMBED', 'FRAME'])(
+    'focus through a nested %s owner into a restricted frame is blocked',
+    async (nodeName) => {
+      const { send, evaluated } = chain({
+        top: { nodeName: 'IFRAME', frameId: 'a' },
+        a: { nodeName, frameId: 'b', content: nodeName === 'FRAME' },
+      });
+      await expect(assertInputFrames(send, assertFrame, frames)).rejects.toMatchObject({
+        code: 'BLOCKED_URL',
+      });
+      expect(checked).toEqual(['top', 'a', 'b']);
+      // The restricted frame itself is never evaluated.
+      expect(evaluated).toEqual(['top', 'a']);
+    },
+  );
+
+  test('a focused frame missing from the collected frames fails closed', async () => {
+    const { send } = chain({ top: { nodeName: 'OBJECT', frameId: 'unknown' } });
+    await expect(assertInputFrames(send, assertFrame, frames)).rejects.toMatchObject({
+      code: 'FRAME_UNAVAILABLE',
+    });
+  });
+
+  test('a focused frame claimed by the wrong parent fails closed', async () => {
+    const { send } = chain({ top: { nodeName: 'IFRAME', frameId: 'b' } });
+    await expect(assertInputFrames(send, assertFrame, frames)).rejects.toMatchObject({
+      code: 'FRAME_UNAVAILABLE',
+    });
+  });
+
+  test('an uninspectable focus checks every frame', async () => {
+    const send = vi.fn(async (method: string) => {
+      if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 };
+      throw new Error('Cannot find context');
+    });
+    await expect(assertInputFrames(send, assertFrame, frames)).rejects.toMatchObject({
+      code: 'BLOCKED_URL',
+    });
+    expect(checked).toEqual(['top', 'top', 'a', 'b']);
   });
 });

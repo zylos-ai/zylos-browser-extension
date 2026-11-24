@@ -1667,7 +1667,9 @@ test.each([
           },
         };
       if (method === 'Runtime.callFunctionOn') return { result: { value: true } };
-      if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 };
+      // One execution context per frame, so the focus chain is resolved per frame.
+      if (method === 'Page.createIsolatedWorld')
+        return { executionContextId: params?.frameId === 'main' ? 7 : 8 };
       // Focus moves into the new child only in the focused variant.
       if (method === 'Runtime.evaluate' && params?.contextId === 7)
         return { result: restricted && focused ? { objectId: 'frame-owner' } : {} };
@@ -1696,6 +1698,9 @@ test.each([
           Date.now() + 10000,
         ),
         (error) => {
+          // Focus can move into the new child while the last PageActions focus
+          // probe runs; a focused frame missing from its snapshot fails closed.
+          if (error.code === 'FRAME_UNAVAILABLE') return true;
           assert.equal(error.code, mode === 'denied' ? 'BLOCKED_URL' : 'SITE_READ_ONLY');
           assert.match(error.message, /restricted origin https:\/\/child\.example$/);
           assert.equal(error.message.includes('private?secret'), false);

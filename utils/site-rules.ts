@@ -251,10 +251,13 @@ function hostOf(value: string) {
       .toLowerCase() || ''
   );
 }
-// url-regex defaults describe sites and paths, not user-chosen data. Match them
-// against origin + path only, so a query such as ?keywords=stripe on a search
-// page does not deny the page. Query and fragment are dropped before decoding,
-// so an encoded %3F in a path is still screened as path text.
+// The free-text keyword defaults (payment-provider and bank names) also match
+// user-chosen data such as ?keywords=stripe on a search page. Match only those
+// against origin + path. Slash-anchored defaults keep full-URL matching so hash
+// routes (/#/billing) and query routers (?route=checkout/checkout) stay denied.
+// Query and fragment are dropped before decoding, so an encoded %3F in a path
+// is still screened as path text.
+const PATH_ONLY_DEFAULTS = new Set(['payment-providers', 'banking']);
 function withoutQuery(value: string) {
   return value.replace(/[?#][\s\S]*$/, '');
 }
@@ -282,7 +285,9 @@ export function matchingDefaultRule(
     if (
       (rule.kind === 'host-regex'
         ? [...variants].some((url) => regex.test(hostOf(url)))
-        : [...paths].some((url) => regex.test(url))) &&
+        : [...(PATH_ONLY_DEFAULTS.has(rule.id) ? paths : variants)].some((url) =>
+            regex.test(url),
+          )) &&
       (!found || rank[rule.mode] > rank[found.mode])
     )
       found = rule;

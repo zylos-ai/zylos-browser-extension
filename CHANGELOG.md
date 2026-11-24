@@ -4,13 +4,16 @@
 
 ### Fixed
 
-- Default URL rules (billing, payment providers, banking and others) now match
-  only the site and path, not the query or fragment. A LinkedIn people search
-  for "stripe" or "bank" is no longer treated as a restricted page. Payment and
-  bank sites and checkout/billing paths stay denied. Custom rules already
-  matched hosts only and are unchanged.
+- The payment-provider and banking keyword rules now match only the site and
+  path, not the query or fragment. A LinkedIn people search for "stripe" or
+  "bank" is no longer treated as a restricted page. Payment and bank sites stay
+  denied, and the other default URL rules (billing, account security,
+  credentials and others) still match the full URL, so hash routes such as
+  `/#/billing` and query routes such as `?route=checkout/checkout` stay denied.
+  Custom rules already matched hosts only and are unchanged.
 - Fill, type and keypress check only the top frame and the frame that holds
-  focus, instead of every frame in the page. A hidden third-party frame such as
+  focus (through iframe, frame, object or embed), instead of every frame in the
+  page. A hidden third-party frame such as
   js.stripe.com no longer blocks typing into the page; typing into a restricted
   frame (for example a Stripe card field) is still blocked.
 - When the current page cannot be read, the Agent is told whether it is still

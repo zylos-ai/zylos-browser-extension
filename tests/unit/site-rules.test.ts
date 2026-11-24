@@ -110,9 +110,9 @@ describe('site rule patterns', () => {
     'https://www.linkedin.com/search/results/people/?keywords=stripe',
     'https://www.linkedin.com/search/results/people/?keywords=bank%20of%20america&origin=SWITCH',
     'https://www.linkedin.com/search/results/people/?keywords=%2573tripe',
-    'https://example.com/jobs?redirect=%2Fcheckout',
     'https://example.com/feed#paypal',
-  ])('url-regex defaults ignore query and fragment of %s', (url) => {
+    'https://example.com/feed?q=online%20banking#bank',
+  ])('payment and bank keyword defaults ignore query and fragment of %s', (url) => {
     expect(matchingDefaultRule(url, defaultSiteRules())).toBeUndefined();
   });
 
@@ -125,6 +125,17 @@ describe('site rule patterns', () => {
     ['https://shop.example/checkout?keywords=x', 'billing'],
     ['https://shop.example/%2563heckout?x=1', 'billing'],
     ['https://example.com/a%3F/billing', 'billing'],
+    ['https://app.example/#/billing', 'billing'],
+    ['https://app.example/#/checkout', 'billing'],
+    ['https://app.example/#!/settings/security', 'account-security'],
+    ['https://app.example/#/account/password', 'account-security'],
+    ['https://app.example/#/settings/api-keys', 'credentials'],
+    ['https://app.example/#/delete-account', 'account-removal'],
+    ['https://shop.example/index.php?route=checkout/checkout', 'billing'],
+    ['https://host.example/index.php?rp=/user/security', 'account-security'],
+    ['https://host.example/index.php?rp=/account/paymentmethods', 'account-security'],
+    ['https://host.example/index.php?rp=/user/password', 'account-security'],
+    ['https://example.com/jobs?redirect=%2Fcheckout', 'billing'],
   ])('payment hosts and sensitive paths stay denied: %s', (url, id) => {
     const rule = matchingDefaultRule(url, defaultSiteRules());
     expect(rule?.id).toBe(id);
