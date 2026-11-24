@@ -25,7 +25,7 @@ export default {
   siteAccessDefaults: 'Default access rules',
   siteAccessPatternDetails: 'Match expression',
   siteAccessDefaultsHint:
-    'Billing and other restricted pages are denied by these default rules. Disable a rule or change its access here; custom rules override defaults.',
+    'Billing and other restricted pages are denied by these default rules. Payment-provider and bank name rules check the site and path, not search terms. Disable a rule or change its access here; custom rules override defaults.',
   siteAccessDefaultMode: 'Access for {rule}',
   siteDefaultBilling: 'Billing and checkout',
   siteDefaultPaymentProviders: 'Payment providers',

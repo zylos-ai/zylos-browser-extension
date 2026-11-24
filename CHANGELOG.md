@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- The payment-provider and banking keyword rules now match only the site and
+  path, not the query or fragment. A LinkedIn people search for "stripe" or
+  "bank" is no longer treated as a restricted page. Payment and bank sites stay
+  denied, and the other default URL rules (billing, account security,
+  credentials and others) still match the full URL, so hash routes such as
+  `/#/billing` and query routes such as `?route=checkout/checkout` stay denied.
+  Custom rules already matched hosts only and are unchanged.
+- Fill, type and keypress check only the top frame and the frame that holds
+  focus (through iframe, frame, object or embed), instead of every frame in the
+  page. A hidden third-party frame such as
+  js.stripe.com no longer blocks typing into the page; typing into a restricted
+  frame (for example a Stripe card field) is still blocked.
+- When the current page cannot be read, the Agent is told whether it is still
+  navigating or restricted, and by which rule.
 - Batch `open` no longer hangs with the Relay stuck on `DECISION_BUSY`
   (OPENM-1425): page settling is capped at 10s, popup adoption steps at 3s
   each, and a round watchdog (action budgets + 15s per action + 120s) cancels

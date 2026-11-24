@@ -1,5 +1,5 @@
 import {
-  canReadPage,
+  pageUnavailableReason,
   assertPageDocument,
   getPageDocument,
   readPageDocument,
@@ -41,15 +41,21 @@ export async function captureCurrentPage(
         : await chrome.tabs.get(tabId);
     if (!tab || tab.id === undefined) throw new Error('NO_PAGE');
     if (tab.windowId !== win.id) throw new Error('WRONG_WINDOW');
-    if (!canReadPage(tab)) {
-      if (tab.url) await recordSiteAccess(tab.url, 'read-page', false);
+    const unavailable = pageUnavailableReason(tab);
+    if (unavailable) {
+      if (tab.url && unavailable.kind === 'restricted')
+        await recordSiteAccess(tab.url, 'read-page', false);
       if (selections.length) throw new Error('ui.error.selectionChanged');
       return {
         context: {
           type: 'current-page',
           status: 'unavailable',
           reason:
-            'This page is restricted or navigating. Do not reopen it to bypass the restriction.',
+            unavailable.kind === 'navigating'
+              ? 'This page is still navigating. Wait for it to finish loading, then try again. Do not reopen it.'
+              : unavailable.rule
+                ? `This page is restricted by the site access ${unavailable.rule}. Do not reopen it to bypass the restriction; the owner can change the rule in the extension's site permissions.`
+                : 'This page is restricted (a browser, private or protected page the extension cannot read). Do not reopen it to bypass the restriction.',
         },
       };
     }

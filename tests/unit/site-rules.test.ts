@@ -107,6 +107,42 @@ describe('site rule patterns', () => {
   });
 
   it.each([
+    'https://www.linkedin.com/search/results/people/?keywords=stripe',
+    'https://www.linkedin.com/search/results/people/?keywords=bank%20of%20america&origin=SWITCH',
+    'https://www.linkedin.com/search/results/people/?keywords=%2573tripe',
+    'https://example.com/feed#paypal',
+    'https://example.com/feed?q=online%20banking#bank',
+  ])('payment and bank keyword defaults ignore query and fragment of %s', (url) => {
+    expect(matchingDefaultRule(url, defaultSiteRules())).toBeUndefined();
+  });
+
+  it.each([
+    ['https://dashboard.stripe.com/payments', 'billing'],
+    ['https://js.stripe.com/v3/m-outer.html', 'payment-providers'],
+    ['https://www.paypal.com/signin?keywords=x', 'payment-providers'],
+    ['https://example.com/search/stripe?q=1', 'payment-providers'],
+    ['https://onlinebanking.example/login?keywords=x', 'banking'],
+    ['https://shop.example/checkout?keywords=x', 'billing'],
+    ['https://shop.example/%2563heckout?x=1', 'billing'],
+    ['https://example.com/a%3F/billing', 'billing'],
+    ['https://app.example/#/billing', 'billing'],
+    ['https://app.example/#/checkout', 'billing'],
+    ['https://app.example/#!/settings/security', 'account-security'],
+    ['https://app.example/#/account/password', 'account-security'],
+    ['https://app.example/#/settings/api-keys', 'credentials'],
+    ['https://app.example/#/delete-account', 'account-removal'],
+    ['https://shop.example/index.php?route=checkout/checkout', 'billing'],
+    ['https://host.example/index.php?rp=/user/security', 'account-security'],
+    ['https://host.example/index.php?rp=/account/paymentmethods', 'account-security'],
+    ['https://host.example/index.php?rp=/user/password', 'account-security'],
+    ['https://example.com/jobs?redirect=%2Fcheckout', 'billing'],
+  ])('payment hosts and sensitive paths stay denied: %s', (url, id) => {
+    const rule = matchingDefaultRule(url, defaultSiteRules());
+    expect(rule?.id).toBe(id);
+    expect(rule?.mode).toBe('denied');
+  });
+
+  it.each([
     ['https://shop.example/check\tout', 'billing'],
     ['https://example.com/oauth/author\nize', 'credentials'],
     ['https://ch\nase.com', 'banks'],

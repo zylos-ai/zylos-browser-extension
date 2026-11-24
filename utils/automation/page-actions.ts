@@ -1,6 +1,6 @@
 import type { Command } from '../commands';
 import type { Point } from './types';
-import { collectFrames, frameAllowed, type Frame, type Send } from './frames';
+import { assertInputFrames, collectFrames, frameAllowed, type Frame, type Send } from './frames';
 import { assertPointPermissions } from './point-permissions';
 import { assertSiteAction, recordSiteAccess, siteAccessRevision } from '../site-access';
 import domAction from './injected/dom-action.js?raw';
@@ -126,7 +126,7 @@ export class PageActions {
     const element = prepared ?? (await this.resolve(command.ref));
     await this.assertCurrentFrameAction(element.frame, command.op);
     // Native text follows page focus, which can move away from the target ref.
-    for (const frame of await this.frames()) this.assertFrameAction(frame, command.op);
+    await this.assertFocusedInput(command.op);
     // Commit deliberately does not focus again after a recovery checkpoint.
     await this.call(
       element,
@@ -137,9 +137,14 @@ export class PageActions {
     );
     this.io.beforeInput?.();
     await this.assertCurrentFrameAction(element.frame, command.op);
-    for (const frame of await this.frames()) this.assertFrameAction(frame, command.op);
+    await this.assertFocusedInput(command.op);
     await this.io.send('Input.insertText', { text: command.text });
     return { done: true };
+  }
+  private async assertFocusedInput(action: string) {
+    // Only the top frame and the focus chain receive native text input.
+    const frames = await this.frames();
+    await assertInputFrames(this.io.send, (frame) => this.assertFrameAction(frame, action), frames);
   }
   async frames(onUnavailable?: (frame: Frame) => void) {
     const frames = await collectFrames(this.io.send, onUnavailable);
@@ -631,8 +636,8 @@ export class PageActions {
   }
   async keypress(command: Extract<Command, { op: 'keypress' }>) {
     // Keyboard input follows focus, which may be held by an inaccessible frame.
-    // Fail closed if any frame's permission does not allow keyboard interaction.
-    for (const frame of await this.frames()) this.assertFrameAction(frame, 'keypress');
+    // Fail closed if the top frame or any frame on the focus chain disallows it.
+    await this.assertFocusedInput('keypress');
     if (command.ref) await this.call(await this.resolve(command.ref), 'focus');
     for (const frame of await this.safeFrames()) {
       const focus = await this.query(frame, 'focus');
@@ -735,7 +740,8 @@ export class PageActions {
     const held: string[] = [];
     let pressed = false;
     try {
-      for (const frame of await this.frames()) this.assertFrameAction(frame, 'keypress');
+      // Focus or a child frame may have changed while probing; recheck before dispatch.
+      await this.assertFocusedInput('keypress');
       for (const modifier of new Set(command.modifiers || [])) {
         held.push(modifier);
         await this.io.send('Input.dispatchKeyEvent', {

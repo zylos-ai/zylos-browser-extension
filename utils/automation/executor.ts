@@ -15,6 +15,7 @@ import {
   frameSessions,
   enableFrames,
   clearFrameSessions,
+  assertInputFrames,
   collectFrames,
   frameAllowed,
 } from './frames';
@@ -2180,7 +2181,8 @@ async function executeInternal(
     if (sessionId && frameSessions().get(sessionId)?.tabId !== lease.id) fail('FRAME_UNAVAILABLE');
     if (dialog) fail('DIALOG_OPEN', `${dialog.type}: ${dialog.message}; use dialog`);
     if (method === 'Input.insertText') {
-      for (const frame of await collectFrames(actionCdp)) assertSiteAction(frame.url, command.op);
+      // Text goes to the focused frame; unrelated hidden frames must not block it.
+      await assertInputFrames(actionCdp, (frame) => assertSiteAction(frame.url, command.op));
       check();
     }
     const target = { tabId: lease.id, ...(sessionId ? { sessionId } : {}) };
