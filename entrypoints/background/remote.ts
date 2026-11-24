@@ -267,6 +267,17 @@ export function startRemoteBackground() {
   });
   const relayMatches = (relayUrl: string, localKeyId: string) =>
     !!config.key && config.relayUrl === relayUrl && state.keyId === localKeyId;
+  // Browser name the relay last received on this socket (hello or browser-name frame).
+  let sentBrowserName: string | undefined;
+  // After a worker restart the hello can go out before the Workspace record is
+  // restored; once both the relay is ready and the record is loaded, catch up.
+  function syncBrowserName() {
+    if (!state.connected) return;
+    const browserName = workspace.relayBrowserName();
+    if (!browserName || browserName === sentBrowserName) return;
+    sentBrowserName = browserName;
+    sendRaw({ type: 'browser-name', browserName });
+  }
   const workspace = new WorkspaceConnector({
     api: workspaceApi,
     storage: chromeLocalStorage,
@@ -283,9 +294,7 @@ export function startRemoteBackground() {
     relayMatches,
     relayConnected: () => state.connected,
     // Old relays ignore this frame; a closed socket reports the name in the next hello.
-    onBrowserName: (browserName) => {
-      if (state.connected) sendRaw({ type: 'browser-name', browserName });
-    },
+    onBrowserName: () => syncBrowserName(),
     publish: () => publish(),
   });
   let stopTaskPromise: Promise<void> | undefined;
@@ -1182,6 +1191,7 @@ export function startRemoteBackground() {
       helloResume = recoveryDeadline ? resumeDescriptor() : undefined;
       const build = extensionBuild();
       const workspaceBrowserName = workspace.relayBrowserName();
+      sentBrowserName = workspaceBrowserName;
       sendRaw({
         type: 'hello',
         version: extensionVersion(),
@@ -1396,6 +1406,7 @@ export function startRemoteBackground() {
         if (resumeReady) for (const frame of outbox.values()) sendRaw(frame);
         wakeTransport();
         publish();
+        syncBrowserName();
         void workspace.onRelayReady();
         return;
       case 'task-ack':
@@ -1795,6 +1806,7 @@ export function startRemoteBackground() {
     ];
     workspaceUrl = resolveWorkspaceUrl(savedWorkspaceUrl);
     await workspace.init().catch(() => {});
+    syncBrowserName();
     mark('workspace-restored');
     if (config.enabled && state.configured) void connect();
     publish();
