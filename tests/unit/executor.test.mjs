@@ -2009,7 +2009,7 @@ test('a reattachment without selection refused by a foreign frame re-arms the le
   ]);
   assert.equal(result.recovered, true);
   assert.deepEqual(result.removal, { requested: 1, removed: 1, outcome: 'completed' });
-  // The refusal itself proves a foreign frame was embedded (M8).
+  // The refusal itself proves a foreign frame was embedded.
   assert.equal(result.pageMayHaveChanged, true);
   await s.executor.release(false);
 });

@@ -661,7 +661,7 @@ describe('automatic recovery inside a batch', () => {
       expect.objectContaining({ status: 'skipped', count: 2 }),
     ]);
   });
-  it('manual recover-control passes pageMayHaveChanged to the Agent (M7)', async () => {
+  it('manual recover-control passes pageMayHaveChanged to the Agent', async () => {
     const browser = vi.fn(async () => ({
       recovered: true,
       observation: { text: 'fresh' },
