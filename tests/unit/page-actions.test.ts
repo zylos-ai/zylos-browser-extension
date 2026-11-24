@@ -60,9 +60,11 @@ test.each(['fill', 'type'] as const)(
     });
     expect(calls).toEqual([
       'Page.getFrameTree',
+      'Page.createIsolatedWorld',
       'commit-input',
       'consume',
       'Page.getFrameTree',
+      'Page.createIsolatedWorld',
       'Input.insertText',
     ]);
     expect(

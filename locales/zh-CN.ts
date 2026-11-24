@@ -21,7 +21,7 @@ export default {
   siteAccessDefaults: '默认访问规则',
   siteAccessPatternDetails: '匹配表达式',
   siteAccessDefaultsHint:
-    '账务等页面由这些默认规则禁止访问。可在此关闭规则或修改权限；自定义规则优先。',
+    '账务等页面由这些默认规则禁止访问。支付服务商和银行名称规则只检查站点和路径，不检查搜索词。可在此关闭规则或修改权限；自定义规则优先。',
   siteAccessDefaultMode: '{rule} 的访问权限',
   siteDefaultBilling: '账务与结账页面',
   siteDefaultPaymentProviders: '支付平台',
