@@ -2017,6 +2017,38 @@ describe('decision transport background', () => {
     expect(ws.last('hello')!.browserName).toBe('Work Laptop');
   });
 
+  it.each([true, false])(
+    'reports the Workspace browser name when the first hello after a worker restart precedes Workspace restore (workspace=%s)',
+    async (workspaceOwned) => {
+      if (workspaceOwned)
+        storage.workspaceConnection = {
+          agentMemberId: 'ag1',
+          agentName: 'Max',
+          browserName: 'Work Laptop',
+          phase: 'connected',
+          connectionId: 'c1',
+          relayUrl: 'wss://agent.example/browser-remote/ext',
+          localKeyId: 'abababababab',
+        };
+      startRemoteBackground();
+      // Open and handshake the socket as soon as it exists, before boot restores Workspace.
+      for (let i = 0; i < 1000 && !sockets[0]; i++) await Promise.resolve();
+      const ws = sockets[0]!;
+      ws.open();
+      expect(ws.last('hello')).not.toHaveProperty('browserName');
+      ws.receive({
+        type: 'ready',
+        capabilities: ['agent-loop-v1', 'browser-instance-v1', 'agent-message-v2'],
+        endpointId: `abababababab.${storage.remoteBrowserId}`,
+      });
+      await flush();
+      const named = ws.frames.filter((f) => f.type === 'browser-name');
+      if (workspaceOwned)
+        expect(named).toEqual([{ type: 'browser-name', browserName: 'Work Laptop' }]);
+      else expect(named).toEqual([]);
+    },
+  );
+
   it('omits the browser name from hello for a manual relay config', async () => {
     const ws = await bootConnected();
     expect(ws.last('hello')).not.toHaveProperty('browserName');
