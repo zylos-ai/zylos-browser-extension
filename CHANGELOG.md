@@ -25,6 +25,13 @@
 - A task whose first request gets no Agent progress within 5 minutes now ends
   with "Agent not responding" instead of showing "Connecting" forever (#32).
   A "New task" divider separates tasks in the panel.
+- Losing browser control involuntarily (debugger detached, Chrome's Cancel
+  bar, recovery expired or failed, a password-manager frame, the task tab
+  moved to another window) no longer closes the task tab: it is ungrouped and
+  handed back. A user Stop still closes agent-owned tabs as before (borrowed
+  tabs are only ungrouped). `agent-turn-end` now carries a top-level `reason`
+  for interrupted and stopped tasks (`user_stop` for Stop) so the Agent
+  learns why (#33).
 
 ### Known limitations
 

@@ -6,6 +6,7 @@ const executor = vi.hoisted(() => ({
   release: vi.fn(async () => {}),
   abandonTarget: vi.fn(),
   completeTask: vi.fn(async () => {}),
+  lastControlEndReason: vi.fn(() => 'recovery_failed'),
   currentControl: vi.fn(
     (): null | {
       sessionId: string;
@@ -999,6 +1000,7 @@ describe('decision transport background', () => {
     expect(ws.last('agent-turn-end')).toMatchObject({
       taskId: request.taskId,
       status: 'stopped',
+      reason: 'user_stop',
       interruption: { recoveryRemoval: { requested: 1, outcome: 'unknown' } },
       text: expect.any(String),
     });
@@ -1048,6 +1050,8 @@ describe('decision transport background', () => {
     expect(ws.last('agent-turn-end')).toMatchObject({
       taskId: request.taskId,
       status: 'interrupted',
+      // The control-end cause is top-level; the strict relay receipt stays unchanged.
+      reason: 'recovery_failed',
       interruption: {
         reason: 'CONTROL_LOST',
         resume: 'new-user-message-required',
@@ -1057,6 +1061,65 @@ describe('decision transport background', () => {
     expect(ws.frames.filter((frame) => frame.type === 'agent-turn-end')).toHaveLength(1);
   });
 
+  it('derives recovery_expired from the receipt outcome, not a stale executor cause', async () => {
+    const ws = await bootConnected(false, false, true, false, true);
+    const request = await begin(ws);
+    const hooks = executor.configureControlRecovery.mock.calls[0]![0];
+    hooks.onSuspended({
+      recoveryId: '22222222-2222-4222-8222-222222222222',
+      expiresAt: Date.now() + 120000,
+      reason: 'target_closed',
+      cause: 'unknown',
+    });
+    executor.lastControlEndReason.mockReturnValue('recovery_failed');
+    hooks.onRevoked('expired');
+    await flush();
+    expect(ws.last('agent-turn-end')).toMatchObject({
+      taskId: request.taskId,
+      status: 'interrupted',
+      reason: 'recovery_expired',
+      interruption: { recoveryOutcome: 'expired' },
+    });
+  });
+  it.each(['tab_closed', 'foreign_frame'] as const)(
+    'keeps the concrete cause %s even when a recovery receipt is attached',
+    async (cause) => {
+      const ws = await bootConnected(false, false, true, false, true);
+      await begin(ws);
+      const hooks = executor.configureControlRecovery.mock.calls[0]![0];
+      hooks.onSuspended({
+        recoveryId: '22222222-2222-4222-8222-222222222222',
+        expiresAt: Date.now() + 120000,
+        reason: 'target_closed',
+        cause: 'unknown',
+      });
+      executor.lastControlEndReason.mockReturnValue(cause);
+      hooks.onRevoked('revoked');
+      await flush();
+      expect(ws.last('agent-turn-end')).toMatchObject({ status: 'interrupted', reason: cause });
+    },
+  );
+  it('control lost while awaiting a decision (cancelLoop path) still reports the cause (#33)', async () => {
+    const ws = await bootConnected(false, false, true, false, true);
+    const notify = executor.onState.mock.calls[0]![0] as () => void;
+    executor.currentControl.mockReturnValue({
+      sessionId: 'test',
+      tabId: 3,
+      tabIds: [3],
+      phase: 'ready',
+    });
+    notify();
+    const request = await selectPage(ws);
+    executor.currentControl.mockReturnValue(null);
+    executor.lastControlEndReason.mockReturnValue('target_closed');
+    notify();
+    await flush();
+    expect(ws.last('agent-turn-end')).toMatchObject({
+      taskId: request.taskId,
+      status: 'interrupted',
+      reason: 'target_closed',
+    });
+  });
   it('returns a terminal recovery receipt even when native cleanup remains pending', async () => {
     const ws = await bootConnected(false, false, true, false, true);
     await ask({ type: 'remote-diagnostics-set-enabled', enabled: true });

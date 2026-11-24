@@ -9,6 +9,8 @@ import { formatTaskNotice, type TaskNotice } from '../../utils/task-notice';
 import {
   CONTROL_RECOVERY_CAPABILITY,
   RECOVERY_FRAME_SELECTION_CAPABILITY,
+  turnEndReason,
+  type TurnEndReason,
 } from '../../utils/control-loss';
 import {
   DIAGNOSTICS_CAPABILITY,
@@ -71,6 +73,7 @@ import {
 import { captureCurrentPage, clearPageContexts, forgetPageContext } from '../../utils/page-context';
 import {
   completeTask,
+  lastControlEndReason,
   createTask,
   abortControlRecovery,
   configureControlRecovery,
@@ -426,7 +429,7 @@ export function startRemoteBackground() {
     recoveryDeadline = 0;
     setRecovery('failed');
     state.error = error;
-    if (loop.active) cancelLoop('interrupted');
+    if (loop.active) cancelLoop('interrupted', false, 'transport_lost');
     outbox.clear();
     wakeTransport();
     preview.finish('interrupted');
@@ -708,11 +711,17 @@ export function startRemoteBackground() {
       });
     },
     cancel: () => idem.cancel(),
-    revokeRecovery: () => abortControlRecovery(),
+    revokeRecovery: (outcome) => abortControlRecovery(outcome),
     error: () => {
       endDiagnosticTask('interrupted', true);
       state.error = 'ui.error.chatSaveFailed';
-      if (loop.taskId) send({ type: 'agent-turn-end', taskId: loop.taskId, status: 'interrupted' });
+      if (loop.taskId)
+        send({
+          type: 'agent-turn-end',
+          taskId: loop.taskId,
+          status: 'interrupted',
+          reason: 'other',
+        });
       setTimeout(publish, 0);
     },
     execute: (actions, assertActive, requestId, hasUpdates, expectedControl) =>
@@ -870,6 +879,10 @@ export function startRemoteBackground() {
         taskId,
         status,
         text,
+        // Top-level so a strict relay `interruption` receipt stays valid.
+        ...(status === 'interrupted'
+          ? { reason: turnEndReason(interruption?.recoveryOutcome, lastControlEndReason()) }
+          : {}),
         ...(interruption ? { interruption } : {}),
       });
       endDiagnosticTask(status);
@@ -889,7 +902,11 @@ export function startRemoteBackground() {
     onRevoked: (outcome) => loop.endRecovery(outcome),
   });
 
-  function cancelLoop(status: 'stopped' | 'interrupted', interrupt = false) {
+  function cancelLoop(
+    status: 'stopped' | 'interrupted',
+    interrupt = false,
+    cause: TurnEndReason | undefined = undefined,
+  ) {
     state.agentActivity = undefined;
     chatRevision++; // Also invalidate a message still collecting its initial page overview.
     const taskId = loop.taskId;
@@ -916,6 +933,14 @@ export function startRemoteBackground() {
         taskId,
         status,
         ...(interrupt ? { interrupt: true } : {}),
+        reason:
+          status === 'stopped'
+            ? 'user_stop'
+            : (cause ??
+              turnEndReason(
+                removalInterruption?.recoveryOutcome,
+                currentControl() ? undefined : lastControlEndReason(),
+              )),
         ...(removalInterruption ? { interruption: removalInterruption, text } : {}),
       });
       if (removalInterruption)
@@ -1060,7 +1085,7 @@ export function startRemoteBackground() {
     sharing.revoke();
     if (socket) recordDiagnostic('socket-close', 'remote_disconnect', { closeCode: 1000 });
     if (loop.active) {
-      cancelLoop('interrupted');
+      cancelLoop('interrupted', false, 'transport_lost');
       void completeTask().catch(() => {});
     }
     clearTimeout(recoveryTimer);

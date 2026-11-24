@@ -235,7 +235,7 @@ export type LoopIO = {
     interruption?: ControlInterruption,
   ): Promise<void>;
   cancel(): void;
-  revokeRecovery?(): void;
+  revokeRecovery?(outcome: RecoveryOutcome): void;
   error?(error: unknown): void;
   record?(method: string, result: unknown): void;
   progress?(summary: string | undefined): void;
@@ -340,7 +340,7 @@ export class BrowserLoop {
           }
         : {}),
     });
-    this.io.revokeRecovery?.();
+    this.io.revokeRecovery?.(outcome);
   }
   get taskId() {
     return this.turn?.id;

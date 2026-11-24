@@ -679,3 +679,71 @@ test('borrowed selection refuses navigation and never falls back to another acti
   assert.equal(s.tabs.has(2), true);
   await s.executor.release();
 });
+
+test.each(['target_closed', 'canceled_by_user'])(
+  'involuntary debugger loss (%s) hands the open task tab back instead of closing it',
+  async (reason) => {
+    const s = await fixture();
+    await s.start();
+    const task = s.executor.currentControl();
+    await s.command({ op: 'snapshot' }).catch(() => {});
+    assert.ok(s.attached.has(task.tabId));
+    chrome.debugger.onDetach.emit({ tabId: task.tabId }, reason);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(s.executor.currentControl(), null);
+    assert.ok(s.tabs.has(task.tabId), 'still-open task tab must survive control loss');
+    assert.equal(s.tabs.get(task.tabId).groupId, -1);
+    assert.equal(s.groups.has(task.groupId), false);
+    assert.equal(s.executor.lastControlEndReason(), reason);
+  },
+);
+
+test('closing the task tab reports tab_closed; a replaced task still closes temporaries', async () => {
+  const s = await fixture();
+  await s.start();
+  const first = s.executor.currentControl();
+  chrome.tabs.onRemoved.emit(first.tabId);
+  s.tabs.delete(first.tabId);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(s.executor.currentControl(), null);
+  assert.equal(s.executor.lastControlEndReason(), 'tab_closed');
+  await s.start();
+  const second = s.executor.currentControl();
+  await s.start(); // A new task replacing the old one is not a control loss.
+  assert.equal(s.tabs.has(second.tabId), false);
+});
+
+test('dragging the task tab to another window reports tab_moved; a new task clears the cause', async () => {
+  const s = await fixture();
+  await s.start();
+  const task = s.executor.currentControl();
+  chrome.tabs.onDetached.emit(task.tabId, { oldWindowId: 1, oldPosition: 0 });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(s.executor.currentControl(), null);
+  assert.ok(s.tabs.has(task.tabId), 'a moved task tab is handed back, not closed');
+  assert.equal(s.executor.lastControlEndReason(), 'tab_moved');
+  await s.start();
+  assert.equal(s.executor.lastControlEndReason(), undefined);
+});
+
+test('release after recovery ends (target_unavailable) hands the task tab back', async () => {
+  const s = await fixture();
+  await s.start();
+  const task = s.executor.currentControl();
+  await s.executor.release(true, false, 'target_unavailable');
+  assert.equal(s.executor.currentControl(), null);
+  assert.ok(s.tabs.has(task.tabId));
+  assert.equal(s.tabs.get(task.tabId).groupId, -1);
+});
+
+test.each(['panel_stop', 'command_stop'])(
+  'user Stop (%s) keeps the 0.18.0 behavior and closes the agent-owned task tab',
+  async (reason) => {
+    const s = await fixture();
+    await s.start();
+    const task = s.executor.currentControl();
+    await s.executor.release(true, false, reason);
+    assert.equal(s.executor.currentControl(), null);
+    assert.equal(s.tabs.has(task.tabId), false);
+  },
+);
