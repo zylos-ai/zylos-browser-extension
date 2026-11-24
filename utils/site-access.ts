@@ -348,6 +348,15 @@ export function isSiteUrlBlocked(url: unknown): boolean {
   return decision(url).mode === 'denied';
 }
 
+/** Why a URL is denied: a default rule label, a custom rule, or recovery. */
+export function siteUrlBlockReason(url: unknown): string | undefined {
+  const result = decision(url);
+  if (result.mode !== 'denied') return;
+  if (recoveryRequired) return 'access rules need owner reset';
+  if ('grant' in result && result.grant) return 'custom site rule';
+  return 'rule' in result && result.rule ? `default rule "${result.rule.label}"` : undefined;
+}
+
 export function assertSiteAction(url: unknown, action: string): void {
   if (recoveryRequired)
     fail('BLOCKED_URL', 'BLOCKED_URL: access rules need owner reset in the extension panel');

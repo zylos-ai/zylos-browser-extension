@@ -1696,9 +1696,13 @@ test('scrolled click hit tests use document coordinates while native input stays
   }
 });
 
-test.each(['denied', 'read-only'])(
-  'native text insertion rejects a child becoming %s after the last PageActions check',
-  async (mode) => {
+test.each([
+  ['denied', true],
+  ['read-only', true],
+  ['denied', false],
+])(
+  'native text insertion rechecks a child becoming %s after the last PageActions check (focused: %s)',
+  async (mode, focused) => {
     const s = await observationSetup();
     const { initializeSiteAccess, grantSiteAccess } = await import('../../utils/site-access');
     const { PageActions } = await import('../../utils/automation/page-actions');
@@ -1706,7 +1710,6 @@ test.each(['denied', 'read-only'])(
     await grantSiteAccess('https://child.example', mode, 15);
     const main = { id: 'main', url: s.tab.url };
     const originalSend = chrome.debugger.sendCommand;
-    const originalGet = chrome.tabs.get;
     const originalFrames = PageActions.prototype.frames;
     let frameChecks = 0,
       insertPending = false,
@@ -1722,12 +1725,11 @@ test.each(['denied', 'read-only'])(
       if (++frameChecks === 2) insertPending = true;
       return snapshot;
     });
-    chrome.tabs.get = async (id) => {
-      // The last PageActions snapshot was already returned with only the parent.
-      if (insertPending) restricted = true;
-      return originalGet(id);
-    };
+    let armed = false;
     chrome.debugger.sendCommand = async (target, method, params) => {
+      // The child appears only in the executor's own final frame collection,
+      // after the last PageActions focus probe has already passed.
+      if (method === 'Page.getFrameTree' && armed) restricted = true;
       if (method === 'Page.getFrameTree')
         return {
           frameTree: {
@@ -1746,10 +1748,33 @@ test.each(['denied', 'read-only'])(
           },
         };
       if (method === 'Runtime.callFunctionOn') return { result: { value: true } };
-      if (method === 'Input.insertText') inserts++;
+      // One execution context per frame, so the focus chain is resolved per frame.
+      if (method === 'Page.createIsolatedWorld')
+        return { executionContextId: params?.frameId === 'main' ? 7 : 8 };
+      // Focus moves into the new child only in the focused variant.
+      if (method === 'Runtime.evaluate' && params?.contextId === 7) {
+        if (insertPending) armed = true;
+        return { result: restricted && focused ? { objectId: 'frame-owner' } : {} };
+      }
+      if (method === 'DOM.describeNode' && params?.objectId === 'frame-owner')
+        return { node: { nodeName: 'IFRAME', frameId: 'child' } };
+      if (method === 'Input.insertText') {
+        inserts++;
+        return {};
+      }
       return originalSend(target, method, params);
     };
     try {
+      if (!focused) {
+        // An unfocused (e.g. hidden third-party) restricted frame does not receive text.
+        await s.executor.execute(
+          { op: 'fill', ref: '@12345678-e1', text: 'private draft' },
+          Date.now() + 10000,
+        );
+        assert.equal(restricted, true);
+        assert.equal(inserts, 1);
+        return;
+      }
       await assert.rejects(
         s.executor.execute(
           { op: 'fill', ref: '@12345678-e1', text: 'private draft' },
@@ -2014,6 +2039,39 @@ test('a reattachment without selection refused by a foreign frame re-arms the le
   await s.executor.release(false);
 });
 
+// #33 review: the agent-facing end reason follows the concrete release cause.
+test('closing the tab while recoverable reports tab_closed, not recovery_failed', async () => {
+  const s = await recoverySetup();
+  s.detach();
+  assert.ok(s.executor.currentControlRecovery());
+  chrome.tabs.onRemoved.emit(s.tab.id);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(s.executor.currentControl(), null);
+  assert.equal(s.executor.lastControlEndReason(), 'tab_closed');
+});
+
+test.each([
+  ['expired', 'recovery_expired'],
+  ['revoked', 'recovery_failed'],
+])('a recovery ended as %s reports %s', async (outcome, reason) => {
+  const s = await recoverySetup();
+  s.detach();
+  s.executor.abortControlRecovery(outcome);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(s.executor.currentControl(), null);
+  assert.equal(s.executor.lastControlEndReason(), reason);
+});
+
+test('a recovery refused by a foreign extension frame ends as foreign_frame', async () => {
+  const s = await frameSelectionSetup();
+  const first = s.executor.currentControlRecovery();
+  chrome.debugger.attach = foreignRefusal;
+  await assert.rejects(s.executor.recoverControl(first.recoveryId));
+  s.executor.abortControlRecovery('expired');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(s.executor.lastControlEndReason(), 'foreign_frame');
+});
+
 test('other reattachment failures still end the lease', async () => {
   const s = await frameSelectionSetup();
   const recovery = s.executor.currentControlRecovery();
@@ -2082,5 +2140,38 @@ test('without recovery a refused first attach reports FOREIGN_FRAME_PRESENT', as
     (error) => error.code === 'FOREIGN_FRAME_PRESENT',
   );
   assert.equal(s.executor.currentControlRecovery(), undefined);
+  await s.executor.release(false);
+});
+
+test('a hung Chrome call during popup adoption cannot wedge the popup queue (OPENM-1425)', async () => {
+  const s = await borrowedWithPopup();
+  vi.useFakeTimers();
+  try {
+    const hung = { ...s.source, id: 5, groupId: -1, openerTabId: 1 };
+    const next = { ...s.source, id: 6, groupId: -1, openerTabId: 1 };
+    chrome.tabs.get = async (id) => {
+      if (id === 1) return s.source;
+      if (id === 4) return s.popup;
+      if (id === 5) return hung;
+      if (id === 6) return next;
+      throw new Error('No tab');
+    };
+    chrome.tabs.group = ({ tabIds }) =>
+      tabIds.includes(5) ? new Promise(() => {}) : Promise.resolve(10);
+    chrome.tabs.onCreated.emit(hung);
+    chrome.tabs.onCreated.emit(next);
+    let drained = false;
+    void s.executor.flushTaskPopups().then(() => (drained = true));
+    await vi.advanceTimersByTimeAsync(s.executor.POPUP_STEP_LIMIT_MS - 1);
+    assert.equal(drained, false);
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(0);
+    assert.equal(drained, true);
+    const ids = s.executor.currentControl().tabIds;
+    assert.ok(ids.includes(6), 'the popup queued behind the hung one is still adopted');
+    assert.ok(!ids.includes(5), 'the hung popup is not half-adopted');
+  } finally {
+    vi.useRealTimers();
+  }
   await s.executor.release(false);
 });

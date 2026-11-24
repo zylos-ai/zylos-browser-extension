@@ -665,6 +665,19 @@ html[data-theme='zylos'] > body {
     line-height: var(--text-caption--line-height);
     color: var(--color-muted);
   }
+  .task-divider {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 4px 0;
+    white-space: nowrap;
+  }
+  .task-divider::before,
+  .task-divider::after {
+    content: '';
+    flex: 1;
+    border-top: 1px solid var(--color-base-300);
+  }
   .system-label {
     display: block;
     margin-bottom: 4px;

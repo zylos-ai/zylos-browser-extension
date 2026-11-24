@@ -1,4 +1,18 @@
-import { isSiteUrlBlocked, assertSiteAction, recordSiteAccess } from './site-access';
+import {
+  isSiteUrlBlocked,
+  assertSiteAction,
+  recordSiteAccess,
+  siteUrlBlockReason,
+} from './site-access';
+
+export type PageUnavailableReason = { kind: 'navigating' } | { kind: 'restricted'; rule?: string };
+
+/** Distinguishes a page that is still loading from one that is not readable. */
+export function pageUnavailableReason(tab: chrome.tabs.Tab): PageUnavailableReason | undefined {
+  if (canReadPage(tab)) return;
+  if (tab.pendingUrl) return { kind: 'navigating' };
+  return { kind: 'restricted', rule: siteUrlBlockReason(tab.url) };
+}
 
 export function canReadPage(tab: chrome.tabs.Tab) {
   try {

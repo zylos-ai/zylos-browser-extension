@@ -15,6 +15,7 @@ import {
   frameSessions,
   enableFrames,
   clearFrameSessions,
+  assertInputFrames,
   collectFrames,
   frameAllowed,
 } from './frames';
@@ -25,6 +26,7 @@ import {
 } from '../site-access';
 import { cursorExpression } from './cursor';
 import { cleanupTask, recordTask } from './task-lifecycle';
+import { DeadlineExceeded, drainWithin, withDeadline } from '../deadline';
 import { PointerMotion } from './pointer-motion';
 import { assertPointPermissions, hitTestPoint } from './point-permissions';
 import type { Command } from '../commands';
@@ -202,6 +204,7 @@ function suspendControl(refused?: { id: number; url: string; document?: PageDocu
     tabId: target.id,
     consent: consentRevision,
     attempted: false,
+    ...(refused ? { foreignFrame: true } : {}),
     timer: undefined as unknown as ReturnType<typeof setTimeout>,
     ...(recoveryHooks?.frameSelectionEnabled?.() &&
     document?.tabId === target.id &&
@@ -249,6 +252,55 @@ async function noteForeignFrameDetach(lease: RecoveryLease) {
 export const PAGE_STATE_NOTE =
   "Another extension's frame (for example a password manager's inline menu) interrupted control. It may have closed a dialog or changed the page. Check the fresh observation before continuing; do not assume the previous plan still applies.";
 export const controlLossRevision = () => lossRevision;
+
+/**
+ * Why control last ended, reported to the agent with `agent-turn-end`.
+ * `user_stop` is reported by the panel itself; the executor never infers it.
+ */
+export type ControlEndReason =
+  | 'target_closed'
+  | 'canceled_by_user'
+  | 'recovery_expired'
+  | 'recovery_failed'
+  | 'foreign_frame'
+  | 'tab_closed'
+  | 'tab_moved'
+  | 'other';
+let endReason: ControlEndReason | undefined;
+let detachReason: 'target_closed' | 'canceled_by_user' | undefined;
+/** The cause of the most recent involuntary release, if any. */
+export const lastControlEndReason = () => endReason;
+// Releases that hand still-open task tabs back instead of closing them:
+// involuntary control loss must never destroy the user's page. A user Stop
+// (panel_stop/command_stop), a normal agent finish and a replaced task keep
+// the 0.18.0 rules and close agent-owned temporary pages (owner decision, #37).
+const KEEP_TABS_ON_RELEASE: readonly DiagnosticReason[] = [
+  'debugger_detach',
+  'target_unavailable',
+  'target_refresh_failed',
+  'tab_scope_changed',
+  'tab_lost',
+  'window_closed',
+  'pause_timeout',
+  'consent_changed',
+  'config_disabled',
+];
+function controlEndReason(
+  reason: DiagnosticReason,
+  suspended: RecoveryLease | undefined,
+): ControlEndReason {
+  // The concrete release cause wins over an open recovery lease: closing or
+  // moving the tab while recoverable is still a closed/moved tab.
+  if (reason === 'tab_lost' || reason === 'window_closed') return 'tab_closed';
+  if (reason === 'tab_scope_changed') return 'tab_moved';
+  // `foreignFrame` is shared with the detach-time probe (#30): attach refusal
+  // and a target_closed detach with another extension's frame both set it.
+  if (suspended?.foreignFrame) return 'foreign_frame';
+  if (suspended)
+    return suspended.terminalOutcome === 'expired' ? 'recovery_expired' : 'recovery_failed';
+  if (reason === 'debugger_detach') return detachReason ?? 'target_closed';
+  return 'other';
+}
 const refs = new Map<string, ElementRef>();
 const networkActivity = new NetworkActivity();
 let pendingScroll: Target | undefined;
@@ -286,6 +338,14 @@ export const matchesCurrentControlScope = (scope: object) =>
   control === scope && !!grant && !recovery;
 export const browserPageVersion = () =>
   `${control?.sessionId}:${control?.tabId}:${navigationRevision}`;
+/**
+ * Each awaited step of popup adoption is bounded so a hung Chrome call cannot
+ * wedge popupQueue (and every flush/tabs/wait behind it). OPENM-1425.
+ */
+export const POPUP_STEP_LIMIT_MS = 3_000;
+const step = <T>(work: Promise<T>, label: string) =>
+  withDeadline(work, POPUP_STEP_LIMIT_MS, `popup ${label}`);
+/** Resolves when queued popup adoption drains; callers bound how long they wait. */
 export const flushTaskPopups = () => popupQueue;
 export const onState = (fn: typeof changed) => {
   changed = fn;
@@ -435,6 +495,7 @@ export async function useExistingTab(
   assertActive: () => void,
 ) {
   if (recovery) fail('CONTROL_SUSPENDED');
+  endReason = undefined; // Never carry a previous task's cause into this one.
   const tab = await chrome.tabs.get(expected.tabId).catch(() => null);
   assertActive();
   if (!tab || tab.windowId !== expected.windowId || !canReadPage(tab))
@@ -573,6 +634,10 @@ export async function release(cleanup = true, strict = false, reason: Diagnostic
   clearTimeout(pauseTimer);
 
   const previous = control;
+  if (previous) {
+    endReason = controlEndReason(reason, suspended);
+    detachReason = undefined;
+  }
   if (
     previous &&
     [
@@ -604,7 +669,11 @@ export async function release(cleanup = true, strict = false, reason: Diagnostic
   try {
     await serial(() => detachCurrent(strict));
     // Closing temporary tabs / ungrouping retained pages removes an empty group.
-    if (previous && cleanup) await cleanupTask(previous.sessionId).catch(() => {});
+    if (previous && cleanup)
+      await cleanupTask(
+        previous.sessionId,
+        KEEP_TABS_ON_RELEASE.includes(reason) ? previous.tabIds : [],
+      ).catch(() => {});
   } finally {
     if (!control) await chrome.action.setBadgeText({ text: '' });
     publish();
@@ -630,6 +699,7 @@ export async function createTask(initial: {
   taskId: string;
 }) {
   if (recovery) fail('CONTROL_SUSPENDED');
+  endReason = undefined; // Never carry a previous task's cause into this one.
   if (!allowed(initial.url)) fail('INVALID_URL');
   assertSiteAction(initial.url, 'open');
   await recordSiteAccess(initial.url, 'open', true);
@@ -874,6 +944,7 @@ export function initializeExecutor() {
 
     invalidate('debugger_detach');
     publish();
+    detachReason = reason === 'canceled_by_user' ? reason : 'target_closed';
     void release(true, false, 'debugger_detach'); // Closing the task tab / Chrome Cancel / DevTools ends control.
   });
   chrome.debugger.onEvent.addListener((source, method, params) => {
@@ -979,8 +1050,8 @@ export function initializeExecutor() {
         session.tabIds.length >= 8
       )
         return;
-      const parent = await chrome.tabs.get(opener).catch(() => null);
-      let fresh = await chrome.tabs.get(id).catch(() => null);
+      const parent = await step(chrome.tabs.get(opener), 'tabs.get').catch(() => null);
+      let fresh = await step(chrome.tabs.get(id), 'tabs.get').catch(() => null);
       if (
         control !== session ||
         recovery ||
@@ -998,20 +1069,23 @@ export function initializeExecutor() {
       )
         return;
       if (fresh.windowId !== session.windowId) {
-        await chrome.tabs.move(id, { windowId: session.windowId, index: -1 });
-        fresh = await chrome.tabs.get(id);
+        await step(chrome.tabs.move(id, { windowId: session.windowId, index: -1 }), 'tabs.move');
+        fresh = await step(chrome.tabs.get(id), 'tabs.get');
       }
       if (control !== session || recovery) return;
-      await recordTask(session.sessionId, session.windowId, session.groupId, id, true);
+      await step(
+        recordTask(session.sessionId, session.windowId, session.groupId, id, true),
+        'recordTask',
+      );
       if (control !== session || recovery) {
         if (recovery) return;
-        await cleanupTask(session.sessionId).catch(() => {});
+        await step(cleanupTask(session.sessionId), 'cleanupTask').catch(() => {});
         return;
       }
-      await groupOwnedTab(session, id);
+      await step(groupOwnedTab(session, id), 'groupOwnedTab');
       if (control !== session || recovery) {
         if (recovery) return;
-        await cleanupTask(session.sessionId).catch(() => {});
+        await step(cleanupTask(session.sessionId), 'cleanupTask').catch(() => {});
         return;
       }
       session.tabIds.push(id);
@@ -1022,7 +1096,15 @@ export function initializeExecutor() {
     popupQueue = popupQueue
       .catch(() => {})
       .then(work)
-      .catch(() => {});
+      .catch((error) => {
+        // A wedged Chrome call abandons only this popup; the queue moves on.
+        if (error instanceof DeadlineExceeded)
+          recordDiagnostic('operation-error', 'other', {
+            source: 'executor',
+            level: 'warn',
+            code: 'POPUP_ADOPT_TIMEOUT',
+          });
+      });
   }
   if (chrome.webNavigation?.onCreatedNavigationTarget) {
     // Navigation source is authoritative even for noopener/background tabs;
@@ -1038,16 +1120,17 @@ export function initializeExecutor() {
     });
   }
   // Browser focus is the user's, not an authorization or routing signal.
-  const lostTab = (id: number) => {
+  const lostTab = (id: number, cause: 'tab_lost' | 'tab_scope_changed' = 'tab_lost') => {
     if (!control?.tabIds.includes(id)) return;
-    if (id === control.tabId) void release(true, false, 'tab_lost');
+    if (id === control.tabId) void release(true, false, cause);
     else {
       control.tabIds = control.tabIds.filter((t) => t !== id);
       publish();
     }
   };
-  chrome.tabs.onDetached.addListener(lostTab);
-  chrome.tabs.onRemoved.addListener(lostTab);
+  // Dragging the task tab out of its window moves it; it is not closed.
+  chrome.tabs.onDetached.addListener((id) => lostTab(id, 'tab_scope_changed'));
+  chrome.tabs.onRemoved.addListener((id) => lostTab(id));
   chrome.tabGroups.onRemoved?.addListener((group) => {
     const session = control;
     if (session) forgetGroup(session, group.id);
@@ -1899,7 +1982,7 @@ async function executeInternal(
       );
   };
   if (command.op === 'tabs') {
-    await popupQueue;
+    await drainWithin(popupQueue, POPUP_STEP_LIMIT_MS);
     const tabs = await chrome.tabs.query({ windowId: session.windowId });
     checkSession();
     return {
@@ -1940,7 +2023,7 @@ async function executeInternal(
       checkSession();
       if (dialog) fail('DIALOG_OPEN', `${dialog.type}: ${dialog.message}; use dialog`);
       if (command.condition === 'new-tab') {
-        await popupQueue;
+        await drainWithin(popupQueue, POPUP_STEP_LIMIT_MS);
         const id = newPopups.find((id) => session.tabIds.includes(id));
         if (id !== undefined) {
           newPopups.splice(newPopups.indexOf(id), 1);
@@ -2207,7 +2290,8 @@ async function executeInternal(
     if (sessionId && frameSessions().get(sessionId)?.tabId !== lease.id) fail('FRAME_UNAVAILABLE');
     if (dialog) fail('DIALOG_OPEN', `${dialog.type}: ${dialog.message}; use dialog`);
     if (method === 'Input.insertText') {
-      for (const frame of await collectFrames(actionCdp)) assertSiteAction(frame.url, command.op);
+      // Text goes to the focused frame; unrelated hidden frames must not block it.
+      await assertInputFrames(actionCdp, (frame) => assertSiteAction(frame.url, command.op));
       check();
     }
     const target = { tabId: lease.id, ...(sessionId ? { sessionId } : {}) };

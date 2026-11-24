@@ -6,6 +6,7 @@ const executor = vi.hoisted(() => ({
   release: vi.fn(async () => {}),
   abandonTarget: vi.fn(),
   completeTask: vi.fn(async () => {}),
+  lastControlEndReason: vi.fn(() => 'recovery_failed'),
   currentControl: vi.fn(
     (): null | {
       sessionId: string;
@@ -217,6 +218,13 @@ const selectPage = async (ws: Socket) => {
   return ws.last('agent-request')!;
 };
 const state = async () => (await ask({ type: 'remote-state' })).value!;
+/** Let wall-clock time pass on a healthy (pinged) transport. */
+const idle = async (ws: Socket, ms: number) => {
+  for (let elapsed = 0; elapsed < ms; elapsed += 5000) {
+    ws.receive({ type: 'ping', ts: elapsed });
+    await vi.advanceTimersByTimeAsync(Math.min(5000, ms - elapsed));
+  }
+};
 const begin = async (ws: Socket, text = 'Read this page') => {
   expect((await ask({ type: 'remote-chat-send', text })).ok).toBe(true);
   return ws.last('agent-request')!;
@@ -428,8 +436,8 @@ describe('decision transport background', () => {
     await flush();
     return ws.frames.findLast((frame) => frame.id === id);
   };
-  const taskStartSetup = async () => {
-    const ws = await bootConnected(false, false, true, false, false, false, true);
+  const taskStartSetup = async (interrupt = false, resume = false) => {
+    const ws = await bootConnected(false, interrupt, true, resume, false, false, true);
     chrome.tabs.get = vi.fn(async (id: number) => ({
       id,
       windowId: 1,
@@ -581,6 +589,71 @@ describe('decision transport background', () => {
       key: KEY,
     });
     expect((storage.remoteConfig as any).compatibilityEnabled).toBe(true);
+  });
+  it.each([false, true])(
+    'Stop with an unconfirmed interrupt fully ends the turn (resume=%s) so the next task-start is not a conflict',
+    async (resume) => {
+      const ws = await taskStartSetup(true, resume);
+      const request = await begin(ws, '咋样了');
+      const stopped = ask({ type: 'remote-stop' });
+      await flush();
+      await vi.advanceTimersByTimeAsync(11000);
+      expect((await stopped).ok).toBe(true);
+      const end = ws.last('agent-turn-end')!;
+      expect(end).toMatchObject({ taskId: request.taskId, status: 'stopped', interrupt: true });
+      if (resume)
+        ws.receive({
+          type: 'task-ack',
+          runtimeEpoch: end.runtimeEpoch,
+          deliveryId: end.deliveryId,
+        });
+      await flush();
+      expect(await state()).toMatchObject({
+        loopActive: false,
+        chatBusy: false,
+        error: 'ui.error.agentStopUnconfirmed',
+      });
+      executor.currentControl.mockReturnValue(null);
+      expect(await requestStart(ws)).toMatchObject({ type: 'resp', result: { status: 'started' } });
+    },
+  );
+  it('releases a new task whose first request gets no Agent progress for 5 minutes', async () => {
+    const ws = await taskStartSetup();
+    const request = await begin(ws, '咋样了');
+    await idle(ws, 5 * 60_000 - 1000);
+    expect((await state()).loopActive).toBe(true);
+    await idle(ws, 1000);
+    await flush();
+    expect(ws.last('agent-turn-end')).toMatchObject({
+      taskId: request.taskId,
+      status: 'interrupted',
+    });
+    const chat = (await state()).chat as ChatEntry[];
+    expect(chat.at(-1)).toMatchObject({
+      role: 'assistant',
+      notice: { kind: 'agent-not-responding' },
+    });
+    expect(chat.find((entry) => entry.id === request.taskId)?.loopStatus).toBe('interrupted');
+    expect(await state()).toMatchObject({ loopActive: false, chatBusy: false });
+    // A late decision is refused by the extension as well; nothing is rendered.
+    await respond(ws, request, { kind: 'done', text: 'late reply' });
+    expect(((await state()).chat as ChatEntry[]).some((m) => m.text === 'late reply')).toBe(false);
+    executor.currentControl.mockReturnValue(null);
+    expect(await requestStart(ws)).toMatchObject({ type: 'resp', result: { status: 'started' } });
+  });
+  it('Agent activity on the first request keeps a slow task alive past 5 minutes', async () => {
+    const ws = await taskStartSetup();
+    const request = await begin(ws);
+    ws.receive({
+      type: 'agent-activity',
+      endpointId: `abababababab.${storage.remoteBrowserId}`,
+      taskId: request.taskId,
+      sequence: 1,
+      category: 'command',
+      detail: 'python3',
+    });
+    await idle(ws, 8 * 60_000);
+    expect((await state()).loopActive).toBe(true);
   });
   it('refuses agent start while a panel task is active', async () => {
     const ws = await taskStartSetup();
@@ -927,6 +1000,7 @@ describe('decision transport background', () => {
     expect(ws.last('agent-turn-end')).toMatchObject({
       taskId: request.taskId,
       status: 'stopped',
+      reason: 'user_stop',
       interruption: { recoveryRemoval: { requested: 1, outcome: 'unknown' } },
       text: expect.any(String),
     });
@@ -976,6 +1050,8 @@ describe('decision transport background', () => {
     expect(ws.last('agent-turn-end')).toMatchObject({
       taskId: request.taskId,
       status: 'interrupted',
+      // The control-end cause is top-level; the strict relay receipt stays unchanged.
+      reason: 'recovery_failed',
       interruption: {
         reason: 'CONTROL_LOST',
         resume: 'new-user-message-required',
@@ -985,6 +1061,65 @@ describe('decision transport background', () => {
     expect(ws.frames.filter((frame) => frame.type === 'agent-turn-end')).toHaveLength(1);
   });
 
+  it('derives recovery_expired from the receipt outcome, not a stale executor cause', async () => {
+    const ws = await bootConnected(false, false, true, false, true);
+    const request = await begin(ws);
+    const hooks = executor.configureControlRecovery.mock.calls[0]![0];
+    hooks.onSuspended({
+      recoveryId: '22222222-2222-4222-8222-222222222222',
+      expiresAt: Date.now() + 120000,
+      reason: 'target_closed',
+      cause: 'unknown',
+    });
+    executor.lastControlEndReason.mockReturnValue('recovery_failed');
+    hooks.onRevoked('expired');
+    await flush();
+    expect(ws.last('agent-turn-end')).toMatchObject({
+      taskId: request.taskId,
+      status: 'interrupted',
+      reason: 'recovery_expired',
+      interruption: { recoveryOutcome: 'expired' },
+    });
+  });
+  it.each(['tab_closed', 'foreign_frame'] as const)(
+    'keeps the concrete cause %s even when a recovery receipt is attached',
+    async (cause) => {
+      const ws = await bootConnected(false, false, true, false, true);
+      await begin(ws);
+      const hooks = executor.configureControlRecovery.mock.calls[0]![0];
+      hooks.onSuspended({
+        recoveryId: '22222222-2222-4222-8222-222222222222',
+        expiresAt: Date.now() + 120000,
+        reason: 'target_closed',
+        cause: 'unknown',
+      });
+      executor.lastControlEndReason.mockReturnValue(cause);
+      hooks.onRevoked('revoked');
+      await flush();
+      expect(ws.last('agent-turn-end')).toMatchObject({ status: 'interrupted', reason: cause });
+    },
+  );
+  it('control lost while awaiting a decision (cancelLoop path) still reports the cause (#33)', async () => {
+    const ws = await bootConnected(false, false, true, false, true);
+    const notify = executor.onState.mock.calls[0]![0] as () => void;
+    executor.currentControl.mockReturnValue({
+      sessionId: 'test',
+      tabId: 3,
+      tabIds: [3],
+      phase: 'ready',
+    });
+    notify();
+    const request = await selectPage(ws);
+    executor.currentControl.mockReturnValue(null);
+    executor.lastControlEndReason.mockReturnValue('target_closed');
+    notify();
+    await flush();
+    expect(ws.last('agent-turn-end')).toMatchObject({
+      taskId: request.taskId,
+      status: 'interrupted',
+      reason: 'target_closed',
+    });
+  });
   it('returns a terminal recovery receipt even when native cleanup remains pending', async () => {
     const ws = await bootConnected(false, false, true, false, true);
     await ask({ type: 'remote-diagnostics-set-enabled', enabled: true });

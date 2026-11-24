@@ -60,3 +60,35 @@ export class ControlLoss extends Error {
     super('Browser control was lost; a new user message is required');
   }
 }
+
+/**
+ * Why a task turn ended without the Agent finishing it, sent as the top-level
+ * `reason` of `agent-turn-end` (kept outside the strict `interruption` receipt).
+ */
+export type TurnEndReason =
+  | 'target_closed'
+  | 'canceled_by_user'
+  | 'recovery_expired'
+  | 'recovery_failed'
+  | 'foreign_frame'
+  | 'tab_closed'
+  | 'tab_moved'
+  | 'transport_lost'
+  | 'user_stop'
+  | 'other';
+
+/**
+ * Concrete causes (closed/moved tab, foreign frame) win; otherwise a recovery
+ * outcome from the same receipt decides, so `reason` never contradicts
+ * `interruption.recoveryOutcome`; otherwise the executor's last release cause.
+ */
+export function turnEndReason(
+  recoveryOutcome: RecoveryOutcome | undefined,
+  control: TurnEndReason | undefined,
+): TurnEndReason {
+  if (control === 'tab_closed' || control === 'tab_moved' || control === 'foreign_frame')
+    return control;
+  if (recoveryOutcome === 'expired') return 'recovery_expired';
+  if (recoveryOutcome) return 'recovery_failed';
+  return control ?? 'other';
+}

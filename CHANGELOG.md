@@ -16,6 +16,34 @@
 
 ### Fixed
 
+- The payment-provider and banking keyword rules now match only the site and
+  path, not the query or fragment. A LinkedIn people search for "stripe" or
+  "bank" is no longer treated as a restricted page. Payment and bank sites stay
+  denied, and the other default URL rules (billing, account security,
+  credentials and others) still match the full URL, so hash routes such as
+  `/#/billing` and query routes such as `?route=checkout/checkout` stay denied.
+  Custom rules already matched hosts only and are unchanged.
+- Fill, type and keypress check only the top frame and the frame that holds
+  focus (through iframe, frame, object or embed), instead of every frame in the
+  page. A hidden third-party frame such as
+  js.stripe.com no longer blocks typing into the page; typing into a restricted
+  frame (for example a Stripe card field) is still blocked.
+- When the current page cannot be read, the Agent is told whether it is still
+  navigating or restricted, and by which rule.
+- Batch `open` no longer hangs with the Relay stuck on `DECISION_BUSY`
+  (OPENM-1425): page settling is capped at 10s, popup adoption steps at 3s
+  each, and a round watchdog (action budgets + 15s per action + 120s) cancels
+  a round that never reports, returning `OPERATION_CANCELLED` to the Agent.
+- A task whose first request gets no Agent progress within 5 minutes now ends
+  with "Agent not responding" instead of showing "Connecting" forever (#32).
+  A "New task" divider separates tasks in the panel.
+- Losing browser control involuntarily (debugger detached, Chrome's Cancel
+  bar, recovery expired or failed, a password-manager frame, the task tab
+  moved to another window) no longer closes the task tab: it is ungrouped and
+  handed back. A user Stop still closes agent-owned tabs as before (borrowed
+  tabs are only ungrouped). `agent-turn-end` now carries a top-level `reason`
+  for interrupted and stopped tasks (`user_stop` for Stop) so the Agent
+  learns why (#33).
 - When another extension's frame (for example a password manager's inline
   menu) makes Chrome drop control, the Agent is now told after recovery that the
   page may have changed (a dialog may have closed), and remaining batched
@@ -24,6 +52,14 @@
   typed (#30).
 - Readable messages for the relay's `AGENT_SESSION_NOT_RUNNING` and
   `SESSION_GROUP_UNMAPPED` codes, in task notices and message delivery errors.
+
+### Known limitations
+
+- The 5-minute rule also ends tasks whose Agent is alive but sends no activity
+  in time: the Agent is busy in another session, the task was started by the
+  Agent itself, or the Remote is too old to send activity events. A late
+  decision is then answered with `STALE_DECISION`. The real fix is a Relay
+  "queued but not yet picked up" signal (follow-up).
 
 ## [0.18.0] - 2026-11-21
 

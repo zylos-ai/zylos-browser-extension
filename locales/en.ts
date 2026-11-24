@@ -25,7 +25,7 @@ export default {
   siteAccessDefaults: 'Default access rules',
   siteAccessPatternDetails: 'Match expression',
   siteAccessDefaultsHint:
-    'Billing and other restricted pages are denied by these default rules. Disable a rule or change its access here; custom rules override defaults.',
+    'Billing and other restricted pages are denied by these default rules. Payment-provider and bank name rules check the site and path, not search terms. Disable a rule or change its access here; custom rules override defaults.',
   siteAccessDefaultMode: 'Access for {rule}',
   siteDefaultBilling: 'Billing and checkout',
   siteDefaultPaymentProviders: 'Payment providers',
@@ -291,6 +291,9 @@ export default {
     'The browser task was interrupted. Check the connection before trying again. Completed actions will not be replayed automatically.',
   taskRecoveryRemovalInterrupted:
     'Recovery ended. Selected extension frames may already have been removed; this change was not rolled back. Do not repeat removal or prior input without checking the page.',
+  taskAgentNotResponding:
+    'Agent not responding: no progress within 5 minutes of sending. The task was released; send your message again to retry.',
+  newTask: 'New task',
   taskCannotContinue:
     'This task cannot continue: {reason}\nCompleted actions will not be replayed automatically.',
   taskDecisionTimeout: 'Timed out waiting for the Agent’s decision.',
