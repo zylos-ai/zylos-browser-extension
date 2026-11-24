@@ -142,7 +142,11 @@ import {
 } from '../../utils/workspace/config';
 import { TokenStore, chromeLocalStorage } from '../../utils/workspace/token-store';
 import { WorkspaceApi } from '../../utils/workspace/api';
-import { WorkspaceConnector, queuedRelayClear, queuedRelayWrite } from '../../utils/workspace/connector';
+import {
+  WorkspaceConnector,
+  queuedRelayClear,
+  queuedRelayWrite,
+} from '../../utils/workspace/connector';
 import {
   signIn as workspaceSignIn,
   signOut as workspaceSignOut,
@@ -1359,6 +1363,7 @@ export function startRemoteBackground() {
           return;
         if (state.agentActivity?.taskId === m.taskId && m.sequence <= state.agentActivity.sequence)
           return;
+        loop.noteAgentProgress(m.taskId);
         {
           const { events, dropped, ...current } = m;
           state.agentActivity = { ...current, receivedAt: Date.now() };

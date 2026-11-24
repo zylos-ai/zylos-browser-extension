@@ -2024,3 +2024,36 @@ test('without recovery a refused first attach reports FOREIGN_FRAME_PRESENT', as
   assert.equal(s.executor.currentControlRecovery(), undefined);
   await s.executor.release(false);
 });
+
+test('a hung Chrome call during popup adoption cannot wedge the popup queue (OPENM-1425)', async () => {
+  const s = await borrowedWithPopup();
+  vi.useFakeTimers();
+  try {
+    const hung = { ...s.source, id: 5, groupId: -1, openerTabId: 1 };
+    const next = { ...s.source, id: 6, groupId: -1, openerTabId: 1 };
+    chrome.tabs.get = async (id) => {
+      if (id === 1) return s.source;
+      if (id === 4) return s.popup;
+      if (id === 5) return hung;
+      if (id === 6) return next;
+      throw new Error('No tab');
+    };
+    chrome.tabs.group = ({ tabIds }) =>
+      tabIds.includes(5) ? new Promise(() => {}) : Promise.resolve(10);
+    chrome.tabs.onCreated.emit(hung);
+    chrome.tabs.onCreated.emit(next);
+    let drained = false;
+    void s.executor.flushTaskPopups().then(() => (drained = true));
+    await vi.advanceTimersByTimeAsync(s.executor.POPUP_STEP_LIMIT_MS - 1);
+    assert.equal(drained, false);
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(0);
+    assert.equal(drained, true);
+    const ids = s.executor.currentControl().tabIds;
+    assert.ok(ids.includes(6), 'the popup queued behind the hung one is still adopted');
+    assert.ok(!ids.includes(5), 'the hung popup is not half-adopted');
+  } finally {
+    vi.useRealTimers();
+  }
+  await s.executor.release(false);
+});

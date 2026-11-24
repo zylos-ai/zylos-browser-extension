@@ -486,6 +486,76 @@ it('stop during settling prevents observation and any continuation', async () =>
   expect(call).toHaveBeenCalledTimes(1);
 });
 
+describe('settle hard limits (OPENM-1425)', () => {
+  const tabsCall = vi.fn(async (method: string) => (method === 'tabs' ? { tabs: [] } : {}));
+  it('a popup queue that never drains does not wedge an open round', async () => {
+    executor.flushTaskPopups.mockReturnValue(new Promise(() => {}));
+    let done = false;
+    const round = runBrowserRound(
+      [{ method: 'open', params: { url: 'https://example.com' } }],
+      tabsCall,
+      () => {},
+      'r',
+    ).then((value) => ((done = true), value));
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(done).toBe(true);
+    const result = await round;
+    // Each flush waits at most 2s, so settle still reaches a verdict.
+    expect(result.results).toContainEqual(
+      expect.objectContaining({ method: 'settle', status: 'ready' }),
+    );
+    expect(result.observation).toBeDefined();
+  });
+  it('a hung chrome.tabs.get inside settle ends as loading evidence within 10s', async () => {
+    (chrome.tabs.get as any).mockReturnValue(new Promise(() => {}));
+    const round = runBrowserRound(
+      [{ method: 'open', params: { url: 'https://example.com' } }],
+      tabsCall,
+      () => {},
+      'r',
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await round;
+    expect(result.results).toContainEqual(
+      expect.objectContaining({ method: 'settle', status: 'loading' }),
+    );
+  });
+  it('a hung popup switch-tab is abandoned and never followed by more settle work', async () => {
+    const scope = { sessionId: 'task', tabId: 1, tabIds: [1] };
+    let clicked = false;
+    executor.currentControl.mockImplementation(() => ({
+      ...scope,
+      tabIds: clicked ? [1, 2] : [1],
+    }));
+    executor.taskPopupOpener.mockReturnValue(1);
+    (chrome.tabs.get as any).mockImplementation(async (id: number) => ({
+      id,
+      url: `https://example.com/${id}`,
+      status: 'complete',
+    }));
+    const call = vi.fn(async (method: string) => {
+      if (method === 'switch-tab') return new Promise(() => {});
+      if (method === 'click') clicked = true;
+      return method === 'tabs' ? { tabs: [] } : {};
+    });
+    const round = runBrowserRound(
+      [{ method: 'click', params: { ref: '@real' } }],
+      call,
+      () => {},
+      'r',
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await round;
+    expect(result.results).toContainEqual(
+      expect.objectContaining({ method: 'settle', status: 'loading', timedOut: true }),
+    );
+    const lookups = (chrome.tabs.get as any).mock.calls.length;
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect((chrome.tabs.get as any).mock.calls.length).toBe(lookups);
+    expect(call.mock.calls.filter(([method]) => method === 'switch-tab')).toHaveLength(1);
+  });
+});
+
 it('pauses between batch operations, retains the completed result and respects new owner input', async () => {
   let offline = false;
   let updated = false;

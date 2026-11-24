@@ -655,9 +655,7 @@ function queuedSetup() {
       return `kid-${key}`;
     }),
   );
-  s.deps.clearRelay = vi.fn(
-    queuedRelayClear(mutate, (url) => save(url, ''), s.deps.relayMatches),
-  );
+  s.deps.clearRelay = vi.fn(queuedRelayClear(mutate, (url) => save(url, ''), s.deps.relayMatches));
   return { ...s, mutate, save, inWrite, release };
 }
 
@@ -711,7 +709,9 @@ test('queuedRelayClear clears only the Key it was given, checked when it runs', 
 });
 
 test('a sign-out while the key id is computed stops before anything is recorded or written', async () => {
-  const { connector, deps, relay, storage } = setup([{ ...ready, relay_url: 'wss://r', key: 'k1' }]);
+  const { connector, deps, relay, storage } = setup([
+    { ...ready, relay_url: 'wss://r', key: 'k1' },
+  ]);
   let release!: () => void;
   const gate = new Promise<void>((resolve) => (release = resolve));
   let entered!: () => void;
