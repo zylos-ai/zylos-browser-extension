@@ -12,8 +12,9 @@ import {
   PAGE_STATE_NOTE,
 } from './automation/executor';
 import type { LoopAction, RoundResult } from './browser-loop';
+import { consumeRecoveredWithoutInput } from './automation/input-checkpoint';
 import { ControlLoss, ControlSuspended, type ControlInterruption } from './control-loss';
-import { consumeInputRecovery, consumeRecoveredWithoutInput } from './automation/input-checkpoint';
+import { consumeInputRecovery } from './automation/input-checkpoint';
 
 type Call = (
   method: string,
