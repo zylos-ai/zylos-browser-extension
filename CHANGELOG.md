@@ -8,13 +8,13 @@
   (OPENM-1425): page settling is capped at 10s, popup adoption steps at 3s
   each, and a round watchdog (action budgets + 15s per action + 120s) cancels
   a round that never reports, returning `OPERATION_CANCELLED` to the Agent.
-- A task whose first request gets no Agent progress within 3 minutes now ends
+- A task whose first request gets no Agent progress within 5 minutes now ends
   with "Agent not responding" instead of showing "Connecting" forever (#32).
   A "New task" divider separates tasks in the panel.
 
 ### Known limitations
 
-- The 3-minute rule also ends tasks whose Agent is alive but sends no activity
+- The 5-minute rule also ends tasks whose Agent is alive but sends no activity
   in time: the Agent is busy in another session, the task was started by the
   Agent itself, or the Remote is too old to send activity events. A late
   decision is then answered with `STALE_DECISION`. The real fix is a Relay

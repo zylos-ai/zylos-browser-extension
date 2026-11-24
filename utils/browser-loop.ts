@@ -248,7 +248,7 @@ export type LoopIO = {
  * A decision that arrives later is rejected by the relay (STALE_DECISION);
  * the Agent learns the task ended and the owner can simply resend.
  */
-export const AGENT_FIRST_RESPONSE_TIMEOUT_MS = 3 * 60_000;
+export const AGENT_FIRST_RESPONSE_TIMEOUT_MS = 5 * 60_000;
 export class BrowserLoop {
   private turn?: Turn;
   private receipts = new Map<string, string>();

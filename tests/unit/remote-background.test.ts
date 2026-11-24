@@ -616,10 +616,10 @@ describe('decision transport background', () => {
       expect(await requestStart(ws)).toMatchObject({ type: 'resp', result: { status: 'started' } });
     },
   );
-  it('releases a new task whose first request gets no Agent progress for 3 minutes', async () => {
+  it('releases a new task whose first request gets no Agent progress for 5 minutes', async () => {
     const ws = await taskStartSetup();
     const request = await begin(ws, '咋样了');
-    await idle(ws, 3 * 60_000 - 1000);
+    await idle(ws, 5 * 60_000 - 1000);
     expect((await state()).loopActive).toBe(true);
     await idle(ws, 1000);
     await flush();
@@ -640,7 +640,7 @@ describe('decision transport background', () => {
     executor.currentControl.mockReturnValue(null);
     expect(await requestStart(ws)).toMatchObject({ type: 'resp', result: { status: 'started' } });
   });
-  it('Agent activity on the first request keeps a slow task alive past 3 minutes', async () => {
+  it('Agent activity on the first request keeps a slow task alive past 5 minutes', async () => {
     const ws = await taskStartSetup();
     const request = await begin(ws);
     ws.receive({
@@ -651,7 +651,7 @@ describe('decision transport background', () => {
       category: 'command',
       detail: 'python3',
     });
-    await idle(ws, 5 * 60_000);
+    await idle(ws, 8 * 60_000);
     expect((await state()).loopActive).toBe(true);
   });
   it('refuses agent start while a panel task is active', async () => {

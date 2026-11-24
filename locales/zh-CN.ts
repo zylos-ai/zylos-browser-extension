@@ -277,7 +277,7 @@ export default {
   taskRecoveryRemovalInterrupted:
     '恢复已结束。选中的扩展框架可能已经被移除，此改动未回滚。请先检查页面，不要直接重复移除或之前的输入。',
   taskAgentNotResponding:
-    'Agent 未响应：发送后 3 分钟内没有任何进展，任务已释放。请重新发送消息重试。',
+    'Agent 未响应：发送后 5 分钟内没有任何进展，任务已释放。请重新发送消息重试。',
   newTask: '新任务',
   taskCannotContinue: '无法继续本次任务：{reason}\n已执行的操作不会自动重放。',
   taskDecisionTimeout: '等待 Agent 决策超时。',
