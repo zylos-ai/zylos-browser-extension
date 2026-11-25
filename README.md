@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Chrome-125%2B-4285F4?logo=googlechrome&logoColor=white" alt="Chrome 125 或更新版本" />
+  <img src="https://img.shields.io/badge/Chrome-140%2B-4285F4?logo=googlechrome&logoColor=white" alt="Chrome 140 或更新版本" />
   <img src="https://img.shields.io/badge/Manifest-V3-AC01C2" alt="Manifest V3" />
   <img src="https://img.shields.io/badge/Node.js-22%2B-5FA04E?logo=nodedotjs&logoColor=white" alt="构建需要 Node.js 22 或更新版本" />
 </p>
@@ -121,7 +121,7 @@ closed-shadow 恢复扫描仅在双方支持时启用，不会自动重放输入
 
 ## 快速开始
 
-你需要 **Chrome 125+** 和一个可用的 **Zylos Agent**。以下步骤从源码安装插件，构建需要 **Node.js 22+**。
+你需要 **Chrome 140+** 和一个可用的 **Zylos Agent**。以下步骤从源码安装插件，构建需要 **Node.js 22+**。
 
 ### 1. 安装插件
 
