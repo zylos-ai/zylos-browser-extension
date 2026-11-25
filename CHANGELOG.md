@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-11-25
+
+Requires Chrome 140 or later. Pairs with zylos-browser-remote 0.12.0.
+
 ### Changed
 
 - Minimum Chrome version is now 140 (was 125). The extension restricts
