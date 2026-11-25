@@ -246,6 +246,12 @@ const respond = async (
 };
 
 describe('decision transport background', () => {
+  it('启动时把本地存储限制为仅扩展可信上下文可读', async () => {
+    await bootConnected();
+    expect(chrome.storage.local.setAccessLevel).toHaveBeenCalledWith({
+      accessLevel: 'TRUSTED_CONTEXTS',
+    });
+  });
   it('re-arms a thirty-day rule without early release and never schedules permanent expiry', async () => {
     await bootConnected();
     const timers = vi.spyOn(globalThis, 'setTimeout');

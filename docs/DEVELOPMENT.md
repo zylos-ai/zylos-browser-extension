@@ -136,7 +136,7 @@ Its certificate bypass applies only to that disposable browser process. Set
 
 ## 本地运行
 
-需要 Node.js 22+、Chrome 125+，Remote 仓库可放在相邻目录。
+需要 Node.js 22+、Chrome 140+，Remote 仓库可放在相邻目录。
 
 ```sh
 npm ci

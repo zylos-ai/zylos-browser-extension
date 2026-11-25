@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Minimum Chrome version is now 140 (was 125). The extension restricts
+  `chrome.storage.local` (relay key, Workspace tokens, chat history) to trusted
+  extension contexts with `setAccessLevel`, which `storage.local` only supports
+  from Chrome 140. On older Chrome, 0.18.1 failed to start with
+  "chrome.storage.local.setAccessLevel is not a function"; Chrome now refuses to
+  install the extension there instead, so users must update Chrome.
+
 ## [0.18.1] - 2026-11-24
 
 Upgrade notes: upgrade together with zylos-browser-remote 0.12.0 (end reasons, browser name, execution deadline and multi-session Core support need both sides). Older relays keep working but ignore the new fields.
