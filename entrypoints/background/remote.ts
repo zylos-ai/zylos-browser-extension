@@ -844,7 +844,7 @@ export function startRemoteBackground() {
       if (interruption) incidents?.trigger(detailedContext(), 'control-lost');
       state.agentActivity = undefined;
       idem.cancel();
-      preview.finish(status === 'done' ? 'completed' : 'error');
+      preview.finish(status === 'done' ? 'completed' : status === 'blocked' ? 'blocked' : 'error');
       activity.end(status === 'done' ? 'completed' : 'interrupted');
       const recoveryTerminal = loop.recovering;
       const cleanup = completeTask().catch(() => {

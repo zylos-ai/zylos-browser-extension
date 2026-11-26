@@ -1340,6 +1340,16 @@ test('preview failure retains controls; stopped and interrupted tasks do not sho
     '暂时无法预览',
   );
   expect(container.querySelector('#stop-task')).not.toBeNull();
+  await act(async () =>
+    previewListener({
+      type: 'preview-state',
+      preview: { ...preview, status: 'blocked', canStop: false, availability: 'paused' },
+    }),
+  );
+  expect(container.querySelector('.live-preview-status')?.textContent).toBe('待继续');
+  expect(container.querySelector('.live-preview-completed')).toBeNull();
+  expect(container.querySelector('#stop-task')).toBeNull();
+  expect(container.querySelector<HTMLButtonElement>('.preview-view')?.disabled).toBe(false);
   for (const status of ['stopped', 'interrupted', 'error']) {
     await act(async () =>
       previewListener({
@@ -1351,6 +1361,7 @@ test('preview failure retains controls; stopped and interrupted tasks do not sho
     expect(container.querySelector('#stop-task')).toBeNull();
     expect(container.querySelector<HTMLButtonElement>('.preview-view')?.disabled).toBe(true);
   }
+  expect(container.querySelector('.live-preview-status')?.textContent).toBe('操作出错');
   await act(async () => previewListener({ type: 'preview-state', preview: null }));
   expect(container.querySelector('.live-preview')).toBeNull();
 });

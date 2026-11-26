@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The tab preview shows "Needs follow-up" when the Agent reports a blocker or
+  asks the user for a decision.
+
 ## [0.18.2] - 2026-11-25
 
 Requires Chrome 140 or later. Pairs with zylos-browser-remote 0.12.0.

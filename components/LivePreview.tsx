@@ -10,6 +10,14 @@ import {
 import type { RemoteState } from '../utils/remote';
 import { useI18n } from './LanguageProvider';
 
+const terminalStatusLabels = {
+  completed: 'previewCompleted',
+  blocked: 'previewBlocked',
+  stopped: 'previewStopped',
+  interrupted: 'previewInterrupted',
+  error: 'previewError',
+} as const;
+
 export function LivePreview({
   task,
   onReveal,
@@ -200,21 +208,16 @@ export function LivePreview({
     );
   const image = frame?.targetKey === state.targetKey ? frame : null;
   const done = state.status === 'completed';
-  const label = done
-    ? t('previewCompleted')
-    : state.status === 'stopped'
-      ? t('previewStopped')
-      : state.status === 'interrupted'
-        ? t('previewInterrupted')
-        : state.status === 'error'
-          ? t('previewError')
-          : state.status === 'paused' || state.availability === 'paused'
-            ? t('previewPaused')
-            : state.availability === 'live'
-              ? t('previewLive')
-              : state.availability === 'unavailable'
-                ? t('previewUnavailable')
-                : t('previewConnecting');
+  const label =
+    state.status !== 'running' && state.status !== 'paused'
+      ? t(terminalStatusLabels[state.status])
+      : state.status === 'paused' || state.availability === 'paused'
+        ? t('previewPaused')
+        : state.availability === 'live'
+          ? t('previewLive')
+          : state.availability === 'unavailable'
+            ? t('previewUnavailable')
+            : t('previewConnecting');
 
   return (
     <section

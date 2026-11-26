@@ -125,7 +125,7 @@ export class LivePreview {
     if (!failed && method === 'stop') this.finish('stopped');
   }
 
-  finish(status: 'completed' | 'stopped' | 'interrupted' | 'error') {
+  finish(status: Exclude<PreviewState['status'], 'running' | 'paused'>) {
     if (!this.state) return;
     // A late final reply must not turn a cancelled/disconnected task green.
     if (this.terminal && status !== 'error' && !(status === 'stopped' && this.state.canStop))

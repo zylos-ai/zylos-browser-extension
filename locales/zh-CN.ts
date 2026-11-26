@@ -316,6 +316,7 @@ export default {
   previewShow: '显示预览',
   previewImage: '{title}的页面画面',
   previewCompleted: '已完成',
+  previewBlocked: '待继续',
   previewStopped: '已停止',
   previewInterrupted: '已中断',
   previewError: '操作出错',
