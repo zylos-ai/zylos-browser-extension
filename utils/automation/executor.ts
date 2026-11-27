@@ -498,8 +498,11 @@ export async function useExistingTab(
   endReason = undefined; // Never carry a previous task's cause into this one.
   const tab = await chrome.tabs.get(expected.tabId).catch(() => null);
   assertActive();
-  if (!tab || tab.windowId !== expected.windowId || !canReadPage(tab))
-    fail('TAB_NOT_GRANTED', 'The shared page is closed, restricted or unavailable');
+  // One code, distinct reasons: the Agent reports which one instead of guessing.
+  if (!tab) fail('TAB_NOT_GRANTED', 'The shared page was closed; do not reopen it');
+  if (tab.windowId !== expected.windowId)
+    fail('TAB_NOT_GRANTED', 'The shared page moved to another window; do not follow it');
+  if (!canReadPage(tab)) fail('TAB_NOT_GRANTED', 'The shared page is restricted or unavailable');
   assertSiteAction(tab.url, 'use-current-tab');
   await recordSiteAccess(tab.url!, 'use-current-tab', true);
   assertActive();

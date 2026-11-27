@@ -72,7 +72,7 @@ export default {
     "Allow active browser tasks to remove other extensions' inline UI. Saved across tasks and restarts; cleared when the connection address or key changes.",
   agentStartPermission: 'Allow Agent to start tasks',
   agentStartPermissionHint:
-    'The connected Agent may open task tabs. Turning this off stops its active task. Kept across browser restarts until it expires; cleared when the connection address, key or connection switch changes.',
+    'The connected Agent may open task tabs or work on the tab you are viewing, within your site access rules and restricted-page limits. Turning this off stops its active task. Kept across browser restarts until it expires; cleared when the connection address, key or connection switch changes.',
   agentStartAllowedUntil: 'Allowed until {time}',
   agentStartAllowedUntilOff: 'Allowed until turned off',
   agentStartUntilOff: 'Until turned off',
@@ -141,6 +141,8 @@ export default {
   markdownFootnoteBack: 'Back to content',
   you: 'You',
   agentStarted: 'Started by Agent',
+  followUp: 'Follow-up',
+  followUpTo: 'Re: {task}',
   system: 'System',
   systemMessage: 'System message',
   today: 'Today',
@@ -463,7 +465,13 @@ export default {
     'Site permissions, Stop and Agent-started tasks stay under your control in this extension.',
   workspaceAllow: 'Allow',
   workspaceBrowserName: 'Name this browser',
-  workspaceBrowserNameHint: '{agent} and your Workspace will show this name.',
+  workspaceBrowserNameHint:
+    '{agent} and your Workspace will show this name. If you use several computers or Chrome profiles, include both (for example "Mac mini · Work") so they are easy to tell apart. You can also keep the default and rename it later from the connection menu.',
+  workspaceBrowserNamePlaceholder: 'For example: Mac mini · Work',
+  workspaceRename: 'Rename this browser',
+  workspaceRenameHint:
+    '{agent} sees this connection as "name · first 8 characters of the connection ID".',
+  workspaceRenameSave: 'Save',
   workspaceConnect: 'Connect',
   workspaceSwitchAgent: 'Switch Agent',
   workspaceSwitchHint: 'Switching ends the current session. The previous Agent stays authorized.',
@@ -490,13 +498,19 @@ export default {
   workspaceAgentUnavailable:
     'You do not have permission to use this Agent. Contact your organization admin.',
   workspaceBrowserNameRequired: 'Enter a name for this browser',
+  workspaceRenameUnavailable:
+    'There is no connection to rename right now. Wait until the connection is ready, then try again.',
   workspacePrepareFailed: 'The Agent could not prepare the connection. Try again.',
   workspacePrepareTimeout:
     'The Agent did not finish preparing in time. It may still be installing or starting browser-remote (first use can take a few minutes), or its openmax plugin may be out of date. Try again shortly; if it keeps timing out, ask the Agent to upgrade openmax.',
   workspaceAgentBrowserRemoteOld:
     "The Agent's browser-remote component is too old. Ask the Agent to upgrade browser-remote, then try again.",
   workspaceAgentNoPublicUrl:
-    'The Agent has no public address configured yet. It has been notified to set one; try again later.',
+    "The Agent has no public HTTPS address yet, so this browser can't connect. Ask the Agent to set its public address (AGENT_PUBLIC_BASE_URL), or set it on the Agent's machine, then try again.",
+  workspaceAgentNoPublicUrlNotified:
+    "The Agent has no public HTTPS address yet, so this browser can't connect. A setup reminder was queued for the Agent; try again once it has set the address. If it still fails, ask the Agent in chat to set its public address (AGENT_PUBLIC_BASE_URL).",
+  workspaceAgentNoPublicUrlNotNotified:
+    "The Agent has no public HTTPS address yet, so this browser can't connect, and the setup reminder could not be sent to the Agent. Ask the Agent in chat to set its public address (AGENT_PUBLIC_BASE_URL), or set it on the Agent's machine, then try again.",
   workspaceAgentPublicUrlInvalid:
     "The Agent's public address is misconfigured. Ask the Agent to fix its public URL, then try again.",
   workspaceRelayInsecure:
@@ -537,7 +551,7 @@ export default {
   advanced: 'Advanced',
   on: 'On',
   off: 'Off',
-  agentStartShort: 'Let the connected Agent open task tabs',
+  agentStartShort: 'Let the connected Agent open task tabs or use your current tab',
   compatibilityShort: "Tasks may remove other extensions' page UI",
   diagnosticsShort: 'Event types only, no page content',
   siteAccessNeedsAttention: 'Rules need a reset',

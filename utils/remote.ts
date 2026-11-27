@@ -88,6 +88,10 @@ export const chatEntrySchema = z
     delivery: z.enum(['sent', 'queued', 'failed', 'unknown']).optional(),
     deliveryError: z.string().optional(),
     final: z.boolean().optional(),
+    // An Agent reply added after taskId's request ended (agent-task-append-v1).
+    followUp: z.boolean().optional(),
+    // Arrived while the side panel was closed; cleared when the panel shows it.
+    unread: z.boolean().optional(),
     taskId: z.string().max(128).optional(),
     steerStatus: z.enum(['pending', 'sent', 'applied', 'interrupted']).optional(),
     loopStatus: z.enum(['active', 'done', 'blocked', 'interrupted', 'stopped']).optional(),
@@ -138,6 +142,8 @@ export const remoteStateSchema = z.object({
   error: z.string(),
   keyId: z.string(),
   browserId: z.string().default(''),
+  /** "macOS · arm64 · Chrome 142": the platform hint also sent to the relay. */
+  platformLabel: z.string().optional(),
   endpointId: z.string().default(''),
   relayHost: z.string(),
   relayUrl: z.string(),
@@ -252,6 +258,9 @@ export const remoteRequestSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('workspace-reconnect') }).strict(),
   z.object({ type: z.literal('workspace-revoke') }).strict(),
   z.object({ type: z.literal('workspace-cancel') }).strict(),
+  z
+    .object({ type: z.literal('workspace-rename'), browserName: z.string().min(1).max(100) })
+    .strict(),
   z.object({ type: z.literal('workspace-set-url'), url: z.string().max(512) }).strict(),
   z
     .object({
@@ -263,6 +272,7 @@ export const remoteRequestSchema = z.discriminatedUnion('type', [
     })
     .strict(),
   z.object({ type: z.literal('remote-chat-clear') }).strict(),
+  z.object({ type: z.literal('remote-chat-read') }).strict(),
   z.object({ type: z.literal('remote-reveal') }).strict(),
   z.object({ type: z.literal('remote-preview-reveal') }).strict(),
   z.object({ type: z.literal('remote-stop') }).strict(),

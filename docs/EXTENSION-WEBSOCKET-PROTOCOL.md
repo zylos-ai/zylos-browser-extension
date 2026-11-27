@@ -45,6 +45,30 @@ Remote 验证 Key 和浏览器身份，返回：
 去掉控制字符、最多 100 个字符）；改名成功后插件发送 `{type:"browser-name",browserName}`。
 Remote 应将其视为不可信的显示文本；旧版 Remote 忽略这两者。
 
+`hello` 还可附加 `platform`：`{os?, arch?, browser?, browserVersion?}`，例如
+`{os:"macOS",arch:"arm64",browser:"Chrome",browserVersion:"142"}`。数据只来自无需额外权限的
+`chrome.runtime.getPlatformInfo()` 和 `navigator.userAgentData`/`userAgent`，`browserVersion` 只含主版本号，
+无法得知的字段省略，全部未知时不发送。它用于在 Agent 的连接列表中区分多个浏览器，Remote 应将其视为不可信的显示文本；
+旧版 Remote 忽略该字段。
+
+### Agent 发起任务：`task.start`
+
+插件在 `hello` 声明 `agent-task-start-v1`，且 Remote 的 `ready` 也声明它时，Remote 可发送
+`{type:"req",id,method:"task.start",params}`。`params` 为 `{requestId,prompt,url}`（打开新任务标签页）
+或 `{requestId,prompt,target:"current-tab"}`（使用当前标签页），二者只能有其一。
+后者要求插件同时声明 `agent-task-current-tab-v1`，Remote 未见此能力时直接拒绝，不转发。
+两种方式都先检查「允许 Agent 发起任务」权限、是否有进行中的任务，并按 `requestId` 去重。
+
+`current-tab` 在收到请求时取最近聚焦的普通窗口的活动标签页，按侧栏消息的方式捕获并固定
+标签页、窗口、URL 和 documentId，不打开、刷新或导航页面，也不在此时取得控制权；
+Agent 随后用 `use-current-tab` 和首轮的 `contextId` 接管，执行前再次核对标签页和文档。
+不额外弹出确认；站点权限、受限页面和停止规则不变。不能使用时返回明确错误，绝不改为新开标签页：
+`TASK_START_NO_TAB`（没有可用的普通窗口或活动标签页）、`TASK_START_PAGE_RESTRICTED`
+（浏览器页面、应用商店、无痕窗口等）、`TASK_START_SITE_DENIED`（站点访问规则禁止）、
+`TASK_START_PAGE_NOT_READY`（页面仍在导航或暂时无法读取）、`TASK_START_TAB_CLOSED`、
+`TASK_START_PAGE_CHANGED`（启动过程中关闭、导航、刷新或移到其他窗口）。成功返回
+`{requestId,taskId,status:"started"|"existing"}`。
+
 ### 临时断线恢复：`task-resume-v1`
 
 双方声明此能力后，仅在同一个插件 background 实例和同一个 Remote 进程仍存活时恢复。
@@ -464,6 +488,37 @@ Escape，再返回 `{type:"agent-stop-result",taskId,ok,code?}`。
 交给 Agent 前转换为 Agent 主机上的 path；模型必须实际读取内容，不能把 Base64
 当视觉信息。最终文字仍走当前请求的 C4 done/blocked 命令，不额外再发一次决策。
 
+### 任务结束后的后续回复 `agent-task-append-v1`
+
+Agent 在请求结束（done/blocked）后才完成承诺的工作时（例如另一个 Agent 的评审结果），
+可以把结果追加到同一任务对话。插件在 `hello` 中声明 `agent-task-append-v1`，
+Remote 仅在插件声明时于 `ready` 中回显；未协商时插件拒绝为 `TASK_APPEND_UNSUPPORTED`，
+Remote 也不会发送请求。
+
+| 方向          | 消息                                                                          | 含义                 |
+| ------------- | ----------------------------------------------------------------------------- | -------------------- |
+| Remote → 插件 | `{type:"req",id,method:"task.append",params:{taskId,appendId,text},deadline}` | 追加一条后续回复     |
+| 插件 → Remote | `{type:"resp",id,result:{taskId,appendId,status,count,limit}}`                | 已保存并显示         |
+| 插件 → Remote | `{type:"error",id,code,message}`                                              | 拒绝，未显示任何内容 |
+
+`appendId` 为 32 位十六进制，由 Remote 按 endpoint、taskId 和文字计算；同一 `appendId`
+再次到达时只回 `status:"existing"`，不重复显示，文字不同则为 `TASK_APPEND_CONFLICT`。
+`text` 为 1–8,000 字符，按普通 Agent 回复的 Markdown 渲染，仅文字，不带操作按钮。
+插件以本地持久化的聊天记录判断，规则在重启后仍然有效：
+
+- `TASK_UNKNOWN`：本浏览器记录中没有该任务（不存在、用户已清空或已被淘汰）。
+- `TASK_ACTIVE`：任务仍在进行，应使用当前请求的回复命令。
+- `TASK_NOT_APPENDABLE`：任务不是以 Agent 的 done/blocked 回复结束（例如用户停止、中断）。
+- `TASK_TOO_OLD`：任务结束已超过 24 小时（以 `agentHistory.endedAt` 为准，缺失时用任务开始时间）。
+- `TASK_APPEND_LIMIT`：该任务已有 20 条后续回复。
+- `TASK_APPEND_FAILED`：保存失败。
+
+插件写入并发布聊天记录后才回复 `resp`。后续回复是 `role:"assistant"`、`followUp:true`、
+`taskId` 指向原任务的新消息，按时间追加在聊天末尾，标注“后续回复”及原任务首行；
+它不改变原任务状态，不发送 `agent-turn-end`，也不计入当前进行中任务的回合。
+侧栏未打开时该消息带 `unread:true`，工具栏角标显示未读数量（插件持有浏览器控制权时角标
+保留给任务）；侧栏显示聊天时发送 `remote-chat-read` 清除标记和角标。v1 不发系统通知。
+
 ## 9. 代码位置
 
 | 文件                                                                    | 职责                                      |
@@ -472,6 +527,7 @@ Escape，再返回 `{type:"agent-stop-result",taskId,ok,code?}`。
 | [utils/attachments.ts](../utils/attachments.ts)                         | 引用、图片、文件内容块                    |
 | [utils/page-context.ts](../utils/page-context.ts)                       | 捕获页面对象与页面绑定                    |
 | [utils/browser-loop.ts](../utils/browser-loop.ts)                       | 首轮/后续请求、决策循环                   |
+| [utils/agent-task-append.ts](../utils/agent-task-append.ts)             | 任务结束后的后续回复校验与限制            |
 | [entrypoints/background/remote.ts](../entrypoints/background/remote.ts) | 连接、握手、runtime 输入与 WebSocket 输出 |
 | [components/RemotePanel.tsx](../components/RemotePanel.tsx)             | 用户输入和选区展示                        |
 

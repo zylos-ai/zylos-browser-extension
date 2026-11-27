@@ -497,6 +497,14 @@ html[data-theme='zylos'] > body {
     font-weight: 500;
     line-height: var(--text-caption--line-height);
   }
+  .follow-up-label::before {
+    content: '·';
+    margin-right: var(--zylos-space-8);
+  }
+  .follow-up-origin {
+    margin-top: calc(-1 * var(--zylos-space-8));
+    overflow-wrap: anywhere;
+  }
   .message-text {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
@@ -1828,6 +1836,20 @@ html[data-theme='zylos'] > body {
   }
   .connection-menu-item.is-danger {
     color: var(--color-error);
+  }
+  .connection-menu-browser {
+    overflow-wrap: anywhere;
+  }
+  .connection-rename {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 4px 8px 8px;
+  }
+  .connection-rename-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
   }
   .sr-only {
     position: absolute;

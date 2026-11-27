@@ -8,6 +8,7 @@ import markdownExample from '../fixtures/markdown-message.json';
 import { selectionAttachment } from '../../utils/attachments';
 import { formatTaskNotice } from '../../utils/task-notice';
 import { readAttachmentFile } from '../../utils/file-attachments';
+import { defaultBrowserName } from '../../utils/workspace/config';
 
 vi.mock('../../utils/file-attachments', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../utils/file-attachments')>()),
@@ -588,6 +589,59 @@ test('Agent-started prompts are labelled instead of attributed to the user', asy
   expect(mine!.querySelector('.system-label')).toBeNull();
   expect(agent!.getAttribute('aria-label')).toBe('Agent 发起');
   expect(agent!.querySelector('.system-label')!.textContent).toBe('Agent 发起');
+});
+
+test('a follow-up renders like an Agent reply, names its task and is marked read when shown', async () => {
+  state.chat = [
+    { id: 'task-1', role: 'user', text: 'Ask a reviewer\nthen report', ts: 1, loopStatus: 'done' },
+    { id: 'r1', role: 'assistant', text: 'I will report back.', ts: 2, final: true },
+    {
+      id: 'append:1',
+      role: 'assistant',
+      text: 'Review **done**.',
+      ts: 3,
+      final: true,
+      followUp: true,
+      taskId: 'task-1',
+      unread: true,
+    },
+  ];
+  await mount();
+  const reply = [...container.querySelectorAll('article.message.assistant')].at(-1)!;
+  expect(reply.querySelector('.follow-up-label')!.textContent).toBe('后续回复');
+  expect(reply.querySelector('.follow-up-origin')!.textContent).toBe('关于：Ask a reviewer');
+  expect(reply.querySelector('.markdown-body strong')!.textContent).toBe('done');
+  expect(reply.querySelector('button')).toBeNull();
+  expect(send).toHaveBeenCalledWith({ type: 'remote-chat-read' });
+  const first = container.querySelectorAll('article.message.assistant')[0]!;
+  expect(first.querySelector('.follow-up-label')).toBeNull();
+});
+
+test('a follow-up to an earlier task does not end the progress of the running one', async () => {
+  state.chat = [
+    { id: 'task-1', role: 'user', text: 'Earlier', ts: 1, loopStatus: 'done' },
+    { id: 'r1', role: 'assistant', text: 'Earlier answer', ts: 2, final: true },
+    {
+      id: 'task-2',
+      role: 'user',
+      text: 'Now running',
+      ts: 3,
+      loopStatus: 'active',
+      delivery: 'queued',
+    },
+    {
+      id: 'append:1',
+      role: 'assistant',
+      text: 'Late result for the earlier task',
+      ts: 4,
+      final: true,
+      followUp: true,
+      taskId: 'task-1',
+    },
+  ];
+  await mount();
+  expect(container.querySelector('.reply-status')).not.toBeNull();
+  expect(send).not.toHaveBeenCalledWith({ type: 'remote-chat-read' });
 });
 
 test('legacy progress keeps its timing but no longer expands local browser steps', async () => {
@@ -2227,6 +2281,161 @@ test('connected: compact header chip opens a menu with switch, sign-out and a co
   ).toEqual(['Ada']);
   await click('.settings-button');
   expect(container.querySelector('.chat-panel')).not.toBeNull();
+});
+
+const CONNECTION_ID = '6f62aefa-1234-4abc-8def-0123456789ab';
+const workspaceWithId = (): NonNullable<RemoteState['workspace']> => ({
+  ...workspaceConnected(),
+  connection: { ...workspaceConnected().connection!, connectionId: CONNECTION_ID },
+});
+
+test('connected menu shows "name · short id" and renames this browser', async () => {
+  state.workspace = workspaceWithId();
+  await mount();
+  const chip = () => container.querySelector<HTMLButtonElement>('.connection-chip')!;
+  await act(async () => chip().click());
+  expect(container.querySelector('.connection-menu-browser')?.textContent).toBe(
+    'Chrome · 6f62aefa',
+  );
+  expect(container.querySelector('.connection-menu-browser')?.getAttribute('title')).toBe(
+    CONNECTION_ID,
+  );
+  expect(
+    [...container.querySelectorAll('.connection-menu [role="menuitem"]')].map(
+      (el) => el.textContent,
+    ),
+  ).toEqual(['重命名这个浏览器', '切换 Agent', '退出登录', '断开连接', '断开并撤销授权']);
+  await click('.connection-menu .workspace-rename');
+  // The form replaces the menu items, pre-filled with the current name.
+  expect(container.querySelector('.connection-menu [role="menuitem"]')).toBeNull();
+  const field = () => container.querySelector<HTMLInputElement>('#workspace-rename-input')!;
+  const save = () => container.querySelector<HTMLButtonElement>('.workspace-rename-save')!;
+  expect(field().value).toBe('Chrome');
+  expect(container.querySelector('.connection-rename .settings-hint')?.textContent).toBe(
+    'Max 看到的连接名称是「名称 · 连接号前 8 位」。',
+  );
+  await fill('#workspace-rename-input', '   ');
+  expect(save().disabled).toBe(true);
+  await fill('#workspace-rename-input', ' Mac mini · 工作 ');
+  expect(save().disabled).toBe(false);
+  send.mockClear();
+  await click('.workspace-rename-save');
+  expect(send).toHaveBeenLastCalledWith({
+    type: 'workspace-rename',
+    browserName: 'Mac mini · 工作',
+  });
+  expect(container.querySelector('.connection-menu')).toBeNull();
+  // Cancel returns to the menu items without sending anything.
+  await act(async () => chip().click());
+  await click('.connection-menu .workspace-rename');
+  send.mockClear();
+  await click('.workspace-rename-cancel');
+  expect(send).not.toHaveBeenCalled();
+  expect(container.querySelector('.connection-menu .workspace-rename')).not.toBeNull();
+});
+
+test('a failed rename keeps the form open and shows the reason', async () => {
+  state.workspace = workspaceWithId();
+  await mount();
+  await act(async () => container.querySelector<HTMLButtonElement>('.connection-chip')!.click());
+  await click('.connection-menu .workspace-rename');
+  await fill('#workspace-rename-input', 'Mac mini');
+  send.mockImplementationOnce(async () => ({ ok: false, error: 'ui.error.workspaceRevoked' }));
+  await click('.workspace-rename-save');
+  expect(container.querySelector('#error')?.textContent).toBe('该连接已被撤销');
+  expect(container.querySelector<HTMLInputElement>('#workspace-rename-input')?.value).toBe(
+    'Mac mini',
+  );
+  // Submitting the unchanged name just closes the form.
+  await fill('#workspace-rename-input', 'Chrome');
+  send.mockClear();
+  await click('.workspace-rename-save');
+  expect(send).not.toHaveBeenCalled();
+  expect(container.querySelector('.connection-menu')).toBeNull();
+});
+
+test('rename is not offered while preparing, signed out, or before Workspace assigned an id', async () => {
+  const menuItems = () =>
+    [...container.querySelectorAll('.connection-menu [role="menuitem"]')].map(
+      (el) => el.textContent,
+    );
+  state.workspace = workspaceConnected();
+  await mount();
+  await act(async () => container.querySelector<HTMLButtonElement>('.connection-chip')!.click());
+  expect(menuItems()).not.toContain('重命名这个浏览器');
+  // Only the name is shown when there is no id yet.
+  expect(container.querySelector('.connection-menu-browser')?.textContent).toBe('Chrome');
+  state = {
+    ...state,
+    workspace: { ...workspaceWithId(), auth: 'expired' },
+  };
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(menuItems()).not.toContain('重命名这个浏览器');
+  state = {
+    ...state,
+    workspace: {
+      ...workspaceWithId(),
+      connection: { ...workspaceWithId().connection!, phase: 'preparing' },
+    },
+  };
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(menuItems()).not.toContain('重命名这个浏览器');
+});
+
+test('the platform hint shows under "name · short id" in the menu and summary', async () => {
+  state.workspace = workspaceWithId();
+  state.platformLabel = 'macOS · arm64 · Chrome 142';
+  await mount();
+  await act(async () => container.querySelector<HTMLButtonElement>('.connection-chip')!.click());
+  expect(container.querySelector('.connection-menu .connection-platform')?.textContent).toBe(
+    'macOS · arm64 · Chrome 142',
+  );
+  await act(async () => container.querySelector<HTMLButtonElement>('.connection-chip')!.click());
+  await click('.settings-button');
+  await click('.connection-manage');
+  expect(
+    container.querySelector('#connect .agent-row.is-static .connection-platform')?.textContent,
+  ).toBe('macOS · arm64 · Chrome 142');
+  // Absent hint: no empty line.
+  state = { ...state, platformLabel: undefined };
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(container.querySelector('.connection-platform')).toBeNull();
+});
+
+test('connected summary on the connect page shows "name · short id"', async () => {
+  state.workspace = workspaceWithId();
+  await mount();
+  await click('.settings-button');
+  await click('.connection-manage');
+  const small = container.querySelector('#connect .agent-row.is-static .connection-browser');
+  expect(small?.textContent).toBe('Chrome · 6f62aefa');
+});
+
+test('first connect asks for a distinguishing name, pre-filled with the default and skippable', async () => {
+  state = { ...state, configured: false, connected: false };
+  state.workspace = {
+    baseUrl: 'https://ws.example',
+    auth: 'signed-in',
+    agents: [{ id: 'ag1', name: 'Max', authorized: true }],
+  };
+  await mount();
+  await click('.workspace-agent');
+  const field = container.querySelector<HTMLInputElement>('#workspace-browser-name')!;
+  expect(field.value).toBe(defaultBrowserName());
+  expect(field.placeholder).toBe('例如：Mac mini · 工作');
+  expect(document.activeElement).toBe(field);
+  expect(container.querySelector('#connect .settings-hint')?.textContent).toContain(
+    '多个 Chrome 档案',
+  );
+  expect(container.querySelector('#connect .settings-hint')?.textContent).toContain(
+    '之后在连接菜单中重命名',
+  );
+  // Keeping the default is one click on Connect.
+  send.mockClear();
+  await click('#connect button[type="submit"]');
+  expect(send).toHaveBeenLastCalledWith(
+    expect.objectContaining({ type: 'workspace-connect', browserName: defaultBrowserName() }),
+  );
 });
 
 test('failed: inline banner with Reconnect primary and Switch Agent secondary', async () => {

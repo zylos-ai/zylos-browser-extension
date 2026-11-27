@@ -66,7 +66,7 @@ export default {
     '允许进行中的浏览器任务移除其他扩展在网页内显示的界面。跨任务和重启保留；更换连接地址或密钥后清除。',
   agentStartPermission: '允许 Agent 发起任务',
   agentStartPermissionHint:
-    '已连接的 Agent 可以打开任务标签页。关闭此权限会停止其当前任务。到期前浏览器重启后仍保留；更换连接地址、密钥或切换连接开关后清除。',
+    '已连接的 Agent 可以打开任务标签页，或在你当前查看的标签页上执行任务（受站点权限和受限页面规则约束）。关闭此权限会停止其当前任务。到期前浏览器重启后仍保留；更换连接地址、密钥或切换连接开关后清除。',
   agentStartAllowedUntil: '允许至 {time}',
   agentStartAllowedUntilOff: '已允许，直到手动关闭',
   agentStartUntilOff: '直到手动关闭',
@@ -132,6 +132,8 @@ export default {
   markdownFootnoteBack: '返回正文',
   you: '你',
   agentStarted: 'Agent 发起',
+  followUp: '后续回复',
+  followUpTo: '关于：{task}',
   system: '系统',
   systemMessage: '系统消息',
   today: '今天',
@@ -430,7 +432,12 @@ export default {
   workspaceCapabilityLocal: '站点权限、停止和 Agent 发起任务授权仍由你在插件中控制。',
   workspaceAllow: '允许',
   workspaceBrowserName: '为这个浏览器命名',
-  workspaceBrowserNameHint: '{agent} 和 Workspace 中会显示这个名称。',
+  workspaceBrowserNameHint:
+    '{agent} 和 Workspace 中会显示这个名称。有多台电脑或多个 Chrome 档案时，写上电脑和档案（例如「Mac mini · 工作」）方便区分。也可以直接使用默认名称，之后在连接菜单中重命名。',
+  workspaceBrowserNamePlaceholder: '例如：Mac mini · 工作',
+  workspaceRename: '重命名这个浏览器',
+  workspaceRenameHint: '{agent} 看到的连接名称是「名称 · 连接号前 8 位」。',
+  workspaceRenameSave: '保存',
   workspaceConnect: '连接',
   workspaceSwitchAgent: '切换 Agent',
   workspaceSwitchHint: '切换会结束当前会话，之前的 Agent 仍保持授权。',
@@ -456,12 +463,18 @@ export default {
   workspaceRequestFailed: 'Workspace 未能完成请求',
   workspaceAgentUnavailable: '你没有权限使用这个 Agent，请联系组织管理员。',
   workspaceBrowserNameRequired: '请为这个浏览器填写名称',
+  workspaceRenameUnavailable: '当前没有可重命名的连接，请等连接准备完成后再试。',
   workspacePrepareFailed: 'Agent 未能准备好连接，请重试。',
   workspacePrepareTimeout:
     'Agent 没有在规定时间内准备好。可能仍在安装或启动 browser-remote（首次使用可能需要几分钟），也可能是 Agent 的 openmax 插件版本过旧。请稍后重试；如果反复超时，请让 Agent 升级 openmax。',
   workspaceAgentBrowserRemoteOld:
     'Agent 的 browser-remote 组件版本过旧，请让 Agent 升级 browser-remote 后重试。',
-  workspaceAgentNoPublicUrl: 'Agent 还没有配置公网地址，已通知它进行设置，请稍后重试。',
+  workspaceAgentNoPublicUrl:
+    'Agent 还没有配置公网 HTTPS 地址，暂时无法连接。请让 Agent 设置公网地址（AGENT_PUBLIC_BASE_URL），或在 Agent 所在机器上配置后重试。',
+  workspaceAgentNoPublicUrlNotified:
+    'Agent 还没有配置公网 HTTPS 地址，暂时无法连接。设置提醒已排队发给 Agent；等它完成设置后重试。如果仍然失败，请在聊天中让 Agent 设置公网地址（AGENT_PUBLIC_BASE_URL）。',
+  workspaceAgentNoPublicUrlNotNotified:
+    'Agent 还没有配置公网 HTTPS 地址，暂时无法连接，而且设置提醒没能发给 Agent。请在聊天中让 Agent 设置公网地址（AGENT_PUBLIC_BASE_URL），或在 Agent 所在机器上配置后重试。',
   workspaceAgentPublicUrlInvalid: 'Agent 的公网地址配置有误，请让 Agent 修正公网地址后重试。',
   workspaceRelayInsecure:
     'Agent 提供的连接地址不安全（不是 wss://），已拒绝使用。请让 Agent 使用 https 公网地址。',
@@ -498,7 +511,7 @@ export default {
   advanced: '高级',
   on: '已开启',
   off: '已关闭',
-  agentStartShort: '允许已连接的 Agent 打开任务标签页',
+  agentStartShort: '允许已连接的 Agent 打开任务标签页或使用当前标签页',
   compatibilityShort: '任务中可移除其他扩展的页面元素',
   diagnosticsShort: '仅事件类型，不含页面内容',
   siteAccessNeedsAttention: '规则需要重置',

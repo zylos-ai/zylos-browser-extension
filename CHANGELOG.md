@@ -2,6 +2,61 @@
 
 ## [Unreleased]
 
+Pairs with the zylos-browser-remote release that accepts `target: "current-tab"`;
+older relays keep URL starts only.
+
+Follow-up replies need zylos-browser-remote with `agent-task-append-v1`
+(zylos-ai/zylos-browser-remote#7). Older relays keep working; they never send
+follow-ups.
+
+### Added
+
+- Rename this browser from the connection menu (#34). The new name is saved in
+  OpenMax Workspace and sent to the relay, so the Agent sees it. An empty name,
+  a connection that is still being prepared, and Workspace errors (revoked
+  connection, expired sign-in, rate limit, unreachable) each show a clear
+  message, and the old name is kept.
+- The popup shows this connection as "name · first 8 characters of the
+  connection ID", the same label the Agent sees, so you can match a browser to
+  the Agent's connection list (#34).
+- When you connect, the name step suggests adding the computer and Chrome
+  profile (for example "Mac mini · Work"). The default name is pre-filled and
+  can be kept with one click. Switching Agents keeps the name you already chose.
+- The extension tells the relay a platform hint: OS, CPU architecture and
+  browser major version, for example "macOS · arm64 · Chrome 142". It is sent
+  as an optional `platform` field in `hello`; older relays ignore it. The popup
+  shows the same hint under the connection name. It comes only from
+  `chrome.runtime.getPlatformInfo()` and the user agent, so no new permission
+  is needed. It does not include the computer name, Chrome profile or account.
+- An Agent starting a task from another chat can work on the tab you are
+  viewing instead of always opening a new tab (#43). `task.start` accepts
+  `target: "current-tab"` and the extension advertises
+  `agent-task-current-tab-v1`. The active tab of the focused normal window is
+  pinned (tab, window, URL and document) when the start arrives, exactly like a
+  side panel message, and the task appears in the side panel as "Started by
+  Agent". No extra confirmation is shown; the existing protections stay: the
+  "Allow Agent to start tasks" setting, site access rules, restricted pages
+  (browser pages, Chrome Web Store, private windows) and Stop. A refused tab is
+  reported to the Agent with a specific reason (`TASK_START_NO_TAB`,
+  `TASK_START_PAGE_RESTRICTED`, `TASK_START_SITE_DENIED`,
+  `TASK_START_PAGE_NOT_READY`, `TASK_START_TAB_CLOSED`,
+  `TASK_START_PAGE_CHANGED`) and never replaced by a new tab. URL starts are
+  unchanged.
+- Follow-up replies to an ended task (zylos-ai/zylos-browser-remote#7): the
+  Agent can add a result to a task it already answered (done/blocked), for
+  example after a background review finishes. It appears as a new Agent message
+  labelled "Follow-up" with the task it belongs to, rendered like other replies
+  (text only, no action buttons), and is saved in the chat history. Allowed up to
+  24 hours after the task ended and at most 20 times per task; stopped,
+  interrupted, running and cleared tasks are refused. If the side panel is
+  closed, the message is marked unread and the toolbar badge shows the count
+  until the panel is opened. Negotiated as `agent-task-append-v1`.
+
+### Changed
+
+- Taking over a shared page now says whether it was closed, moved to another
+  window, or is restricted, instead of one combined message.
+
 ### Fixed
 
 - GitHub release zips always carry the fixed extension ID
@@ -14,6 +69,12 @@
 
 - The tab preview shows "Needs follow-up" when the Agent reports a blocker or
   asks the user for a decision.
+- "No public address" connection failures no longer always say the Agent was
+  notified (zylos-ai/zylos-openmax#313). With an OpenMax release that reports
+  `BROWSER_PUBLIC_URL_MISSING`, the message says whether the setup reminder was
+  queued for the Agent or could not be sent, and what to do next in each case.
+  Older OpenMax versions get a neutral message that asks you to have the Agent
+  set `AGENT_PUBLIC_BASE_URL`.
 
 ## [0.18.2] - 2026-11-25
 

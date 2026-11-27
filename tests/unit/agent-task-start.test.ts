@@ -1,5 +1,11 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { TaskStartLedger, taskStartSchema, waitForTaskPage } from '../../utils/agent-task-start';
+import {
+  TaskStartLedger,
+  captureStartTab,
+  currentTabRefusal,
+  taskStartSchema,
+  waitForTaskPage,
+} from '../../utils/agent-task-start';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -137,4 +143,135 @@ it('rejects invalid IDs, unsafe URLs, unknown fields and oversized prompts', () 
     { tabId: 123 },
   ])
     expect(taskStartSchema.safeParse({ ...input, ...changed }).success).toBe(false);
+});
+
+const currentTab = {
+  requestId: '11111111-1111-4111-8111-111111111111',
+  prompt: 'Finish the form I filled in',
+  target: 'current-tab',
+};
+it('accepts exactly one target: a URL or the current tab', () => {
+  expect(taskStartSchema.parse(currentTab)).toEqual(currentTab);
+  expect(taskStartSchema.parse(input)).toEqual(input);
+  for (const changed of [
+    { target: 'tab' },
+    { target: '' },
+    { url: input.url },
+    { tabId: 3 },
+    { prompt: ' ' },
+  ])
+    expect(taskStartSchema.safeParse({ ...currentTab, ...changed }).success).toBe(false);
+  const { url: _url, ...noTarget } = input;
+  expect(taskStartSchema.safeParse(noTarget).success).toBe(false);
+});
+it('treats a URL start and a current-tab start under one request ID as a conflict', async () => {
+  const ledger = new TaskStartLedger();
+  const work = vi.fn(async () => ({
+    requestId: input.requestId,
+    taskId: 'task',
+    status: 'started' as const,
+  }));
+  await ledger.run(currentTab as never, work);
+  expect(await ledger.run(currentTab as never, work)).toMatchObject({ status: 'existing' });
+  await expect(ledger.run(input, work)).rejects.toMatchObject({ code: 'TASK_START_CONFLICT' });
+  expect(work).toHaveBeenCalledTimes(1);
+});
+
+const userTab = {
+  id: 7,
+  windowId: 1,
+  status: 'complete',
+  url: 'https://example.com/upload',
+  title: 'Upload',
+} as chrome.tabs.Tab;
+it.each([
+  [undefined, 'TASK_START_NO_TAB'],
+  [{ ...userTab, id: undefined }, 'TASK_START_NO_TAB'],
+  [{ ...userTab, url: 'chrome://settings/' }, 'TASK_START_PAGE_RESTRICTED'],
+  [{ ...userTab, url: 'https://chromewebstore.google.com/detail/x' }, 'TASK_START_PAGE_RESTRICTED'],
+  [{ ...userTab, url: 'file:///tmp/a.html' }, 'TASK_START_PAGE_RESTRICTED'],
+  [{ ...userTab, incognito: true }, 'TASK_START_PAGE_RESTRICTED'],
+  [{ ...userTab, pendingUrl: 'https://example.com/next' }, 'TASK_START_PAGE_NOT_READY'],
+  [{ ...userTab, url: 'https://www.paypal.com/myaccount' }, 'TASK_START_SITE_DENIED'],
+  [{ ...userTab, url: 'https://example.com/delete-account' }, 'TASK_START_SITE_DENIED'],
+  [userTab, undefined],
+])('current-tab refusal for %j is %s', (tab, expected) => {
+  expect(currentTabRefusal(tab as chrome.tabs.Tab | undefined)).toBe(expected);
+});
+
+const captured = { context: { contextId: 'ctx', tabId: 7 }, page: { title: 'Upload' } };
+it('pins the active tab after capture without opening or following another tab', async () => {
+  const get = vi.fn().mockResolvedValue(userTab);
+  const create = vi.fn();
+  vi.stubGlobal('chrome', { tabs: { get, create } });
+  const capture = vi.fn().mockResolvedValue(captured);
+  expect(await captureStartTab(userTab, 1, () => {}, capture)).toBe(captured);
+  expect(capture).toHaveBeenCalledWith(7);
+  expect(get).toHaveBeenCalledWith(7);
+  expect(create).not.toHaveBeenCalled();
+});
+it.each([
+  [{ ...userTab, url: 'chrome://newtab/' }, 'TASK_START_PAGE_RESTRICTED'],
+  [{ ...userTab, url: 'https://www.paypal.com/' }, 'TASK_START_SITE_DENIED'],
+  [undefined, 'TASK_START_NO_TAB'],
+])('refuses %j before capture with %s', async (tab, code) => {
+  const create = vi.fn();
+  vi.stubGlobal('chrome', { tabs: { get: vi.fn(), create } });
+  const capture = vi.fn();
+  await expect(
+    captureStartTab(tab as chrome.tabs.Tab | undefined, 1, () => {}, capture),
+  ).rejects.toMatchObject({ code });
+  expect(capture).not.toHaveBeenCalled();
+  expect(create).not.toHaveBeenCalled();
+});
+it.each([
+  ['closed', null, captured, 'TASK_START_TAB_CLOSED'],
+  [
+    'navigated',
+    { ...userTab, url: 'https://example.com/other' },
+    captured,
+    'TASK_START_PAGE_CHANGED',
+  ],
+  [
+    'navigating',
+    { ...userTab, pendingUrl: 'https://example.com/other' },
+    captured,
+    'TASK_START_PAGE_CHANGED',
+  ],
+  ['moved', { ...userTab, windowId: 2 }, captured, 'TASK_START_PAGE_CHANGED'],
+  [
+    'reloaded',
+    userTab,
+    { context: { tabId: 7, reason: 'PAGE_CHANGED' } },
+    'TASK_START_PAGE_CHANGED',
+  ],
+  [
+    'unreadable',
+    userTab,
+    { context: { tabId: 7, reason: 'CONTENT_UNAVAILABLE' } },
+    'TASK_START_PAGE_NOT_READY',
+  ],
+])('refuses a tab %s during the start', async (_name, fresh, result, code) => {
+  vi.stubGlobal('chrome', { tabs: { get: vi.fn().mockResolvedValue(fresh), create: vi.fn() } });
+  await expect(
+    captureStartTab(userTab, 1, () => {}, vi.fn().mockResolvedValue(result)),
+  ).rejects.toMatchObject({ code });
+});
+it('Stop during capture wins over the start', async () => {
+  vi.stubGlobal('chrome', { tabs: { get: vi.fn().mockResolvedValue(userTab) } });
+  let stopped = false;
+  const capture = vi.fn(async () => {
+    stopped = true;
+    return captured;
+  });
+  await expect(
+    captureStartTab(
+      userTab,
+      1,
+      () => {
+        if (stopped) throw new Error('TASK_START_REVOKED');
+      },
+      capture,
+    ),
+  ).rejects.toThrow('TASK_START_REVOKED');
 });

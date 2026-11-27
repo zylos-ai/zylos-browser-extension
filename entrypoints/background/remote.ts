@@ -40,12 +40,22 @@ import { DetailedSharing } from '../../utils/detailed-sharing';
 import { installDetailedRuntime } from '../../utils/detailed-runtime';
 import { IncidentCapture } from '../../utils/incident-bundle';
 import {
+  AGENT_TASK_CURRENT_TAB_CAPABILITY,
   AGENT_TASK_START_CAPABILITY,
   TaskStartLedger,
+  captureStartTab,
   taskStartSchema,
   taskStartError,
   waitForTaskPage,
 } from '../../utils/agent-task-start';
+import {
+  AGENT_TASK_APPEND_CAPABILITY,
+  planTaskAppend,
+  taskAppendError,
+  taskAppendSchema,
+  type TaskAppend,
+  type TaskAppendResult,
+} from '../../utils/agent-task-append';
 import {
   configureCdpDiagnostics,
   refreshCdpDiagnostics,
@@ -145,6 +155,7 @@ import {
   workspaceEnvs,
 } from '../../utils/workspace/config';
 import { TokenStore, chromeLocalStorage } from '../../utils/workspace/token-store';
+import { platformHint, platformLabel, readPlatformHint } from '../../utils/platform-hint';
 import { WorkspaceApi } from '../../utils/workspace/api';
 import {
   WorkspaceConnector,
@@ -172,6 +183,16 @@ export function startRemoteBackground() {
   initializeExecutor();
   const preview = new LivePreview();
   const state: RemoteState = { ...initialRemoteState, chat: [] };
+  // OS/arch/browser version hint for the Agent's connection list and the panel
+  // (no permission needed). The navigator part is known at once; getPlatformInfo
+  // adds the architecture before the first relay hello in practice.
+  let platform = platformHint();
+  state.platformLabel = platformLabel(platform) || undefined;
+  void readPlatformHint().then((hint) => {
+    platform = hint;
+    state.platformLabel = platformLabel(hint) || undefined;
+    publish();
+  });
   let config: RemoteConfig = remoteConfigSchema.parse({});
   let siteExpiryTimer: ReturnType<typeof setTimeout> | undefined;
   let siteExpiry = 0;
@@ -242,6 +263,9 @@ export function startRemoteBackground() {
   let agentStartedTask: string | undefined;
   let agentStartPending = false;
   let agentStartReady = false;
+  let taskAppendReady = false;
+  // First delivery of each append ID whose save is still in flight.
+  const appendsInFlight = new Map<string, Promise<TaskAppendResult>>();
   const taskStarts = new TaskStartLedger();
   let panelMutations: Promise<unknown> = Promise.resolve();
   /** Serialize a connection-changing transaction with the panel's consent mutations. */
@@ -556,6 +580,9 @@ export function startRemoteBackground() {
       activity.end('interrupted');
     }
     hadControl = hasControl;
+    // A follow-up that arrived during another task skipped the badge; restore
+    // it once control (and the executor's own badge clear) is over.
+    if (!hasControl && state.chat.some((entry) => entry.unread)) void syncUnreadBadge();
     publish();
   });
 
@@ -607,6 +634,67 @@ export function startRemoteBackground() {
     if (state.chat.length > CHAT_LOG_CAP) state.chat.splice(0, state.chat.length - CHAT_LOG_CAP);
     await persistChat();
     publish();
+  }
+
+  // ------------------------------------------------------- unread follow-ups
+  // A follow-up that arrives while no side panel is open is marked unread and
+  // counted on the toolbar badge. The executor owns the badge while it holds
+  // browser control, so it is only written when no task has control.
+  async function sidePanelOpen() {
+    try {
+      const contexts = await chrome.runtime.getContexts({
+        contextTypes: ['SIDE_PANEL' as chrome.runtime.ContextType],
+      });
+      return contexts.length > 0;
+    } catch {
+      return false;
+    }
+  }
+  async function syncUnreadBadge() {
+    if (currentControl()) return;
+    const unread = state.chat.filter((entry) => entry.unread).length;
+    try {
+      if (unread) await chrome.action.setBadgeBackgroundColor({ color: '#326C53' });
+      await chrome.action.setBadgeText({ text: unread ? String(Math.min(unread, 99)) : '' });
+    } catch {
+      /* The badge is a hint; the persisted unread marker is the record. */
+    }
+  }
+  async function appendFollowUp(input: TaskAppend): Promise<TaskAppendResult> {
+    // A retry while the first delivery is still saving shares its outcome: its
+    // failure is rethrown, and after a successful save planning says "existing".
+    const first = appendsInFlight.get(input.appendId);
+    if (first) await first;
+    const panelOpen = await sidePanelOpen();
+    const { entry, result } = planTaskAppend(state.chat, input, {
+      now: Date.now(),
+      activeTaskId: loop.active ? loop.taskId : undefined,
+    });
+    if (entry) {
+      // Planned and pushed without an await in between, so a concurrent
+      // history clear either removed the task first or removes this too.
+      try {
+        await appendChat(panelOpen ? entry : { ...entry, unread: true });
+      } catch {
+        // Not persisted: withdraw it so a later retry appends it again.
+        state.chat = state.chat.filter((item) => item.id !== entry.id);
+        publish();
+        throw taskAppendError('TASK_APPEND_FAILED');
+      }
+      if (!panelOpen) await syncUnreadBadge();
+    }
+    return result;
+  }
+  async function markChatRead() {
+    let changed = false;
+    for (const entry of state.chat)
+      if (entry.unread) {
+        delete entry.unread;
+        changed = true;
+      }
+    if (!changed) return;
+    await persistChat();
+    await syncUnreadBadge();
   }
 
   async function updateDelivery(m: {
@@ -1123,6 +1211,7 @@ export function startRemoteBackground() {
     closedShadowReady = false;
     childFramesReady = false;
     agentStartReady = false;
+    taskAppendReady = false;
     interruptReady = false;
     clearTimeout(handshakeTimer);
     preview.finish('interrupted');
@@ -1198,6 +1287,8 @@ export function startRemoteBackground() {
         ...(build ? { build } : {}),
         capabilities: [
           AGENT_TASK_START_CAPABILITY,
+          AGENT_TASK_CURRENT_TAB_CAPABILITY,
+          AGENT_TASK_APPEND_CAPABILITY,
           'recovery-closed-shadow-v1',
           'recovery-child-frames-v1',
           'diagnostics-detail-share-v1',
@@ -1216,6 +1307,8 @@ export function startRemoteBackground() {
         browserId: state.browserId,
         // Workspace connections only; old relays ignore the field.
         ...(workspaceBrowserName ? { browserName: workspaceBrowserName } : {}),
+        // Display hint for telling browsers apart; old relays ignore the field.
+        ...(Object.keys(platform).length ? { platform } : {}),
         runtimeEpoch,
         ...(helloResume ? { resume: helloResume } : {}),
       });
@@ -1262,6 +1355,7 @@ export function startRemoteBackground() {
       closedShadowReady = false;
       childFramesReady = false;
       agentStartReady = false;
+      taskAppendReady = false;
       state.steeringSupported = false;
       interruptReady = false;
       clearTimeout(handshakeTimer);
@@ -1393,6 +1487,7 @@ export function startRemoteBackground() {
         }
         attachmentsReady = m.capabilities.includes(ATTACHMENT_CAPABILITY);
         agentStartReady = m.capabilities.includes(AGENT_TASK_START_CAPABILITY);
+        taskAppendReady = m.capabilities.includes(AGENT_TASK_APPEND_CAPABILITY);
         closedShadowReady = m.capabilities.includes('recovery-closed-shadow-v1');
         childFramesReady = m.capabilities.includes('recovery-child-frames-v1');
         state.steeringSupported = m.capabilities.includes(STEER_CAPABILITY);
@@ -1535,8 +1630,24 @@ export function startRemoteBackground() {
           sendingChat = true;
           agentStartPending = true;
           const id = crypto.randomUUID();
-          try {
-            publish();
+          // The tab the user has in front of them when the start arrives. It is
+          // pinned like a panel message: no control is taken here, and the Agent
+          // borrows it with use-current-tab, which re-checks tab and document.
+          const startOnCurrentTab = async () => {
+            const win = await chrome.windows
+              .getLastFocused({ windowTypes: ['normal'] })
+              .catch(() => undefined);
+            check();
+            const windowId = win?.id;
+            if (windowId === undefined) throw taskStartError('TASK_START_NO_TAB');
+            if (win!.incognito) throw taskStartError('TASK_START_PAGE_RESTRICTED');
+            const [tab] = await chrome.tabs.query({ active: true, windowId });
+            check();
+            return captureStartTab(tab, windowId, check, (tabId) =>
+              captureCurrentPage(id, windowId, tabId),
+            );
+          };
+          const startInNewTab = async (url: string) => {
             const win = await chrome.windows.getLastFocused({ windowTypes: ['normal'] });
             check();
             if (win.incognito || win.id === undefined) throw taskStartError('TASK_START_CONFLICT');
@@ -1547,13 +1658,13 @@ export function startRemoteBackground() {
             await createTask({
               sourceTabId: source.id,
               windowId: win.id,
-              url: input.url,
+              url,
               taskId: id,
             });
             check();
             const control = currentControl();
             if (!control || control.sessionId !== id) throw taskStartError('TASK_START_REVOKED');
-            const { context, page } = await waitForTaskPage(
+            return waitForTaskPage(
               control.tabId,
               control.windowId,
               () => {
@@ -1564,6 +1675,13 @@ export function startRemoteBackground() {
               },
               () => captureCurrentPage(id, control.windowId, control.tabId),
             );
+          };
+          try {
+            publish();
+            // Never fall back from one target to the other: a refused current
+            // tab is reported to the Agent, not replaced by a new tab.
+            const { context, page } =
+              'target' in input ? await startOnCurrentTab() : await startInNewTab(input.url);
             check();
             const ts = Date.now();
             await appendChat({
@@ -1617,6 +1735,40 @@ export function startRemoteBackground() {
               ? 'BAD_PARAMS'
               : (error as { code?: string }).code || 'TASK_START_CONFLICT',
           message: 'Browser task could not start',
+        });
+      }
+      return;
+    }
+    if (m.method === 'task.append') {
+      try {
+        const input = taskAppendSchema.parse(m.params);
+        if (!taskAppendReady) throw taskAppendError('TASK_APPEND_UNSUPPORTED');
+        const appending = appendFollowUp(input);
+        if (!appendsInFlight.has(input.appendId)) {
+          appendsInFlight.set(input.appendId, appending);
+          void appending.catch(() => {}).finally(() => appendsInFlight.delete(input.appendId));
+        }
+        // Acknowledged only after the reply is persisted and published.
+        reply({ type: 'resp', result: await appending });
+      } catch (error) {
+        const code = (error as { code?: string }).code;
+        reply({
+          type: 'error',
+          code:
+            error instanceof z.ZodError
+              ? 'BAD_PARAMS'
+              : [
+                    'TASK_APPEND_UNSUPPORTED',
+                    'TASK_UNKNOWN',
+                    'TASK_ACTIVE',
+                    'TASK_NOT_APPENDABLE',
+                    'TASK_TOO_OLD',
+                    'TASK_APPEND_LIMIT',
+                    'TASK_APPEND_CONFLICT',
+                  ].includes(code ?? '')
+                ? code
+                : 'TASK_APPEND_FAILED',
+          message: 'Follow-up was not shown',
         });
       }
       return;
@@ -1793,6 +1945,7 @@ export function startRemoteBackground() {
     }
     await persistChat();
     if (activity.recover()) await persistChat();
+    if (state.chat.some((entry) => entry.unread)) await syncUnreadBadge();
     await applyConfig(cfg.success ? cfg.data : remoteConfigSchema.parse({}));
     await initializeSiteAccess(`${config.relayUrl}|${await keyIdOf(config.key)}`);
     // A recycled worker restores an unexpired grant bound to this connection only.
@@ -1993,6 +2146,9 @@ export function startRemoteBackground() {
         case 'workspace-cancel':
           await workspace.cancel();
           return snapshot();
+        case 'workspace-rename':
+          await workspace.rename(m.browserName);
+          return snapshot();
         case 'workspace-set-url': {
           // Only a build-configured environment can be selected.
           const next = normalizeWorkspaceUrl(m.url);
@@ -2132,6 +2288,9 @@ export function startRemoteBackground() {
             publish();
           }
         }
+        case 'remote-chat-read':
+          await markChatRead();
+          return snapshot();
         case 'remote-chat-clear':
           if (loop.active) {
             cancelLoop('stopped');
@@ -2140,6 +2299,7 @@ export function startRemoteBackground() {
           preview.clear();
           state.chat = [];
           await persistChat();
+          await syncUnreadBadge();
           publish();
           return snapshot();
         case 'remote-reveal':

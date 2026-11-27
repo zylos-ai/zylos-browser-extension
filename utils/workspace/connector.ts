@@ -29,7 +29,16 @@ export const PREPARE_TIMEOUT_MS = 300_000;
 export function prepareErrorKey(lastError: string | undefined): string {
   const e = lastError ?? '';
   if (/browser-remote is too old/i.test(e)) return 'ui.error.workspaceAgentBrowserRemoteOld';
+  // OpenMax ≥ #322: a stable code plus whether the Agent session notice was
+  // queued ("queued" / "recently queued") or "could not be queued".
+  if (/BROWSER_PUBLIC_URL_MISSING/.test(e)) {
+    if (/notice could not be queued/i.test(e))
+      return 'ui.error.workspaceAgentNoPublicUrlNotNotified';
+    if (/notice (?:recently )?queued/i.test(e)) return 'ui.error.workspaceAgentNoPublicUrlNotified';
+    return 'ui.error.workspaceAgentNoPublicUrl';
+  }
   if (/not a valid http\(s\) URL/i.test(e)) return 'ui.error.workspaceAgentPublicUrlInvalid';
+  // Older OpenMax prose: whether the Agent was notified is unknown.
   if (/no public domain|AGENT_PUBLIC_BASE_URL/i.test(e))
     return 'ui.error.workspaceAgentNoPublicUrl';
   return 'ui.error.workspacePrepareFailed';
@@ -139,6 +148,8 @@ export const workspaceViewSchema = z.object({
       agentMemberId: z.string(),
       agentName: z.string(),
       browserName: z.string(),
+      /** Workspace connection id (non-secret); the Agent lists connections by its first 8 chars. */
+      connectionId: z.string().optional(),
       phase: workspacePhaseSchema,
       error: z.string().optional(),
     })
@@ -188,6 +199,24 @@ export function cleanBrowserName(input: string) {
   const flat = input.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim();
   return Array.from(flat).slice(0, 100).join('').trim();
 }
+
+/** First 8 characters of the connection id, as the Agent shows it. */
+export function shortConnectionId(connectionId: string | undefined): string {
+  return (connectionId ?? '').replace(/^openmax:/, '').slice(0, 8);
+}
+
+/** "name · short id", the same label the Agent sees for this connection. */
+export function connectionLabel(browserName: string, connectionId?: string): string {
+  const id = shortConnectionId(connectionId);
+  return id ? `${browserName} · ${id}` : browserName;
+}
+
+/** Phases in which the connection can be renamed (not while it is being prepared). */
+const RENAMABLE_PHASES: ReadonlySet<WorkspacePhase> = new Set([
+  'connected',
+  'failed',
+  'key-rejected',
+]);
 
 export class WorkspaceConnector {
   private record: ConnectionRecord | undefined;
@@ -288,6 +317,7 @@ export class WorkspaceConnector {
               agentMemberId: r.agentMemberId,
               agentName: r.agentName,
               browserName: r.browserName,
+              ...(r.connectionId ? { connectionId: r.connectionId } : {}),
               phase: r.phase,
               ...(r.error ? { error: r.error } : {}),
             },
@@ -317,13 +347,30 @@ export class WorkspaceConnector {
     return cleanBrowserName(this.record!.browserName) || undefined;
   }
 
-  /** Rename this browser in Workspace, then tell the relay. */
+  /**
+   * Rename this browser in Workspace, then tell the relay. Throws a `ui.error.*`
+   * code when the name is empty, there is no settled connection to rename, or
+   * Workspace rejects the request.
+   */
   async rename(input: string) {
     const browserName = cleanBrowserName(input);
     if (!browserName) throw new Error('ui.error.workspaceBrowserNameRequired');
     const record = this.record;
-    if (!record?.connectionId) return;
-    await this.deps.api.rename(record.connectionId, browserName);
+    if (!record?.connectionId || !RENAMABLE_PHASES.has(record.phase))
+      throw new Error('ui.error.workspaceRenameUnavailable');
+    if (browserName === record.browserName) return;
+    try {
+      await this.deps.api.rename(record.connectionId, browserName);
+    } catch (e) {
+      // A missing connection reads as revoked, not as a missing Agent.
+      const error =
+        e instanceof WorkspaceApiError && e.status === 404
+          ? 'ui.error.workspaceRevoked'
+          : await this.fail(e);
+      // fail() may have moved auth to "expired"; show that in the panel.
+      this.deps.publish();
+      throw new Error(error);
+    }
     if (this.record !== record) return;
     await this.save({ ...record, browserName });
     if (this.ownsRelay()) this.deps.onBrowserName?.(browserName);

@@ -48,7 +48,7 @@ vi.mock('../../utils/messages', () => ({ isPanelSender: () => true }));
 
 import { startRemoteBackground } from '../../entrypoints/background/remote';
 import { PREVIEW_PORT } from '../../utils/live-preview';
-import { REMOTE_SUBPROTOCOL, type ChatEntry } from '../../utils/remote';
+import { REMOTE_SUBPROTOCOL, remoteRequestSchema, type ChatEntry } from '../../utils/remote';
 
 type Handler = (m: unknown, s: unknown, r: (v: unknown) => void) => boolean;
 let internal: Handler;
@@ -179,6 +179,7 @@ async function bootConnected(
   controlRecovery = false,
   frameSelection = false,
   agentStart = false,
+  taskAppend = false,
 ) {
   startRemoteBackground();
   await flush();
@@ -191,6 +192,7 @@ async function bootConnected(
       'browser-instance-v1',
       'agent-message-v2',
       ...(agentStart ? ['agent-task-start-v1'] : []),
+      ...(taskAppend ? ['agent-task-append-v1'] : []),
       ...(attachments ? ['attachments-v1'] : []),
       ...(interrupt ? ['agent-interrupt-v1'] : []),
       ...(steering ? ['agent-input-v1'] : []),
@@ -751,6 +753,200 @@ describe('decision transport background', () => {
     expect(ws.last('agent-request')).toBeUndefined();
     expect(executor.release).toHaveBeenCalled();
     expect((await state()).agentStartEnabled).toBe(false);
+  });
+  const currentTabInput = {
+    requestId: '44444444-4444-4444-8444-444444444444',
+    prompt: 'Finish the upload form I already filled in',
+    target: 'current-tab',
+  };
+  const userTab = {
+    id: 3,
+    windowId: 1,
+    active: true,
+    status: 'complete',
+    url: 'https://example.com/upload',
+    title: 'Upload video',
+  };
+  const currentTabSetup = async (tab: Record<string, unknown> = userTab) => {
+    const ws = await taskStartSetup();
+    chrome.tabs.query = vi.fn(async () => [tab]) as any;
+    chrome.tabs.get = vi.fn(async (id: number) => ({ ...tab, id })) as any;
+    chrome.tabs.create = vi.fn() as any;
+    chrome.webNavigation = {
+      getFrame: vi.fn(async () => ({ documentId: 'user-document', url: tab.url })),
+    } as any;
+    return ws;
+  };
+  it('starts on the user current tab without opening a tab or taking control', async () => {
+    const ws = await currentTabSetup();
+    const first = await requestStart(ws, currentTabInput as any);
+    expect(first).toMatchObject({
+      type: 'resp',
+      result: { requestId: currentTabInput.requestId, status: 'started' },
+    });
+    expect(executor.createTask).not.toHaveBeenCalled();
+    expect(chrome.tabs.create).not.toHaveBeenCalled();
+    expect(chrome.windows.getLastFocused).toHaveBeenCalledWith({ windowTypes: ['normal'] });
+    const taskId = (first!.result as any).taskId;
+    const request = ws.last('agent-request')!;
+    expect(request).toMatchObject({ taskId });
+    // Same pinned context as a panel message: the Agent borrows it with use-current-tab.
+    expect((request.context as any).pages[0]).toMatchObject({
+      type: 'current-page',
+      contextId: taskId,
+      tabId: 3,
+      url: userTab.url,
+    });
+    const entry = ((await state()) as any).chat.find((item: any) => item.id === taskId);
+    expect(entry).toMatchObject({
+      role: 'user',
+      origin: 'agent',
+      text: currentTabInput.prompt,
+      page: { url: userTab.url, title: userTab.title },
+    });
+    expect((await state()).loopActive).toBe(true);
+    expect(await requestStart(ws, currentTabInput as any, 901)).toMatchObject({
+      result: { taskId, status: 'existing' },
+    });
+    expect(await requestStart(ws, { ...currentTabInput, prompt: 'x' } as any, 902)).toMatchObject({
+      code: 'TASK_START_CONFLICT',
+    });
+    // Stop works as for any agent-started task.
+    await ask({ type: 'remote-stop' });
+    expect((await state()).loopActive).toBe(false);
+  });
+  it.each([
+    [{ ...userTab, url: 'https://www.paypal.com/myaccount' }, 'TASK_START_SITE_DENIED'],
+    [{ ...userTab, url: 'chrome://settings/' }, 'TASK_START_PAGE_RESTRICTED'],
+    [{ ...userTab, url: 'https://chromewebstore.google.com/' }, 'TASK_START_PAGE_RESTRICTED'],
+    [{ ...userTab, incognito: true }, 'TASK_START_PAGE_RESTRICTED'],
+    [{ ...userTab, pendingUrl: 'https://example.com/next' }, 'TASK_START_PAGE_NOT_READY'],
+  ])('refuses current tab %j with %s and never falls back to a new tab', async (tab, code) => {
+    const ws = await currentTabSetup(tab);
+    expect(await requestStart(ws, currentTabInput as any)).toMatchObject({ type: 'error', code });
+    expect(executor.createTask).not.toHaveBeenCalled();
+    expect(chrome.tabs.create).not.toHaveBeenCalled();
+    expect(ws.last('agent-request')).toBeUndefined();
+    expect(await state()).toMatchObject({ loopActive: false, chatBusy: false });
+    // The refusal is retained for the request ID; it is not retried as something else.
+    expect(await requestStart(ws, currentTabInput as any, 901)).toMatchObject({ code });
+    expect(executor.createTask).not.toHaveBeenCalled();
+  });
+  it('refuses when no normal window is focused or the window is private', async () => {
+    const ws = await currentTabSetup();
+    vi.mocked(chrome.windows.getLastFocused).mockRejectedValueOnce(new Error('No window'));
+    expect(await requestStart(ws, currentTabInput as any)).toMatchObject({
+      code: 'TASK_START_NO_TAB',
+    });
+    vi.mocked(chrome.windows.getLastFocused).mockResolvedValueOnce({
+      id: 1,
+      incognito: true,
+    } as any);
+    expect(
+      await requestStart(
+        ws,
+        { ...currentTabInput, requestId: '55555555-5555-4555-8555-555555555555' } as any,
+        901,
+      ),
+    ).toMatchObject({ code: 'TASK_START_PAGE_RESTRICTED' });
+    expect(executor.createTask).not.toHaveBeenCalled();
+  });
+  it.each([
+    ['closed', () => null, 'TASK_START_TAB_CLOSED'],
+    [
+      'navigated away',
+      () => ({ ...userTab, url: 'https://example.com/other' }),
+      'TASK_START_PAGE_CHANGED',
+    ],
+    ['moved', () => ({ ...userTab, windowId: 2 }), 'TASK_START_PAGE_CHANGED'],
+  ])('refuses a tab %s while the start is checked', async (_name, after, code) => {
+    const ws = await currentTabSetup();
+    let calls = 0;
+    // captureCurrentPage reads the tab first; the start's own re-check sees the change.
+    chrome.tabs.get = vi.fn(async (id: number) => {
+      calls++;
+      if (calls === 1) return { ...userTab, id };
+      const tab = after();
+      if (!tab) throw new Error('No tab with id');
+      return tab;
+    }) as any;
+    expect(await requestStart(ws, currentTabInput as any)).toMatchObject({ type: 'error', code });
+    expect(executor.createTask).not.toHaveBeenCalled();
+    expect(ws.last('agent-request')).toBeUndefined();
+    expect(await state()).toMatchObject({ loopActive: false, chatBusy: false });
+  });
+  it('a same-URL reload during the start is refused as a page change', async () => {
+    const ws = await currentTabSetup();
+    chrome.webNavigation.getFrame = vi.fn(async () => ({
+      documentId: 'reloaded',
+      url: 'https://example.com/elsewhere',
+    })) as any;
+    expect(await requestStart(ws, currentTabInput as any)).toMatchObject({
+      code: 'TASK_START_PAGE_CHANGED',
+    });
+  });
+  it('current-tab start keeps the session permission and conflict rules', async () => {
+    const ws = await currentTabSetup();
+    await ask({ type: 'remote-agent-start-set-enabled', enabled: false });
+    expect(await requestStart(ws, currentTabInput as any)).toMatchObject({
+      code: 'TASK_START_DISABLED',
+    });
+    await ask({ type: 'remote-agent-start-set-enabled', enabled: true });
+    await begin(ws);
+    expect(
+      await requestStart(
+        ws,
+        { ...currentTabInput, requestId: '66666666-6666-4666-8666-666666666666' } as any,
+        901,
+      ),
+    ).toMatchObject({ code: 'TASK_START_CONFLICT' });
+  });
+  it('revoking permission while the current tab is captured prevents a late start', async () => {
+    const ws = await currentTabSetup();
+    let finish!: () => void;
+    chrome.webNavigation.getFrame = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          finish = () => resolve({ documentId: 'user-document', url: userTab.url });
+        }),
+    ) as any;
+    ws.receive({ type: 'req', id: 900, method: 'task.start', params: currentTabInput });
+    await flush();
+    await ask({ type: 'remote-agent-start-set-enabled', enabled: false });
+    finish();
+    await flush();
+    expect(ws.frames.findLast((frame) => frame.id === 900)).toMatchObject({
+      code: 'TASK_START_REVOKED',
+    });
+    expect(ws.last('agent-request')).toBeUndefined();
+    expect(executor.createTask).not.toHaveBeenCalled();
+  });
+  it('URL start still opens its own task tab when current-tab is supported', async () => {
+    const ws = await currentTabSetup();
+    executor.createTask.mockImplementation(async (input) => {
+      executor.currentControl.mockReturnValue({
+        sessionId: input.taskId,
+        tabId: 20,
+        tabIds: [20],
+        phase: 'ready',
+        windowId: 1,
+      } as any);
+    });
+    chrome.tabs.get = vi.fn(async (id: number) => ({
+      id,
+      windowId: 1,
+      status: 'complete',
+      url: 'https://example.com/',
+    })) as any;
+    chrome.webNavigation.getFrame = vi.fn(async () => ({
+      documentId: 'task-document',
+      url: 'https://example.com/',
+    })) as any;
+    expect(await requestStart(ws)).toMatchObject({ type: 'resp', result: { status: 'started' } });
+    expect(executor.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceTabId: 3, windowId: 1, url: startInput.url }),
+    );
+    expect((ws.last('agent-request')!.context as any).pages[0]).toMatchObject({ tabId: 20 });
   });
   const DAY = 86_400_000;
   const BINDING = 'wss://agent.example/browser-remote/ext|abababababab';
@@ -2053,6 +2249,32 @@ describe('decision transport background', () => {
     },
   );
 
+  it('sends the platform hint in hello and shows it in the panel state', async () => {
+    vi.stubGlobal('navigator', {
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+      userAgentData: { brands: [{ brand: 'Google Chrome', version: '142' }] },
+    });
+    const getPlatformInfo = vi.fn(async () => ({ os: 'mac', arch: 'arm64' }));
+    (chrome.runtime as unknown as Record<string, unknown>).getPlatformInfo = getPlatformInfo;
+    const ws = await bootConnected();
+    expect(getPlatformInfo).toHaveBeenCalled();
+    expect(ws.last('hello')!.platform).toEqual({
+      os: 'macOS',
+      arch: 'arm64',
+      browser: 'Chrome',
+      browserVersion: '142',
+    });
+    expect((await state()).platformLabel).toBe('macOS · arm64 · Chrome 142');
+  });
+
+  it('omits the platform hint when nothing is known', async () => {
+    vi.stubGlobal('navigator', { userAgent: '' });
+    const ws = await bootConnected();
+    expect(ws.last('hello')).not.toHaveProperty('platform');
+    expect((await state()).platformLabel).toBeUndefined();
+  });
+
   it('reports the trimmed Workspace browser name in hello only for a Workspace-owned relay', async () => {
     storage.workspaceConnection = {
       agentMemberId: 'ag1',
@@ -2219,6 +2441,8 @@ describe('decision transport background', () => {
     expect(ws.protocols).toEqual([REMOTE_SUBPROTOCOL, `key.${KEY}`]);
     expect(ws.last('hello')!.capabilities).toEqual([
       'agent-task-start-v1',
+      'agent-task-current-tab-v1',
+      'agent-task-append-v1',
       'recovery-closed-shadow-v1',
       'recovery-child-frames-v1',
       'diagnostics-detail-share-v1',
@@ -2726,6 +2950,26 @@ describe('OpenMax Workspace mode', () => {
     });
   });
 
+  it('workspace-rename is routed to the connector; the view carries the connection id', async () => {
+    const relayUrl = (storage.remoteConfig as { relayUrl: string }).relayUrl;
+    storage.workspaceConnection = workspaceRecord(relayUrl);
+    await bootConnected();
+    expect((await state()).workspace).toMatchObject({
+      connection: { browserName: 'Chrome · Mac', connectionId: workspaceRecord('').connectionId },
+    });
+    const blank = await ask({ type: 'workspace-rename', browserName: ' \u0007 ' });
+    expect(blank).toMatchObject({ ok: false, error: 'ui.error.workspaceBrowserNameRequired' });
+    // Over-long names are rejected by the request schema (the panel input stops at 100).
+    expect(
+      remoteRequestSchema.safeParse({ type: 'workspace-rename', browserName: 'x'.repeat(101) })
+        .success,
+    ).toBe(false);
+    // An unchanged name succeeds without a Workspace request.
+    const same = await ask({ type: 'workspace-rename', browserName: ' Chrome · Mac ' });
+    expect(same.ok).toBe(true);
+    expect(storage.workspaceConnection).toMatchObject({ browserName: 'Chrome · Mac' });
+  });
+
   it('workspace-set-url only accepts a build-configured environment', async () => {
     vi.stubGlobal(
       '__WORKSPACE_ENVS__',
@@ -2762,5 +3006,264 @@ describe('OpenMax Workspace mode', () => {
     });
     expect(saved.ok).toBe(true);
     expect(storage.workspaceConnection).toBeUndefined();
+  });
+});
+
+describe('follow-up replies to an ended task (agent-task-append-v1)', () => {
+  const bootAppend = (appendCap = true) =>
+    bootConnected(false, false, true, false, false, false, false, appendCap);
+  const sideContexts: unknown[] = [];
+  beforeEach(() => {
+    sideContexts.length = 0;
+    (chrome.runtime as any).getContexts = vi.fn(async () => sideContexts);
+    (chrome as any).action = {
+      setBadgeText: vi.fn(async () => {}),
+      setBadgeBackgroundColor: vi.fn(async () => {}),
+    };
+  });
+  const finishTask = async (ws: Socket, kind: 'done' | 'blocked' = 'done') => {
+    const request = await begin(ws, 'Ask a reviewer and report back');
+    await respond(ws, request, { kind, text: 'I asked a reviewer; I will report back.' });
+    return request.taskId as string;
+  };
+  let reqId = 500;
+  const append = async (ws: Socket, params: Record<string, unknown>) => {
+    const id = ++reqId;
+    ws.receive({ type: 'req', id, method: 'task.append', params });
+    await flush();
+    return ws.frames.findLast((frame) => frame.id === id)!;
+  };
+  const appendId = (n: number) => n.toString(16).padStart(32, '0');
+  const chatLog = () => storage.remoteChatLog as ChatEntry[];
+
+  it('persists, publishes and acknowledges the follow-up after the original reply', async () => {
+    sideContexts.push({ contextType: 'SIDE_PANEL' });
+    const ws = await bootAppend();
+    const taskId = await finishTask(ws);
+    const frame = await append(ws, {
+      taskId,
+      appendId: appendId(1),
+      text: '  Review done: LGTM.  ',
+    });
+    expect(frame).toMatchObject({
+      type: 'resp',
+      result: { taskId, appendId: appendId(1), status: 'appended', count: 1, limit: 20 },
+    });
+    const log = chatLog();
+    const followUp = log.at(-1)!;
+    expect(followUp).toMatchObject({
+      id: `append:${appendId(1)}`,
+      role: 'assistant',
+      text: 'Review done: LGTM.',
+      followUp: true,
+      final: true,
+      taskId,
+    });
+    expect(followUp.unread).toBeUndefined();
+    expect(log.at(-2)).toMatchObject({
+      role: 'assistant',
+      text: 'I asked a reviewer; I will report back.',
+    });
+    expect(log.find((entry) => entry.id === taskId)!.loopStatus).toBe('done');
+    const published = broadcasts.findLast((m: any) => m.type === 'remote-updated') as any;
+    expect(published.state.chat.at(-1).text).toBe('Review done: LGTM.');
+    // Same follow-up again (a relay retry) is shown once.
+    const again = await append(ws, { taskId, appendId: appendId(1), text: 'Review done: LGTM.' });
+    expect(again).toMatchObject({ type: 'resp', result: { status: 'existing', count: 1 } });
+    expect(chatLog().filter((entry) => entry.followUp)).toHaveLength(1);
+    expect(chrome.action.setBadgeText).not.toHaveBeenCalledWith({ text: '1' });
+    // The existing reply / end flow is untouched: no new turn or agent request.
+    expect(ws.frames.filter((f) => f.type === 'agent-turn-end')).toHaveLength(1);
+    expect((await state()).loopActive).toBe(false);
+  });
+
+  it('marks a follow-up unread with a badge while the panel is closed; the panel clears it', async () => {
+    const ws = await bootAppend();
+    const taskId = await finishTask(ws, 'blocked');
+    await append(ws, { taskId, appendId: appendId(2), text: 'Here is the result.' });
+    expect(chatLog().at(-1)!.unread).toBe(true);
+    expect(chrome.action.setBadgeText).toHaveBeenLastCalledWith({ text: '1' });
+    const read = await ask({ type: 'remote-chat-read' });
+    expect(read.ok).toBe(true);
+    expect(chatLog().at(-1)!.unread).toBeUndefined();
+    expect(chrome.action.setBadgeText).toHaveBeenLastCalledWith({ text: '' });
+  });
+
+  it('refuses unknown, running, stopped, expired and over-limit tasks with fixed codes', async () => {
+    sideContexts.push({ contextType: 'SIDE_PANEL' });
+    const ws = await bootAppend();
+    expect(await append(ws, { taskId: 'missing', appendId: appendId(3), text: 'x' })).toMatchObject(
+      {
+        type: 'error',
+        code: 'TASK_UNKNOWN',
+      },
+    );
+    const running = await begin(ws, 'Still working');
+    expect(
+      await append(ws, { taskId: running.taskId, appendId: appendId(4), text: 'x' }),
+    ).toMatchObject({ code: 'TASK_ACTIVE' });
+    await ask({ type: 'remote-stop' });
+    await flush();
+    expect(
+      await append(ws, { taskId: running.taskId, appendId: appendId(5), text: 'x' }),
+    ).toMatchObject({ code: 'TASK_NOT_APPENDABLE' });
+    const taskId = await finishTask(ws);
+    for (let n = 0; n < 20; n++)
+      expect(
+        await append(ws, { taskId, appendId: appendId(100 + n), text: `update ${n}` }),
+      ).toMatchObject({ type: 'resp', result: { count: n + 1 } });
+    expect(await append(ws, { taskId, appendId: appendId(200), text: 'one more' })).toMatchObject({
+      code: 'TASK_APPEND_LIMIT',
+    });
+    expect(await append(ws, { taskId, appendId: 'not-hex', text: 'x' })).toMatchObject({
+      code: 'BAD_PARAMS',
+    });
+    expect(chatLog().filter((entry) => entry.followUp)).toHaveLength(20);
+  });
+
+  it('uses the persisted end time: within 24 hours after a worker restart, refused after', async () => {
+    sideContexts.push({ contextType: 'SIDE_PANEL' });
+    const now = Date.now();
+    const task = (id: string, endedAt: number) => ({
+      id,
+      role: 'user',
+      text: 'Earlier task',
+      ts: endedAt - 1000,
+      delivery: 'sent',
+      loopStatus: 'done',
+      agentHistory: {
+        status: 'completed',
+        startedAt: endedAt - 1000,
+        endedAt,
+        events: [],
+        dropped: 0,
+      },
+    });
+    storage.remoteChatLog = [
+      task('recent', now - 23 * 60 * 60 * 1000),
+      task('old', now - 24 * 60 * 60 * 1000 - 1),
+    ];
+    const ws = await bootAppend();
+    expect(await append(ws, { taskId: 'recent', appendId: appendId(7), text: 'ok' })).toMatchObject(
+      {
+        type: 'resp',
+        result: { status: 'appended' },
+      },
+    );
+    expect(await append(ws, { taskId: 'old', appendId: appendId(8), text: 'late' })).toMatchObject({
+      code: 'TASK_TOO_OLD',
+    });
+  });
+
+  it('a follow-up that cannot be saved is withdrawn and reported as failed', async () => {
+    sideContexts.push({ contextType: 'SIDE_PANEL' });
+    const ws = await bootAppend();
+    const taskId = await finishTask(ws);
+    vi.mocked(chrome.storage.local.set).mockRejectedValueOnce(new Error('quota'));
+    expect(await append(ws, { taskId, appendId: appendId(9), text: 'x' })).toMatchObject({
+      type: 'error',
+      code: 'TASK_APPEND_FAILED',
+    });
+    expect(((await state()).chat as ChatEntry[]).some((entry: any) => entry.followUp)).toBe(false);
+    expect(await append(ws, { taskId, appendId: appendId(9), text: 'x' })).toMatchObject({
+      type: 'resp',
+      result: { status: 'appended', count: 1 },
+    });
+  });
+
+  it('a retry during a slow save waits for it, then answers "existing" once it is saved', async () => {
+    sideContexts.push({ contextType: 'SIDE_PANEL' });
+    const ws = await bootAppend();
+    const taskId = await finishTask(ws);
+    let finishSave!: () => void;
+    const set = vi.mocked(chrome.storage.local.set);
+    set.mockImplementationOnce(
+      (obj: Record<string, unknown>) =>
+        new Promise<void>((resolve) => {
+          finishSave = () => resolve(void Object.assign(storage, obj));
+        }),
+    );
+    const params = { taskId, appendId: appendId(10), text: 'Slow result' };
+    ws.receive({ type: 'req', id: 901, method: 'task.append', params });
+    await flush();
+    ws.receive({ type: 'req', id: 902, method: 'task.append', params });
+    await flush();
+    // Neither delivery is acknowledged while the first save is still pending.
+    expect(ws.frames.some((frame) => frame.id === 901 || frame.id === 902)).toBe(false);
+    finishSave();
+    await flush();
+    expect(ws.frames.find((frame) => frame.id === 901)).toMatchObject({
+      type: 'resp',
+      result: { status: 'appended', count: 1 },
+    });
+    expect(ws.frames.find((frame) => frame.id === 902)).toMatchObject({
+      type: 'resp',
+      result: { status: 'existing', count: 1 },
+    });
+    expect(chatLog().filter((entry) => entry.followUp)).toHaveLength(1);
+  });
+
+  it('a retry during a save that then fails reports the failure too; a later retry succeeds', async () => {
+    sideContexts.push({ contextType: 'SIDE_PANEL' });
+    const ws = await bootAppend();
+    const taskId = await finishTask(ws);
+    let failSave!: () => void;
+    vi.mocked(chrome.storage.local.set).mockImplementationOnce(
+      () =>
+        new Promise<void>((_, reject) => {
+          failSave = () => reject(new Error('quota'));
+        }),
+    );
+    const params = { taskId, appendId: appendId(11), text: 'Lost result' };
+    ws.receive({ type: 'req', id: 911, method: 'task.append', params });
+    await flush();
+    ws.receive({ type: 'req', id: 912, method: 'task.append', params });
+    await flush();
+    expect(ws.frames.some((frame) => frame.id === 911 || frame.id === 912)).toBe(false);
+    failSave();
+    await flush();
+    for (const id of [911, 912])
+      expect(ws.frames.find((frame) => frame.id === id)).toMatchObject({
+        type: 'error',
+        code: 'TASK_APPEND_FAILED',
+      });
+    expect(((await state()).chat as ChatEntry[]).some((entry) => entry.followUp)).toBe(false);
+    expect(await append(ws, params)).toMatchObject({
+      type: 'resp',
+      result: { status: 'appended', count: 1 },
+    });
+    expect(chatLog().filter((entry) => entry.followUp)).toHaveLength(1);
+  });
+
+  it('restores the unread badge for a follow-up that arrived while another task had control', async () => {
+    const ws = await bootAppend();
+    const taskId = await finishTask(ws);
+    const notify = executor.onState.mock.lastCall![0] as () => void;
+    executor.currentControl.mockReturnValue({
+      sessionId: 'other',
+      tabId: 3,
+      tabIds: [3],
+      phase: 'ready',
+    });
+    notify();
+    await append(ws, { taskId, appendId: appendId(12), text: 'Arrived mid-task.' });
+    expect(chatLog().at(-1)!.unread).toBe(true);
+    expect(chrome.action.setBadgeText).not.toHaveBeenCalledWith({ text: '1' });
+    // The executor clears its own badge on release, then publishes.
+    executor.currentControl.mockReturnValue(null);
+    await chrome.action.setBadgeText({ text: '' });
+    notify();
+    await flush();
+    expect(chrome.action.setBadgeText).toHaveBeenLastCalledWith({ text: '1' });
+  });
+
+  it('refuses when the relay did not negotiate the capability', async () => {
+    const ws = await bootAppend(false);
+    const taskId = await finishTask(ws);
+    expect(await append(ws, { taskId, appendId: appendId(6), text: 'x' })).toMatchObject({
+      type: 'error',
+      code: 'TASK_APPEND_UNSUPPORTED',
+    });
+    expect(chatLog().some((entry) => entry.followUp)).toBe(false);
   });
 });

@@ -80,6 +80,13 @@ export function RemotePanel() {
     };
   }, []);
 
+  // An open panel shows the conversation, so follow-ups that arrived while it
+  // was closed are read now; this also clears their toolbar badge.
+  const hasUnread = state.chat.some((entry) => entry.unread);
+  useEffect(() => {
+    if (hasUnread && screen === 'chat') void request({ type: 'remote-chat-read' });
+  }, [hasUnread, screen]);
+
   const previousPhase = useRef(state.workspace?.connection?.phase);
   useEffect(() => {
     const phase = state.workspace?.connection?.phase;
@@ -224,6 +231,7 @@ export function RemotePanel() {
               busy={pending !== null}
               onRequest={workspaceAction}
               onSwitch={openSwitch}
+              onRename={(browserName) => action({ type: 'workspace-rename', browserName })}
             />
           ) : (
             <span
