@@ -825,6 +825,24 @@ test.each([
     'ui.error.workspaceAgentNoPublicUrl',
   ],
   [
+    'BROWSER_PUBLIC_URL_MISSING: Ask the Agent owner to configure its public HTTPS URL and retry. Agent session notice queued.',
+    'ui.error.workspaceAgentNoPublicUrlNotified',
+  ],
+  [
+    'BROWSER_PUBLIC_URL_MISSING: Ask the Agent owner to configure its public HTTPS URL and retry. Agent session notice recently queued.',
+    'ui.error.workspaceAgentNoPublicUrlNotified',
+  ],
+  [
+    'BROWSER_PUBLIC_URL_MISSING: Ask the Agent owner to configure its public HTTPS URL and retry. Agent session notice could not be queued.',
+    'ui.error.workspaceAgentNoPublicUrlNotNotified',
+  ],
+  // The code without a recognizable notice state never claims a notice was sent.
+  [
+    'BROWSER_PUBLIC_URL_MISSING: configure a public HTTPS URL',
+    'ui.error.workspaceAgentNoPublicUrl',
+  ],
+  ['AGENT_PUBLIC_BASE_URL is unset', 'ui.error.workspaceAgentNoPublicUrl'],
+  [
     'AGENT_PUBLIC_BASE_URL in ~/zylos/.env is not a valid http(s) URL',
     'ui.error.workspaceAgentPublicUrlInvalid',
   ],
@@ -833,6 +851,7 @@ test.each([
     'ui.error.workspaceAgentPublicUrlInvalid',
   ],
   ['something else', 'ui.error.workspacePrepareFailed'],
+  ['notice queued', 'ui.error.workspacePrepareFailed'],
   [undefined, 'ui.error.workspacePrepareFailed'],
 ])('prepare last_error %s maps to %s', async (lastError, error) => {
   expect(prepareErrorKey(lastError)).toBe(error);
@@ -885,4 +904,25 @@ test('rename does not notify the relay when the relay is not Workspace-owned', a
   await connector.rename('Home');
   expect((api as any).rename).toHaveBeenCalledWith('c1', 'Home');
   expect(onBrowserName).not.toHaveBeenCalled();
+});
+
+test('missing public URL copy only claims a notice when OpenMax reports it was queued', async () => {
+  const { localizeError } = await import('../../utils/i18n');
+  const text = (locale: 'zh-CN' | 'en', key: string) => localizeError(locale, `ui.error.${key}`);
+  const notified = { 'zh-CN': /设置提醒已排队发给 Agent/, en: /reminder was queued for the Agent/ };
+  for (const locale of ['zh-CN', 'en'] as const) {
+    expect(text(locale, 'workspaceAgentNoPublicUrlNotified')).toMatch(notified[locale]);
+    expect(text(locale, 'workspaceAgentNoPublicUrlNotNotified')).not.toMatch(notified[locale]);
+    expect(text(locale, 'workspaceAgentNoPublicUrl')).not.toMatch(notified[locale]);
+    for (const key of [
+      'workspaceAgentNoPublicUrl',
+      'workspaceAgentNoPublicUrlNotified',
+      'workspaceAgentNoPublicUrlNotNotified',
+    ])
+      expect(text(locale, key)).toContain('AGENT_PUBLIC_BASE_URL');
+  }
+  expect(text('zh-CN', 'workspaceAgentNoPublicUrl')).not.toContain('已通知');
+  expect(text('en', 'workspaceAgentNoPublicUrl')).not.toMatch(/notified/i);
+  expect(text('zh-CN', 'workspaceAgentNoPublicUrlNotNotified')).toContain('没能发给 Agent');
+  expect(text('en', 'workspaceAgentNoPublicUrlNotNotified')).toContain('could not be sent');
 });
