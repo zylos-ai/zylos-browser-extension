@@ -45,6 +45,24 @@ Remote 验证 Key 和浏览器身份，返回：
 去掉控制字符、最多 100 个字符）；改名成功后插件发送 `{type:"browser-name",browserName}`。
 Remote 应将其视为不可信的显示文本；旧版 Remote 忽略这两者。
 
+### Agent 发起任务：`task.start`
+
+插件在 `hello` 声明 `agent-task-start-v1`，且 Remote 的 `ready` 也声明它时，Remote 可发送
+`{type:"req",id,method:"task.start",params}`。`params` 为 `{requestId,prompt,url}`（打开新任务标签页）
+或 `{requestId,prompt,target:"current-tab"}`（使用当前标签页），二者只能有其一。
+后者要求插件同时声明 `agent-task-current-tab-v1`，Remote 未见此能力时直接拒绝，不转发。
+两种方式都先检查「允许 Agent 发起任务」权限、是否有进行中的任务，并按 `requestId` 去重。
+
+`current-tab` 在收到请求时取最近聚焦的普通窗口的活动标签页，按侧栏消息的方式捕获并固定
+标签页、窗口、URL 和 documentId，不打开、刷新或导航页面，也不在此时取得控制权；
+Agent 随后用 `use-current-tab` 和首轮的 `contextId` 接管，执行前再次核对标签页和文档。
+不额外弹出确认；站点权限、受限页面和停止规则不变。不能使用时返回明确错误，绝不改为新开标签页：
+`TASK_START_NO_TAB`（没有可用的普通窗口或活动标签页）、`TASK_START_PAGE_RESTRICTED`
+（浏览器页面、应用商店、无痕窗口等）、`TASK_START_SITE_DENIED`（站点访问规则禁止）、
+`TASK_START_PAGE_NOT_READY`（页面仍在导航或暂时无法读取）、`TASK_START_TAB_CLOSED`、
+`TASK_START_PAGE_CHANGED`（启动过程中关闭、导航、刷新或移到其他窗口）。成功返回
+`{requestId,taskId,status:"started"|"existing"}`。
+
 ### 临时断线恢复：`task-resume-v1`
 
 双方声明此能力后，仅在同一个插件 background 实例和同一个 Remote 进程仍存活时恢复。

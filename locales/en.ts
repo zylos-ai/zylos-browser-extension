@@ -72,7 +72,7 @@ export default {
     "Allow active browser tasks to remove other extensions' inline UI. Saved across tasks and restarts; cleared when the connection address or key changes.",
   agentStartPermission: 'Allow Agent to start tasks',
   agentStartPermissionHint:
-    'The connected Agent may open task tabs. Turning this off stops its active task. Kept across browser restarts until it expires; cleared when the connection address, key or connection switch changes.',
+    'The connected Agent may open task tabs or work on the tab you are viewing, within your site access rules and restricted-page limits. Turning this off stops its active task. Kept across browser restarts until it expires; cleared when the connection address, key or connection switch changes.',
   agentStartAllowedUntil: 'Allowed until {time}',
   agentStartAllowedUntilOff: 'Allowed until turned off',
   agentStartUntilOff: 'Until turned off',
@@ -537,7 +537,7 @@ export default {
   advanced: 'Advanced',
   on: 'On',
   off: 'Off',
-  agentStartShort: 'Let the connected Agent open task tabs',
+  agentStartShort: 'Let the connected Agent open task tabs or use your current tab',
   compatibilityShort: "Tasks may remove other extensions' page UI",
   diagnosticsShort: 'Event types only, no page content',
   siteAccessNeedsAttention: 'Rules need a reset',

@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+Pairs with the zylos-browser-remote release that accepts `target: "current-tab"`;
+older relays keep URL starts only.
+
+### Added
+
+- An Agent starting a task from another chat can work on the tab you are
+  viewing instead of always opening a new tab (#43). `task.start` accepts
+  `target: "current-tab"` and the extension advertises
+  `agent-task-current-tab-v1`. The active tab of the focused normal window is
+  pinned (tab, window, URL and document) when the start arrives, exactly like a
+  side panel message, and the task appears in the side panel as "Started by
+  Agent". No extra confirmation is shown; the existing protections stay: the
+  "Allow Agent to start tasks" setting, site access rules, restricted pages
+  (browser pages, Chrome Web Store, private windows) and Stop. A refused tab is
+  reported to the Agent with a specific reason (`TASK_START_NO_TAB`,
+  `TASK_START_PAGE_RESTRICTED`, `TASK_START_SITE_DENIED`,
+  `TASK_START_PAGE_NOT_READY`, `TASK_START_TAB_CLOSED`,
+  `TASK_START_PAGE_CHANGED`) and never replaced by a new tab. URL starts are
+  unchanged.
+
+### Changed
+
+- Taking over a shared page now says whether it was closed, moved to another
+  window, or is restricted, instead of one combined message.
+
 ### Fixed
 
 - The tab preview shows "Needs follow-up" when the Agent reports a blocker or
