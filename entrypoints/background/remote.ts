@@ -47,6 +47,12 @@ import {
   waitForTaskPage,
 } from '../../utils/agent-task-start';
 import {
+  AGENT_TASK_APPEND_CAPABILITY,
+  planTaskAppend,
+  taskAppendError,
+  taskAppendSchema,
+} from '../../utils/agent-task-append';
+import {
   configureCdpDiagnostics,
   refreshCdpDiagnostics,
 } from '../../utils/automation/cdp-diagnostics';
@@ -242,6 +248,7 @@ export function startRemoteBackground() {
   let agentStartedTask: string | undefined;
   let agentStartPending = false;
   let agentStartReady = false;
+  let taskAppendReady = false;
   const taskStarts = new TaskStartLedger();
   let panelMutations: Promise<unknown> = Promise.resolve();
   /** Serialize a connection-changing transaction with the panel's consent mutations. */
@@ -607,6 +614,42 @@ export function startRemoteBackground() {
     if (state.chat.length > CHAT_LOG_CAP) state.chat.splice(0, state.chat.length - CHAT_LOG_CAP);
     await persistChat();
     publish();
+  }
+
+  // ------------------------------------------------------- unread follow-ups
+  // A follow-up that arrives while no side panel is open is marked unread and
+  // counted on the toolbar badge. The executor owns the badge while it holds
+  // browser control, so it is only written when no task has control.
+  async function sidePanelOpen() {
+    try {
+      const contexts = await chrome.runtime.getContexts({
+        contextTypes: ['SIDE_PANEL' as chrome.runtime.ContextType],
+      });
+      return contexts.length > 0;
+    } catch {
+      return false;
+    }
+  }
+  async function syncUnreadBadge() {
+    if (currentControl()) return;
+    const unread = state.chat.filter((entry) => entry.unread).length;
+    try {
+      if (unread) await chrome.action.setBadgeBackgroundColor({ color: '#326C53' });
+      await chrome.action.setBadgeText({ text: unread ? String(Math.min(unread, 99)) : '' });
+    } catch {
+      /* The badge is a hint; the persisted unread marker is the record. */
+    }
+  }
+  async function markChatRead() {
+    let changed = false;
+    for (const entry of state.chat)
+      if (entry.unread) {
+        delete entry.unread;
+        changed = true;
+      }
+    if (!changed) return;
+    await persistChat();
+    await syncUnreadBadge();
   }
 
   async function updateDelivery(m: {
@@ -1123,6 +1166,7 @@ export function startRemoteBackground() {
     closedShadowReady = false;
     childFramesReady = false;
     agentStartReady = false;
+    taskAppendReady = false;
     interruptReady = false;
     clearTimeout(handshakeTimer);
     preview.finish('interrupted');
@@ -1198,6 +1242,7 @@ export function startRemoteBackground() {
         ...(build ? { build } : {}),
         capabilities: [
           AGENT_TASK_START_CAPABILITY,
+          AGENT_TASK_APPEND_CAPABILITY,
           'recovery-closed-shadow-v1',
           'recovery-child-frames-v1',
           'diagnostics-detail-share-v1',
@@ -1262,6 +1307,7 @@ export function startRemoteBackground() {
       closedShadowReady = false;
       childFramesReady = false;
       agentStartReady = false;
+      taskAppendReady = false;
       state.steeringSupported = false;
       interruptReady = false;
       clearTimeout(handshakeTimer);
@@ -1393,6 +1439,7 @@ export function startRemoteBackground() {
         }
         attachmentsReady = m.capabilities.includes(ATTACHMENT_CAPABILITY);
         agentStartReady = m.capabilities.includes(AGENT_TASK_START_CAPABILITY);
+        taskAppendReady = m.capabilities.includes(AGENT_TASK_APPEND_CAPABILITY);
         closedShadowReady = m.capabilities.includes('recovery-closed-shadow-v1');
         childFramesReady = m.capabilities.includes('recovery-child-frames-v1');
         state.steeringSupported = m.capabilities.includes(STEER_CAPABILITY);
@@ -1621,6 +1668,53 @@ export function startRemoteBackground() {
       }
       return;
     }
+    if (m.method === 'task.append') {
+      try {
+        const input = taskAppendSchema.parse(m.params);
+        if (!taskAppendReady) throw taskAppendError('TASK_APPEND_UNSUPPORTED');
+        const panelOpen = await sidePanelOpen();
+        const { entry, result } = planTaskAppend(state.chat, input, {
+          now: Date.now(),
+          activeTaskId: loop.active ? loop.taskId : undefined,
+        });
+        if (entry) {
+          // Planned and pushed without an await in between, so a concurrent
+          // history clear either removed the task first or removes this too.
+          try {
+            await appendChat(panelOpen ? entry : { ...entry, unread: true });
+          } catch {
+            // Not persisted: withdraw it so a retry cannot report "existing".
+            state.chat = state.chat.filter((item) => item.id !== entry.id);
+            publish();
+            throw taskAppendError('TASK_APPEND_FAILED');
+          }
+          if (!panelOpen) await syncUnreadBadge();
+        }
+        // Acknowledged only after the reply is persisted and published.
+        reply({ type: 'resp', result });
+      } catch (error) {
+        const code = (error as { code?: string }).code;
+        reply({
+          type: 'error',
+          code:
+            error instanceof z.ZodError
+              ? 'BAD_PARAMS'
+              : [
+                    'TASK_APPEND_UNSUPPORTED',
+                    'TASK_UNKNOWN',
+                    'TASK_ACTIVE',
+                    'TASK_NOT_APPENDABLE',
+                    'TASK_TOO_OLD',
+                    'TASK_APPEND_LIMIT',
+                    'TASK_APPEND_CONFLICT',
+                  ].includes(code ?? '')
+                ? code
+                : 'TASK_APPEND_FAILED',
+          message: 'Follow-up was not shown',
+        });
+      }
+      return;
+    }
     if (m.method === 'diagnostics.get') {
       try {
         reply({ type: 'resp', result: await getDiagnostics(m.params) });
@@ -1793,6 +1887,7 @@ export function startRemoteBackground() {
     }
     await persistChat();
     if (activity.recover()) await persistChat();
+    if (state.chat.some((entry) => entry.unread)) await syncUnreadBadge();
     await applyConfig(cfg.success ? cfg.data : remoteConfigSchema.parse({}));
     await initializeSiteAccess(`${config.relayUrl}|${await keyIdOf(config.key)}`);
     // A recycled worker restores an unexpired grant bound to this connection only.
@@ -2132,6 +2227,9 @@ export function startRemoteBackground() {
             publish();
           }
         }
+        case 'remote-chat-read':
+          await markChatRead();
+          return snapshot();
         case 'remote-chat-clear':
           if (loop.active) {
             cancelLoop('stopped');
@@ -2140,6 +2238,7 @@ export function startRemoteBackground() {
           preview.clear();
           state.chat = [];
           await persistChat();
+          await syncUnreadBadge();
           publish();
           return snapshot();
         case 'remote-reveal':

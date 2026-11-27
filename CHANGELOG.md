@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+Follow-up replies need zylos-browser-remote with `agent-task-append-v1`
+(zylos-ai/zylos-browser-remote#7). Older relays keep working; they never send
+follow-ups.
+
+### Added
+
+- Follow-up replies to an ended task (zylos-ai/zylos-browser-remote#7): the
+  Agent can add a result to a task it already answered (done/blocked), for
+  example after a background review finishes. It appears as a new Agent message
+  labelled "Follow-up" with the task it belongs to, rendered like other replies
+  (text only, no action buttons), and is saved in the chat history. Allowed up to
+  24 hours after the task ended and at most 20 times per task; stopped,
+  interrupted, running and cleared tasks are refused. If the side panel is
+  closed, the message is marked unread and the toolbar badge shows the count
+  until the panel is opened. Negotiated as `agent-task-append-v1`.
+
 ### Fixed
 
 - The tab preview shows "Needs follow-up" when the Agent reports a blocker or

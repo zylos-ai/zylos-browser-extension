@@ -141,6 +141,8 @@ export default {
   markdownFootnoteBack: 'Back to content',
   you: 'You',
   agentStarted: 'Started by Agent',
+  followUp: 'Follow-up',
+  followUpTo: 'Re: {task}',
   system: 'System',
   systemMessage: 'System message',
   today: 'Today',

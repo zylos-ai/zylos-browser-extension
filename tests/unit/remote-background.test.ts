@@ -179,6 +179,7 @@ async function bootConnected(
   controlRecovery = false,
   frameSelection = false,
   agentStart = false,
+  taskAppend = false,
 ) {
   startRemoteBackground();
   await flush();
@@ -191,6 +192,7 @@ async function bootConnected(
       'browser-instance-v1',
       'agent-message-v2',
       ...(agentStart ? ['agent-task-start-v1'] : []),
+      ...(taskAppend ? ['agent-task-append-v1'] : []),
       ...(attachments ? ['attachments-v1'] : []),
       ...(interrupt ? ['agent-interrupt-v1'] : []),
       ...(steering ? ['agent-input-v1'] : []),
@@ -2219,6 +2221,7 @@ describe('decision transport background', () => {
     expect(ws.protocols).toEqual([REMOTE_SUBPROTOCOL, `key.${KEY}`]);
     expect(ws.last('hello')!.capabilities).toEqual([
       'agent-task-start-v1',
+      'agent-task-append-v1',
       'recovery-closed-shadow-v1',
       'recovery-child-frames-v1',
       'diagnostics-detail-share-v1',
@@ -2762,5 +2765,178 @@ describe('OpenMax Workspace mode', () => {
     });
     expect(saved.ok).toBe(true);
     expect(storage.workspaceConnection).toBeUndefined();
+  });
+});
+
+describe('follow-up replies to an ended task (agent-task-append-v1)', () => {
+  const bootAppend = (appendCap = true) =>
+    bootConnected(false, false, true, false, false, false, false, appendCap);
+  const sideContexts: unknown[] = [];
+  beforeEach(() => {
+    sideContexts.length = 0;
+    (chrome.runtime as any).getContexts = vi.fn(async () => sideContexts);
+    (chrome as any).action = {
+      setBadgeText: vi.fn(async () => {}),
+      setBadgeBackgroundColor: vi.fn(async () => {}),
+    };
+  });
+  const finishTask = async (ws: Socket, kind: 'done' | 'blocked' = 'done') => {
+    const request = await begin(ws, 'Ask a reviewer and report back');
+    await respond(ws, request, { kind, text: 'I asked a reviewer; I will report back.' });
+    return request.taskId as string;
+  };
+  let reqId = 500;
+  const append = async (ws: Socket, params: Record<string, unknown>) => {
+    const id = ++reqId;
+    ws.receive({ type: 'req', id, method: 'task.append', params });
+    await flush();
+    return ws.frames.findLast((frame) => frame.id === id)!;
+  };
+  const appendId = (n: number) => n.toString(16).padStart(32, '0');
+  const chatLog = () => storage.remoteChatLog as ChatEntry[];
+
+  it('persists, publishes and acknowledges the follow-up after the original reply', async () => {
+    sideContexts.push({ contextType: 'SIDE_PANEL' });
+    const ws = await bootAppend();
+    const taskId = await finishTask(ws);
+    const frame = await append(ws, {
+      taskId,
+      appendId: appendId(1),
+      text: '  Review done: LGTM.  ',
+    });
+    expect(frame).toMatchObject({
+      type: 'resp',
+      result: { taskId, appendId: appendId(1), status: 'appended', count: 1, limit: 20 },
+    });
+    const log = chatLog();
+    const followUp = log.at(-1)!;
+    expect(followUp).toMatchObject({
+      id: `append:${appendId(1)}`,
+      role: 'assistant',
+      text: 'Review done: LGTM.',
+      followUp: true,
+      final: true,
+      taskId,
+    });
+    expect(followUp.unread).toBeUndefined();
+    expect(log.at(-2)).toMatchObject({
+      role: 'assistant',
+      text: 'I asked a reviewer; I will report back.',
+    });
+    expect(log.find((entry) => entry.id === taskId)!.loopStatus).toBe('done');
+    const published = broadcasts.findLast((m: any) => m.type === 'remote-updated') as any;
+    expect(published.state.chat.at(-1).text).toBe('Review done: LGTM.');
+    // Same follow-up again (a relay retry) is shown once.
+    const again = await append(ws, { taskId, appendId: appendId(1), text: 'Review done: LGTM.' });
+    expect(again).toMatchObject({ type: 'resp', result: { status: 'existing', count: 1 } });
+    expect(chatLog().filter((entry) => entry.followUp)).toHaveLength(1);
+    expect(chrome.action.setBadgeText).not.toHaveBeenCalledWith({ text: '1' });
+    // The existing reply / end flow is untouched: no new turn or agent request.
+    expect(ws.frames.filter((f) => f.type === 'agent-turn-end')).toHaveLength(1);
+    expect((await state()).loopActive).toBe(false);
+  });
+
+  it('marks a follow-up unread with a badge while the panel is closed; the panel clears it', async () => {
+    const ws = await bootAppend();
+    const taskId = await finishTask(ws, 'blocked');
+    await append(ws, { taskId, appendId: appendId(2), text: 'Here is the result.' });
+    expect(chatLog().at(-1)!.unread).toBe(true);
+    expect(chrome.action.setBadgeText).toHaveBeenLastCalledWith({ text: '1' });
+    const read = await ask({ type: 'remote-chat-read' });
+    expect(read.ok).toBe(true);
+    expect(chatLog().at(-1)!.unread).toBeUndefined();
+    expect(chrome.action.setBadgeText).toHaveBeenLastCalledWith({ text: '' });
+  });
+
+  it('refuses unknown, running, stopped, expired and over-limit tasks with fixed codes', async () => {
+    sideContexts.push({ contextType: 'SIDE_PANEL' });
+    const ws = await bootAppend();
+    expect(await append(ws, { taskId: 'missing', appendId: appendId(3), text: 'x' })).toMatchObject(
+      {
+        type: 'error',
+        code: 'TASK_UNKNOWN',
+      },
+    );
+    const running = await begin(ws, 'Still working');
+    expect(
+      await append(ws, { taskId: running.taskId, appendId: appendId(4), text: 'x' }),
+    ).toMatchObject({ code: 'TASK_ACTIVE' });
+    await ask({ type: 'remote-stop' });
+    await flush();
+    expect(
+      await append(ws, { taskId: running.taskId, appendId: appendId(5), text: 'x' }),
+    ).toMatchObject({ code: 'TASK_NOT_APPENDABLE' });
+    const taskId = await finishTask(ws);
+    for (let n = 0; n < 20; n++)
+      expect(
+        await append(ws, { taskId, appendId: appendId(100 + n), text: `update ${n}` }),
+      ).toMatchObject({ type: 'resp', result: { count: n + 1 } });
+    expect(await append(ws, { taskId, appendId: appendId(200), text: 'one more' })).toMatchObject({
+      code: 'TASK_APPEND_LIMIT',
+    });
+    expect(await append(ws, { taskId, appendId: 'not-hex', text: 'x' })).toMatchObject({
+      code: 'BAD_PARAMS',
+    });
+    expect(chatLog().filter((entry) => entry.followUp)).toHaveLength(20);
+  });
+
+  it('uses the persisted end time: within 24 hours after a worker restart, refused after', async () => {
+    sideContexts.push({ contextType: 'SIDE_PANEL' });
+    const now = Date.now();
+    const task = (id: string, endedAt: number) => ({
+      id,
+      role: 'user',
+      text: 'Earlier task',
+      ts: endedAt - 1000,
+      delivery: 'sent',
+      loopStatus: 'done',
+      agentHistory: {
+        status: 'completed',
+        startedAt: endedAt - 1000,
+        endedAt,
+        events: [],
+        dropped: 0,
+      },
+    });
+    storage.remoteChatLog = [
+      task('recent', now - 23 * 60 * 60 * 1000),
+      task('old', now - 24 * 60 * 60 * 1000 - 1),
+    ];
+    const ws = await bootAppend();
+    expect(await append(ws, { taskId: 'recent', appendId: appendId(7), text: 'ok' })).toMatchObject(
+      {
+        type: 'resp',
+        result: { status: 'appended' },
+      },
+    );
+    expect(await append(ws, { taskId: 'old', appendId: appendId(8), text: 'late' })).toMatchObject({
+      code: 'TASK_TOO_OLD',
+    });
+  });
+
+  it('a follow-up that cannot be saved is withdrawn and reported as failed', async () => {
+    sideContexts.push({ contextType: 'SIDE_PANEL' });
+    const ws = await bootAppend();
+    const taskId = await finishTask(ws);
+    vi.mocked(chrome.storage.local.set).mockRejectedValueOnce(new Error('quota'));
+    expect(await append(ws, { taskId, appendId: appendId(9), text: 'x' })).toMatchObject({
+      type: 'error',
+      code: 'TASK_APPEND_FAILED',
+    });
+    expect(((await state()).chat as ChatEntry[]).some((entry: any) => entry.followUp)).toBe(false);
+    expect(await append(ws, { taskId, appendId: appendId(9), text: 'x' })).toMatchObject({
+      type: 'resp',
+      result: { status: 'appended', count: 1 },
+    });
+  });
+
+  it('refuses when the relay did not negotiate the capability', async () => {
+    const ws = await bootAppend(false);
+    const taskId = await finishTask(ws);
+    expect(await append(ws, { taskId, appendId: appendId(6), text: 'x' })).toMatchObject({
+      type: 'error',
+      code: 'TASK_APPEND_UNSUPPORTED',
+    });
+    expect(chatLog().some((entry) => entry.followUp)).toBe(false);
   });
 });

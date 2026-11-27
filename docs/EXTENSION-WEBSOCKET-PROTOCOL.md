@@ -464,6 +464,37 @@ Escape，再返回 `{type:"agent-stop-result",taskId,ok,code?}`。
 交给 Agent 前转换为 Agent 主机上的 path；模型必须实际读取内容，不能把 Base64
 当视觉信息。最终文字仍走当前请求的 C4 done/blocked 命令，不额外再发一次决策。
 
+### 任务结束后的后续回复 `agent-task-append-v1`
+
+Agent 在请求结束（done/blocked）后才完成承诺的工作时（例如另一个 Agent 的评审结果），
+可以把结果追加到同一任务对话。插件在 `hello` 中声明 `agent-task-append-v1`，
+Remote 仅在插件声明时于 `ready` 中回显；未协商时插件拒绝为 `TASK_APPEND_UNSUPPORTED`，
+Remote 也不会发送请求。
+
+| 方向          | 消息                                                                          | 含义                 |
+| ------------- | ----------------------------------------------------------------------------- | -------------------- |
+| Remote → 插件 | `{type:"req",id,method:"task.append",params:{taskId,appendId,text},deadline}` | 追加一条后续回复     |
+| 插件 → Remote | `{type:"resp",id,result:{taskId,appendId,status,count,limit}}`                | 已保存并显示         |
+| 插件 → Remote | `{type:"error",id,code,message}`                                              | 拒绝，未显示任何内容 |
+
+`appendId` 为 32 位十六进制，由 Remote 按 endpoint、taskId 和文字计算；同一 `appendId`
+再次到达时只回 `status:"existing"`，不重复显示，文字不同则为 `TASK_APPEND_CONFLICT`。
+`text` 为 1–8,000 字符，按普通 Agent 回复的 Markdown 渲染，仅文字，不带操作按钮。
+插件以本地持久化的聊天记录判断，规则在重启后仍然有效：
+
+- `TASK_UNKNOWN`：本浏览器记录中没有该任务（不存在、用户已清空或已被淘汰）。
+- `TASK_ACTIVE`：任务仍在进行，应使用当前请求的回复命令。
+- `TASK_NOT_APPENDABLE`：任务不是以 Agent 的 done/blocked 回复结束（例如用户停止、中断）。
+- `TASK_TOO_OLD`：任务结束已超过 24 小时（以 `agentHistory.endedAt` 为准，缺失时用任务开始时间）。
+- `TASK_APPEND_LIMIT`：该任务已有 20 条后续回复。
+- `TASK_APPEND_FAILED`：保存失败。
+
+插件写入并发布聊天记录后才回复 `resp`。后续回复是 `role:"assistant"`、`followUp:true`、
+`taskId` 指向原任务的新消息，按时间追加在聊天末尾，标注“后续回复”及原任务首行；
+它不改变原任务状态，不发送 `agent-turn-end`，也不计入当前进行中任务的回合。
+侧栏未打开时该消息带 `unread:true`，工具栏角标显示未读数量（插件持有浏览器控制权时角标
+保留给任务）；侧栏显示聊天时发送 `remote-chat-read` 清除标记和角标。v1 不发系统通知。
+
 ## 9. 代码位置
 
 | 文件                                                                    | 职责                                      |
@@ -472,6 +503,7 @@ Escape，再返回 `{type:"agent-stop-result",taskId,ok,code?}`。
 | [utils/attachments.ts](../utils/attachments.ts)                         | 引用、图片、文件内容块                    |
 | [utils/page-context.ts](../utils/page-context.ts)                       | 捕获页面对象与页面绑定                    |
 | [utils/browser-loop.ts](../utils/browser-loop.ts)                       | 首轮/后续请求、决策循环                   |
+| [utils/agent-task-append.ts](../utils/agent-task-append.ts)             | 任务结束后的后续回复校验与限制            |
 | [entrypoints/background/remote.ts](../entrypoints/background/remote.ts) | 连接、握手、runtime 输入与 WebSocket 输出 |
 | [components/RemotePanel.tsx](../components/RemotePanel.tsx)             | 用户输入和选区展示                        |
 
