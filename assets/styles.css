@@ -1829,6 +1829,20 @@ html[data-theme='zylos'] > body {
   .connection-menu-item.is-danger {
     color: var(--color-error);
   }
+  .connection-menu-browser {
+    overflow-wrap: anywhere;
+  }
+  .connection-rename {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 4px 8px 8px;
+  }
+  .connection-rename-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+  }
   .sr-only {
     position: absolute;
     width: 1px;

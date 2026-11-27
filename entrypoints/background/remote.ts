@@ -145,6 +145,7 @@ import {
   workspaceEnvs,
 } from '../../utils/workspace/config';
 import { TokenStore, chromeLocalStorage } from '../../utils/workspace/token-store';
+import { platformHint, platformLabel, readPlatformHint } from '../../utils/platform-hint';
 import { WorkspaceApi } from '../../utils/workspace/api';
 import {
   WorkspaceConnector,
@@ -172,6 +173,16 @@ export function startRemoteBackground() {
   initializeExecutor();
   const preview = new LivePreview();
   const state: RemoteState = { ...initialRemoteState, chat: [] };
+  // OS/arch/browser version hint for the Agent's connection list and the panel
+  // (no permission needed). The navigator part is known at once; getPlatformInfo
+  // adds the architecture before the first relay hello in practice.
+  let platform = platformHint();
+  state.platformLabel = platformLabel(platform) || undefined;
+  void readPlatformHint().then((hint) => {
+    platform = hint;
+    state.platformLabel = platformLabel(hint) || undefined;
+    publish();
+  });
   let config: RemoteConfig = remoteConfigSchema.parse({});
   let siteExpiryTimer: ReturnType<typeof setTimeout> | undefined;
   let siteExpiry = 0;
@@ -1216,6 +1227,8 @@ export function startRemoteBackground() {
         browserId: state.browserId,
         // Workspace connections only; old relays ignore the field.
         ...(workspaceBrowserName ? { browserName: workspaceBrowserName } : {}),
+        // Display hint for telling browsers apart; old relays ignore the field.
+        ...(Object.keys(platform).length ? { platform } : {}),
         runtimeEpoch,
         ...(helloResume ? { resume: helloResume } : {}),
       });
@@ -1992,6 +2005,9 @@ export function startRemoteBackground() {
           return snapshot();
         case 'workspace-cancel':
           await workspace.cancel();
+          return snapshot();
+        case 'workspace-rename':
+          await workspace.rename(m.browserName);
           return snapshot();
         case 'workspace-set-url': {
           // Only a build-configured environment can be selected.

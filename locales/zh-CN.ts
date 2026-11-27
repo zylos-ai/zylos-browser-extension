@@ -430,7 +430,12 @@ export default {
   workspaceCapabilityLocal: '站点权限、停止和 Agent 发起任务授权仍由你在插件中控制。',
   workspaceAllow: '允许',
   workspaceBrowserName: '为这个浏览器命名',
-  workspaceBrowserNameHint: '{agent} 和 Workspace 中会显示这个名称。',
+  workspaceBrowserNameHint:
+    '{agent} 和 Workspace 中会显示这个名称。有多台电脑或多个 Chrome 档案时，写上电脑和档案（例如「Mac mini · 工作」）方便区分。也可以直接使用默认名称，之后在连接菜单中重命名。',
+  workspaceBrowserNamePlaceholder: '例如：Mac mini · 工作',
+  workspaceRename: '重命名这个浏览器',
+  workspaceRenameHint: '{agent} 看到的连接名称是「名称 · 连接号前 8 位」。',
+  workspaceRenameSave: '保存',
   workspaceConnect: '连接',
   workspaceSwitchAgent: '切换 Agent',
   workspaceSwitchHint: '切换会结束当前会话，之前的 Agent 仍保持授权。',
@@ -456,6 +461,7 @@ export default {
   workspaceRequestFailed: 'Workspace 未能完成请求',
   workspaceAgentUnavailable: '你没有权限使用这个 Agent，请联系组织管理员。',
   workspaceBrowserNameRequired: '请为这个浏览器填写名称',
+  workspaceRenameUnavailable: '当前没有可重命名的连接，请等连接准备完成后再试。',
   workspacePrepareFailed: 'Agent 未能准备好连接，请重试。',
   workspacePrepareTimeout:
     'Agent 没有在规定时间内准备好。可能仍在安装或启动 browser-remote（首次使用可能需要几分钟），也可能是 Agent 的 openmax 插件版本过旧。请稍后重试；如果反复超时，请让 Agent 升级 openmax。',

@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added
+
+- Rename this browser from the connection menu (#34). The new name is saved in
+  OpenMax Workspace and sent to the relay, so the Agent sees it. An empty name,
+  a connection that is still being prepared, and Workspace errors (revoked
+  connection, expired sign-in, rate limit, unreachable) each show a clear
+  message, and the old name is kept.
+- The popup shows this connection as "name · first 8 characters of the
+  connection ID", the same label the Agent sees, so you can match a browser to
+  the Agent's connection list (#34).
+- When you connect, the name step suggests adding the computer and Chrome
+  profile (for example "Mac mini · Work"). The default name is pre-filled and
+  can be kept with one click. Switching Agents keeps the name you already chose.
+- The extension tells the relay a platform hint: OS, CPU architecture and
+  browser major version, for example "macOS · arm64 · Chrome 142". It is sent
+  as an optional `platform` field in `hello`; older relays ignore it. The popup
+  shows the same hint under the connection name. It comes only from
+  `chrome.runtime.getPlatformInfo()` and the user agent, so no new permission
+  is needed. It does not include the computer name, Chrome profile or account.
+
 ### Fixed
 
 - The tab preview shows "Needs follow-up" when the Agent reports a blocker or

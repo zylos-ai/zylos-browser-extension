@@ -45,6 +45,12 @@ Remote 验证 Key 和浏览器身份，返回：
 去掉控制字符、最多 100 个字符）；改名成功后插件发送 `{type:"browser-name",browserName}`。
 Remote 应将其视为不可信的显示文本；旧版 Remote 忽略这两者。
 
+`hello` 还可附加 `platform`：`{os?, arch?, browser?, browserVersion?}`，例如
+`{os:"macOS",arch:"arm64",browser:"Chrome",browserVersion:"142"}`。数据只来自无需额外权限的
+`chrome.runtime.getPlatformInfo()` 和 `navigator.userAgentData`/`userAgent`，`browserVersion` 只含主版本号，
+无法得知的字段省略，全部未知时不发送。它用于在 Agent 的连接列表中区分多个浏览器，Remote 应将其视为不可信的显示文本；
+旧版 Remote 忽略该字段。
+
 ### 临时断线恢复：`task-resume-v1`
 
 双方声明此能力后，仅在同一个插件 background 实例和同一个 Remote 进程仍存活时恢复。

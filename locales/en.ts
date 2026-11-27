@@ -463,7 +463,13 @@ export default {
     'Site permissions, Stop and Agent-started tasks stay under your control in this extension.',
   workspaceAllow: 'Allow',
   workspaceBrowserName: 'Name this browser',
-  workspaceBrowserNameHint: '{agent} and your Workspace will show this name.',
+  workspaceBrowserNameHint:
+    '{agent} and your Workspace will show this name. If you use several computers or Chrome profiles, include both (for example "Mac mini · Work") so they are easy to tell apart. You can also keep the default and rename it later from the connection menu.',
+  workspaceBrowserNamePlaceholder: 'For example: Mac mini · Work',
+  workspaceRename: 'Rename this browser',
+  workspaceRenameHint:
+    '{agent} sees this connection as "name · first 8 characters of the connection ID".',
+  workspaceRenameSave: 'Save',
   workspaceConnect: 'Connect',
   workspaceSwitchAgent: 'Switch Agent',
   workspaceSwitchHint: 'Switching ends the current session. The previous Agent stays authorized.',
@@ -490,6 +496,8 @@ export default {
   workspaceAgentUnavailable:
     'You do not have permission to use this Agent. Contact your organization admin.',
   workspaceBrowserNameRequired: 'Enter a name for this browser',
+  workspaceRenameUnavailable:
+    'There is no connection to rename right now. Wait until the connection is ready, then try again.',
   workspacePrepareFailed: 'The Agent could not prepare the connection. Try again.',
   workspacePrepareTimeout:
     'The Agent did not finish preparing in time. It may still be installing or starting browser-remote (first use can take a few minutes), or its openmax plugin may be out of date. Try again shortly; if it keeps timing out, ask the Agent to upgrade openmax.',
