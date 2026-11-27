@@ -282,6 +282,11 @@ export function ConnectionChip({
                   {label}
                 </span>
               </span>
+              {state.platformLabel && (
+                <span className="connection-menu-sub connection-platform">
+                  {state.platformLabel}
+                </span>
+              )}
             </div>
           </div>
           {renameDraft !== undefined ? (
@@ -646,6 +651,9 @@ export function ConnectView({
               <small className="connection-browser" title={connection.connectionId}>
                 {connectionLabel(connection.browserName, connection.connectionId)}
               </small>
+              {state.platformLabel && (
+                <small className="connection-platform">{state.platformLabel}</small>
+              )}
             </span>
             {state.connected && <span className="agent-chip is-authorized">{t('connected')}</span>}
           </div>

@@ -2329,6 +2329,26 @@ test('rename is not offered while preparing, signed out, or before Workspace ass
   expect(menuItems()).not.toContain('重命名这个浏览器');
 });
 
+test('the platform hint shows under "name · short id" in the menu and summary', async () => {
+  state.workspace = workspaceWithId();
+  state.platformLabel = 'macOS · arm64 · Chrome 142';
+  await mount();
+  await act(async () => container.querySelector<HTMLButtonElement>('.connection-chip')!.click());
+  expect(container.querySelector('.connection-menu .connection-platform')?.textContent).toBe(
+    'macOS · arm64 · Chrome 142',
+  );
+  await act(async () => container.querySelector<HTMLButtonElement>('.connection-chip')!.click());
+  await click('.settings-button');
+  await click('.connection-manage');
+  expect(
+    container.querySelector('#connect .agent-row.is-static .connection-platform')?.textContent,
+  ).toBe('macOS · arm64 · Chrome 142');
+  // Absent hint: no empty line.
+  state = { ...state, platformLabel: undefined };
+  await act(async () => listener({ type: 'remote-updated', state }));
+  expect(container.querySelector('.connection-platform')).toBeNull();
+});
+
 test('connected summary on the connect page shows "name · short id"', async () => {
   state.workspace = workspaceWithId();
   await mount();

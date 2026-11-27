@@ -2053,6 +2053,32 @@ describe('decision transport background', () => {
     },
   );
 
+  it('sends the platform hint in hello and shows it in the panel state', async () => {
+    vi.stubGlobal('navigator', {
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+      userAgentData: { brands: [{ brand: 'Google Chrome', version: '142' }] },
+    });
+    const getPlatformInfo = vi.fn(async () => ({ os: 'mac', arch: 'arm64' }));
+    (chrome.runtime as unknown as Record<string, unknown>).getPlatformInfo = getPlatformInfo;
+    const ws = await bootConnected();
+    expect(getPlatformInfo).toHaveBeenCalled();
+    expect(ws.last('hello')!.platform).toEqual({
+      os: 'macOS',
+      arch: 'arm64',
+      browser: 'Chrome',
+      browserVersion: '142',
+    });
+    expect((await state()).platformLabel).toBe('macOS · arm64 · Chrome 142');
+  });
+
+  it('omits the platform hint when nothing is known', async () => {
+    vi.stubGlobal('navigator', { userAgent: '' });
+    const ws = await bootConnected();
+    expect(ws.last('hello')).not.toHaveProperty('platform');
+    expect((await state()).platformLabel).toBeUndefined();
+  });
+
   it('reports the trimmed Workspace browser name in hello only for a Workspace-owned relay', async () => {
     storage.workspaceConnection = {
       agentMemberId: 'ag1',

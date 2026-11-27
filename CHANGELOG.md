@@ -15,6 +15,12 @@
 - When you connect, the name step suggests adding the computer and Chrome
   profile (for example "Mac mini · Work"). The default name is pre-filled and
   can be kept with one click. Switching Agents keeps the name you already chose.
+- The extension tells the relay a platform hint: OS, CPU architecture and
+  browser major version, for example "macOS · arm64 · Chrome 142". It is sent
+  as an optional `platform` field in `hello`; older relays ignore it. The popup
+  shows the same hint under the connection name. It comes only from
+  `chrome.runtime.getPlatformInfo()` and the user agent, so no new permission
+  is needed. It does not include the computer name, Chrome profile or account.
 
 ### Fixed
 

@@ -138,6 +138,8 @@ export const remoteStateSchema = z.object({
   error: z.string(),
   keyId: z.string(),
   browserId: z.string().default(''),
+  /** "macOS · arm64 · Chrome 142": the platform hint also sent to the relay. */
+  platformLabel: z.string().optional(),
   endpointId: z.string().default(''),
   relayHost: z.string(),
   relayUrl: z.string(),
