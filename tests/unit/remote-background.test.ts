@@ -3171,6 +3171,92 @@ describe('follow-up replies to an ended task (agent-task-append-v1)', () => {
     });
   });
 
+  it('a retry during a slow save waits for it, then answers "existing" once it is saved', async () => {
+    sideContexts.push({ contextType: 'SIDE_PANEL' });
+    const ws = await bootAppend();
+    const taskId = await finishTask(ws);
+    let finishSave!: () => void;
+    const set = vi.mocked(chrome.storage.local.set);
+    set.mockImplementationOnce(
+      (obj: Record<string, unknown>) =>
+        new Promise<void>((resolve) => {
+          finishSave = () => resolve(void Object.assign(storage, obj));
+        }),
+    );
+    const params = { taskId, appendId: appendId(10), text: 'Slow result' };
+    ws.receive({ type: 'req', id: 901, method: 'task.append', params });
+    await flush();
+    ws.receive({ type: 'req', id: 902, method: 'task.append', params });
+    await flush();
+    // Neither delivery is acknowledged while the first save is still pending.
+    expect(ws.frames.some((frame) => frame.id === 901 || frame.id === 902)).toBe(false);
+    finishSave();
+    await flush();
+    expect(ws.frames.find((frame) => frame.id === 901)).toMatchObject({
+      type: 'resp',
+      result: { status: 'appended', count: 1 },
+    });
+    expect(ws.frames.find((frame) => frame.id === 902)).toMatchObject({
+      type: 'resp',
+      result: { status: 'existing', count: 1 },
+    });
+    expect(chatLog().filter((entry) => entry.followUp)).toHaveLength(1);
+  });
+
+  it('a retry during a save that then fails reports the failure too; a later retry succeeds', async () => {
+    sideContexts.push({ contextType: 'SIDE_PANEL' });
+    const ws = await bootAppend();
+    const taskId = await finishTask(ws);
+    let failSave!: () => void;
+    vi.mocked(chrome.storage.local.set).mockImplementationOnce(
+      () =>
+        new Promise<void>((_, reject) => {
+          failSave = () => reject(new Error('quota'));
+        }),
+    );
+    const params = { taskId, appendId: appendId(11), text: 'Lost result' };
+    ws.receive({ type: 'req', id: 911, method: 'task.append', params });
+    await flush();
+    ws.receive({ type: 'req', id: 912, method: 'task.append', params });
+    await flush();
+    expect(ws.frames.some((frame) => frame.id === 911 || frame.id === 912)).toBe(false);
+    failSave();
+    await flush();
+    for (const id of [911, 912])
+      expect(ws.frames.find((frame) => frame.id === id)).toMatchObject({
+        type: 'error',
+        code: 'TASK_APPEND_FAILED',
+      });
+    expect(((await state()).chat as ChatEntry[]).some((entry) => entry.followUp)).toBe(false);
+    expect(await append(ws, params)).toMatchObject({
+      type: 'resp',
+      result: { status: 'appended', count: 1 },
+    });
+    expect(chatLog().filter((entry) => entry.followUp)).toHaveLength(1);
+  });
+
+  it('restores the unread badge for a follow-up that arrived while another task had control', async () => {
+    const ws = await bootAppend();
+    const taskId = await finishTask(ws);
+    const notify = executor.onState.mock.lastCall![0] as () => void;
+    executor.currentControl.mockReturnValue({
+      sessionId: 'other',
+      tabId: 3,
+      tabIds: [3],
+      phase: 'ready',
+    });
+    notify();
+    await append(ws, { taskId, appendId: appendId(12), text: 'Arrived mid-task.' });
+    expect(chatLog().at(-1)!.unread).toBe(true);
+    expect(chrome.action.setBadgeText).not.toHaveBeenCalledWith({ text: '1' });
+    // The executor clears its own badge on release, then publishes.
+    executor.currentControl.mockReturnValue(null);
+    await chrome.action.setBadgeText({ text: '' });
+    notify();
+    await flush();
+    expect(chrome.action.setBadgeText).toHaveBeenLastCalledWith({ text: '1' });
+  });
+
   it('refuses when the relay did not negotiate the capability', async () => {
     const ws = await bootAppend(false);
     const taskId = await finishTask(ws);

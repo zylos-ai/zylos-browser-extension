@@ -53,6 +53,8 @@ import {
   planTaskAppend,
   taskAppendError,
   taskAppendSchema,
+  type TaskAppend,
+  type TaskAppendResult,
 } from '../../utils/agent-task-append';
 import {
   configureCdpDiagnostics,
@@ -262,6 +264,8 @@ export function startRemoteBackground() {
   let agentStartPending = false;
   let agentStartReady = false;
   let taskAppendReady = false;
+  // First delivery of each append ID whose save is still in flight.
+  const appendsInFlight = new Map<string, Promise<TaskAppendResult>>();
   const taskStarts = new TaskStartLedger();
   let panelMutations: Promise<unknown> = Promise.resolve();
   /** Serialize a connection-changing transaction with the panel's consent mutations. */
@@ -576,6 +580,9 @@ export function startRemoteBackground() {
       activity.end('interrupted');
     }
     hadControl = hasControl;
+    // A follow-up that arrived during another task skipped the badge; restore
+    // it once control (and the executor's own badge clear) is over.
+    if (!hasControl && state.chat.some((entry) => entry.unread)) void syncUnreadBadge();
     publish();
   });
 
@@ -652,6 +659,31 @@ export function startRemoteBackground() {
     } catch {
       /* The badge is a hint; the persisted unread marker is the record. */
     }
+  }
+  async function appendFollowUp(input: TaskAppend): Promise<TaskAppendResult> {
+    // A retry while the first delivery is still saving shares its outcome: its
+    // failure is rethrown, and after a successful save planning says "existing".
+    const first = appendsInFlight.get(input.appendId);
+    if (first) await first;
+    const panelOpen = await sidePanelOpen();
+    const { entry, result } = planTaskAppend(state.chat, input, {
+      now: Date.now(),
+      activeTaskId: loop.active ? loop.taskId : undefined,
+    });
+    if (entry) {
+      // Planned and pushed without an await in between, so a concurrent
+      // history clear either removed the task first or removes this too.
+      try {
+        await appendChat(panelOpen ? entry : { ...entry, unread: true });
+      } catch {
+        // Not persisted: withdraw it so a later retry appends it again.
+        state.chat = state.chat.filter((item) => item.id !== entry.id);
+        publish();
+        throw taskAppendError('TASK_APPEND_FAILED');
+      }
+      if (!panelOpen) await syncUnreadBadge();
+    }
+    return result;
   }
   async function markChatRead() {
     let changed = false;
@@ -1711,26 +1743,13 @@ export function startRemoteBackground() {
       try {
         const input = taskAppendSchema.parse(m.params);
         if (!taskAppendReady) throw taskAppendError('TASK_APPEND_UNSUPPORTED');
-        const panelOpen = await sidePanelOpen();
-        const { entry, result } = planTaskAppend(state.chat, input, {
-          now: Date.now(),
-          activeTaskId: loop.active ? loop.taskId : undefined,
-        });
-        if (entry) {
-          // Planned and pushed without an await in between, so a concurrent
-          // history clear either removed the task first or removes this too.
-          try {
-            await appendChat(panelOpen ? entry : { ...entry, unread: true });
-          } catch {
-            // Not persisted: withdraw it so a retry cannot report "existing".
-            state.chat = state.chat.filter((item) => item.id !== entry.id);
-            publish();
-            throw taskAppendError('TASK_APPEND_FAILED');
-          }
-          if (!panelOpen) await syncUnreadBadge();
+        const appending = appendFollowUp(input);
+        if (!appendsInFlight.has(input.appendId)) {
+          appendsInFlight.set(input.appendId, appending);
+          void appending.catch(() => {}).finally(() => appendsInFlight.delete(input.appendId));
         }
         // Acknowledged only after the reply is persisted and published.
-        reply({ type: 'resp', result });
+        reply({ type: 'resp', result: await appending });
       } catch (error) {
         const code = (error as { code?: string }).code;
         reply({
