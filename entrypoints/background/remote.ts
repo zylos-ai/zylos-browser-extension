@@ -40,8 +40,10 @@ import { DetailedSharing } from '../../utils/detailed-sharing';
 import { installDetailedRuntime } from '../../utils/detailed-runtime';
 import { IncidentCapture } from '../../utils/incident-bundle';
 import {
+  AGENT_TASK_CURRENT_TAB_CAPABILITY,
   AGENT_TASK_START_CAPABILITY,
   TaskStartLedger,
+  captureStartTab,
   taskStartSchema,
   taskStartError,
   waitForTaskPage,
@@ -1209,6 +1211,7 @@ export function startRemoteBackground() {
         ...(build ? { build } : {}),
         capabilities: [
           AGENT_TASK_START_CAPABILITY,
+          AGENT_TASK_CURRENT_TAB_CAPABILITY,
           'recovery-closed-shadow-v1',
           'recovery-child-frames-v1',
           'diagnostics-detail-share-v1',
@@ -1548,8 +1551,24 @@ export function startRemoteBackground() {
           sendingChat = true;
           agentStartPending = true;
           const id = crypto.randomUUID();
-          try {
-            publish();
+          // The tab the user has in front of them when the start arrives. It is
+          // pinned like a panel message: no control is taken here, and the Agent
+          // borrows it with use-current-tab, which re-checks tab and document.
+          const startOnCurrentTab = async () => {
+            const win = await chrome.windows
+              .getLastFocused({ windowTypes: ['normal'] })
+              .catch(() => undefined);
+            check();
+            const windowId = win?.id;
+            if (windowId === undefined) throw taskStartError('TASK_START_NO_TAB');
+            if (win!.incognito) throw taskStartError('TASK_START_PAGE_RESTRICTED');
+            const [tab] = await chrome.tabs.query({ active: true, windowId });
+            check();
+            return captureStartTab(tab, windowId, check, (tabId) =>
+              captureCurrentPage(id, windowId, tabId),
+            );
+          };
+          const startInNewTab = async (url: string) => {
             const win = await chrome.windows.getLastFocused({ windowTypes: ['normal'] });
             check();
             if (win.incognito || win.id === undefined) throw taskStartError('TASK_START_CONFLICT');
@@ -1560,13 +1579,13 @@ export function startRemoteBackground() {
             await createTask({
               sourceTabId: source.id,
               windowId: win.id,
-              url: input.url,
+              url,
               taskId: id,
             });
             check();
             const control = currentControl();
             if (!control || control.sessionId !== id) throw taskStartError('TASK_START_REVOKED');
-            const { context, page } = await waitForTaskPage(
+            return waitForTaskPage(
               control.tabId,
               control.windowId,
               () => {
@@ -1577,6 +1596,13 @@ export function startRemoteBackground() {
               },
               () => captureCurrentPage(id, control.windowId, control.tabId),
             );
+          };
+          try {
+            publish();
+            // Never fall back from one target to the other: a refused current
+            // tab is reported to the Agent, not replaced by a new tab.
+            const { context, page } =
+              'target' in input ? await startOnCurrentTab() : await startInNewTab(input.url);
             check();
             const ts = Date.now();
             await appendChat({

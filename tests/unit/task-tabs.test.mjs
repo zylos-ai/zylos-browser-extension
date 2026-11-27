@@ -659,6 +659,23 @@ test('borrowed target stays pinned across focus changes, and only newly created 
   assert.equal(s.tabs.has(next.tabId), false);
 });
 
+test('borrowed selection reports a closed or moved page distinctly and opens nothing', async () => {
+  const s = await fixture();
+  const url = s.tabs.get(1).url;
+  s.tabs.get(1).windowId = 2;
+  await assert.rejects(
+    s.executor.useExistingTab({ tabId: 1, windowId: 1, url }, () => {}),
+    (e) => e.code === 'TAB_NOT_GRANTED' && /moved to another window/.test(e.message),
+  );
+  s.tabs.delete(1);
+  await assert.rejects(
+    s.executor.useExistingTab({ tabId: 1, windowId: 1, url }, () => {}),
+    (e) => e.code === 'TAB_NOT_GRANTED' && /was closed/.test(e.message),
+  );
+  assert.equal(s.calls.filter((c) => c.method === 'tabs.create').length, 0);
+  assert.equal(s.executor.currentControl(), null);
+});
+
 test('borrowed selection refuses navigation and never falls back to another active tab', async () => {
   const s = await fixture();
   await assert.rejects(

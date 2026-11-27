@@ -752,6 +752,200 @@ describe('decision transport background', () => {
     expect(executor.release).toHaveBeenCalled();
     expect((await state()).agentStartEnabled).toBe(false);
   });
+  const currentTabInput = {
+    requestId: '44444444-4444-4444-8444-444444444444',
+    prompt: 'Finish the upload form I already filled in',
+    target: 'current-tab',
+  };
+  const userTab = {
+    id: 3,
+    windowId: 1,
+    active: true,
+    status: 'complete',
+    url: 'https://example.com/upload',
+    title: 'Upload video',
+  };
+  const currentTabSetup = async (tab: Record<string, unknown> = userTab) => {
+    const ws = await taskStartSetup();
+    chrome.tabs.query = vi.fn(async () => [tab]) as any;
+    chrome.tabs.get = vi.fn(async (id: number) => ({ ...tab, id })) as any;
+    chrome.tabs.create = vi.fn() as any;
+    chrome.webNavigation = {
+      getFrame: vi.fn(async () => ({ documentId: 'user-document', url: tab.url })),
+    } as any;
+    return ws;
+  };
+  it('starts on the user current tab without opening a tab or taking control', async () => {
+    const ws = await currentTabSetup();
+    const first = await requestStart(ws, currentTabInput as any);
+    expect(first).toMatchObject({
+      type: 'resp',
+      result: { requestId: currentTabInput.requestId, status: 'started' },
+    });
+    expect(executor.createTask).not.toHaveBeenCalled();
+    expect(chrome.tabs.create).not.toHaveBeenCalled();
+    expect(chrome.windows.getLastFocused).toHaveBeenCalledWith({ windowTypes: ['normal'] });
+    const taskId = (first!.result as any).taskId;
+    const request = ws.last('agent-request')!;
+    expect(request).toMatchObject({ taskId });
+    // Same pinned context as a panel message: the Agent borrows it with use-current-tab.
+    expect((request.context as any).pages[0]).toMatchObject({
+      type: 'current-page',
+      contextId: taskId,
+      tabId: 3,
+      url: userTab.url,
+    });
+    const entry = ((await state()) as any).chat.find((item: any) => item.id === taskId);
+    expect(entry).toMatchObject({
+      role: 'user',
+      origin: 'agent',
+      text: currentTabInput.prompt,
+      page: { url: userTab.url, title: userTab.title },
+    });
+    expect((await state()).loopActive).toBe(true);
+    expect(await requestStart(ws, currentTabInput as any, 901)).toMatchObject({
+      result: { taskId, status: 'existing' },
+    });
+    expect(await requestStart(ws, { ...currentTabInput, prompt: 'x' } as any, 902)).toMatchObject({
+      code: 'TASK_START_CONFLICT',
+    });
+    // Stop works as for any agent-started task.
+    await ask({ type: 'remote-stop' });
+    expect((await state()).loopActive).toBe(false);
+  });
+  it.each([
+    [{ ...userTab, url: 'https://www.paypal.com/myaccount' }, 'TASK_START_SITE_DENIED'],
+    [{ ...userTab, url: 'chrome://settings/' }, 'TASK_START_PAGE_RESTRICTED'],
+    [{ ...userTab, url: 'https://chromewebstore.google.com/' }, 'TASK_START_PAGE_RESTRICTED'],
+    [{ ...userTab, incognito: true }, 'TASK_START_PAGE_RESTRICTED'],
+    [{ ...userTab, pendingUrl: 'https://example.com/next' }, 'TASK_START_PAGE_NOT_READY'],
+  ])('refuses current tab %j with %s and never falls back to a new tab', async (tab, code) => {
+    const ws = await currentTabSetup(tab);
+    expect(await requestStart(ws, currentTabInput as any)).toMatchObject({ type: 'error', code });
+    expect(executor.createTask).not.toHaveBeenCalled();
+    expect(chrome.tabs.create).not.toHaveBeenCalled();
+    expect(ws.last('agent-request')).toBeUndefined();
+    expect(await state()).toMatchObject({ loopActive: false, chatBusy: false });
+    // The refusal is retained for the request ID; it is not retried as something else.
+    expect(await requestStart(ws, currentTabInput as any, 901)).toMatchObject({ code });
+    expect(executor.createTask).not.toHaveBeenCalled();
+  });
+  it('refuses when no normal window is focused or the window is private', async () => {
+    const ws = await currentTabSetup();
+    vi.mocked(chrome.windows.getLastFocused).mockRejectedValueOnce(new Error('No window'));
+    expect(await requestStart(ws, currentTabInput as any)).toMatchObject({
+      code: 'TASK_START_NO_TAB',
+    });
+    vi.mocked(chrome.windows.getLastFocused).mockResolvedValueOnce({
+      id: 1,
+      incognito: true,
+    } as any);
+    expect(
+      await requestStart(
+        ws,
+        { ...currentTabInput, requestId: '55555555-5555-4555-8555-555555555555' } as any,
+        901,
+      ),
+    ).toMatchObject({ code: 'TASK_START_PAGE_RESTRICTED' });
+    expect(executor.createTask).not.toHaveBeenCalled();
+  });
+  it.each([
+    ['closed', () => null, 'TASK_START_TAB_CLOSED'],
+    [
+      'navigated away',
+      () => ({ ...userTab, url: 'https://example.com/other' }),
+      'TASK_START_PAGE_CHANGED',
+    ],
+    ['moved', () => ({ ...userTab, windowId: 2 }), 'TASK_START_PAGE_CHANGED'],
+  ])('refuses a tab %s while the start is checked', async (_name, after, code) => {
+    const ws = await currentTabSetup();
+    let calls = 0;
+    // captureCurrentPage reads the tab first; the start's own re-check sees the change.
+    chrome.tabs.get = vi.fn(async (id: number) => {
+      calls++;
+      if (calls === 1) return { ...userTab, id };
+      const tab = after();
+      if (!tab) throw new Error('No tab with id');
+      return tab;
+    }) as any;
+    expect(await requestStart(ws, currentTabInput as any)).toMatchObject({ type: 'error', code });
+    expect(executor.createTask).not.toHaveBeenCalled();
+    expect(ws.last('agent-request')).toBeUndefined();
+    expect(await state()).toMatchObject({ loopActive: false, chatBusy: false });
+  });
+  it('a same-URL reload during the start is refused as a page change', async () => {
+    const ws = await currentTabSetup();
+    chrome.webNavigation.getFrame = vi.fn(async () => ({
+      documentId: 'reloaded',
+      url: 'https://example.com/elsewhere',
+    })) as any;
+    expect(await requestStart(ws, currentTabInput as any)).toMatchObject({
+      code: 'TASK_START_PAGE_CHANGED',
+    });
+  });
+  it('current-tab start keeps the session permission and conflict rules', async () => {
+    const ws = await currentTabSetup();
+    await ask({ type: 'remote-agent-start-set-enabled', enabled: false });
+    expect(await requestStart(ws, currentTabInput as any)).toMatchObject({
+      code: 'TASK_START_DISABLED',
+    });
+    await ask({ type: 'remote-agent-start-set-enabled', enabled: true });
+    await begin(ws);
+    expect(
+      await requestStart(
+        ws,
+        { ...currentTabInput, requestId: '66666666-6666-4666-8666-666666666666' } as any,
+        901,
+      ),
+    ).toMatchObject({ code: 'TASK_START_CONFLICT' });
+  });
+  it('revoking permission while the current tab is captured prevents a late start', async () => {
+    const ws = await currentTabSetup();
+    let finish!: () => void;
+    chrome.webNavigation.getFrame = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          finish = () => resolve({ documentId: 'user-document', url: userTab.url });
+        }),
+    ) as any;
+    ws.receive({ type: 'req', id: 900, method: 'task.start', params: currentTabInput });
+    await flush();
+    await ask({ type: 'remote-agent-start-set-enabled', enabled: false });
+    finish();
+    await flush();
+    expect(ws.frames.findLast((frame) => frame.id === 900)).toMatchObject({
+      code: 'TASK_START_REVOKED',
+    });
+    expect(ws.last('agent-request')).toBeUndefined();
+    expect(executor.createTask).not.toHaveBeenCalled();
+  });
+  it('URL start still opens its own task tab when current-tab is supported', async () => {
+    const ws = await currentTabSetup();
+    executor.createTask.mockImplementation(async (input) => {
+      executor.currentControl.mockReturnValue({
+        sessionId: input.taskId,
+        tabId: 20,
+        tabIds: [20],
+        phase: 'ready',
+        windowId: 1,
+      } as any);
+    });
+    chrome.tabs.get = vi.fn(async (id: number) => ({
+      id,
+      windowId: 1,
+      status: 'complete',
+      url: 'https://example.com/',
+    })) as any;
+    chrome.webNavigation.getFrame = vi.fn(async () => ({
+      documentId: 'task-document',
+      url: 'https://example.com/',
+    })) as any;
+    expect(await requestStart(ws)).toMatchObject({ type: 'resp', result: { status: 'started' } });
+    expect(executor.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceTabId: 3, windowId: 1, url: startInput.url }),
+    );
+    expect((ws.last('agent-request')!.context as any).pages[0]).toMatchObject({ tabId: 20 });
+  });
   const DAY = 86_400_000;
   const BINDING = 'wss://agent.example/browser-remote/ext|abababababab';
   const grantRecord = () => storage.agentStartGrant as Record<string, unknown> | undefined;
@@ -2245,6 +2439,7 @@ describe('decision transport background', () => {
     expect(ws.protocols).toEqual([REMOTE_SUBPROTOCOL, `key.${KEY}`]);
     expect(ws.last('hello')!.capabilities).toEqual([
       'agent-task-start-v1',
+      'agent-task-current-tab-v1',
       'recovery-closed-shadow-v1',
       'recovery-child-frames-v1',
       'diagnostics-detail-share-v1',

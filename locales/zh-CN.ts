@@ -66,7 +66,7 @@ export default {
     '允许进行中的浏览器任务移除其他扩展在网页内显示的界面。跨任务和重启保留；更换连接地址或密钥后清除。',
   agentStartPermission: '允许 Agent 发起任务',
   agentStartPermissionHint:
-    '已连接的 Agent 可以打开任务标签页。关闭此权限会停止其当前任务。到期前浏览器重启后仍保留；更换连接地址、密钥或切换连接开关后清除。',
+    '已连接的 Agent 可以打开任务标签页，或在你当前查看的标签页上执行任务（受站点权限和受限页面规则约束）。关闭此权限会停止其当前任务。到期前浏览器重启后仍保留；更换连接地址、密钥或切换连接开关后清除。',
   agentStartAllowedUntil: '允许至 {time}',
   agentStartAllowedUntilOff: '已允许，直到手动关闭',
   agentStartUntilOff: '直到手动关闭',
@@ -509,7 +509,7 @@ export default {
   advanced: '高级',
   on: '已开启',
   off: '已关闭',
-  agentStartShort: '允许已连接的 Agent 打开任务标签页',
+  agentStartShort: '允许已连接的 Agent 打开任务标签页或使用当前标签页',
   compatibilityShort: '任务中可移除其他扩展的页面元素',
   diagnosticsShort: '仅事件类型，不含页面内容',
   siteAccessNeedsAttention: '规则需要重置',
