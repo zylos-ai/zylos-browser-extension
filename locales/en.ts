@@ -340,6 +340,7 @@ export default {
   previewShow: 'Show preview',
   previewImage: 'Page preview of {title}',
   previewCompleted: 'Completed',
+  previewBlocked: 'Needs follow-up',
   previewStopped: 'Stopped',
   previewInterrupted: 'Interrupted',
   previewError: 'Action failed',

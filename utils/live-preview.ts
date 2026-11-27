@@ -9,7 +9,7 @@ export const previewStateSchema = z.object({
   windowId: z.number().int(),
   title: z.string(),
   url: z.string(),
-  status: z.enum(['running', 'paused', 'completed', 'stopped', 'interrupted', 'error']),
+  status: z.enum(['running', 'paused', 'completed', 'blocked', 'stopped', 'interrupted', 'error']),
   availability: z.enum(['connecting', 'live', 'paused', 'unavailable']),
   canReveal: z.boolean(),
   canStop: z.boolean(),

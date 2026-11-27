@@ -12,6 +12,7 @@ const executor = vi.hoisted(() => ({
       sessionId: string;
       tabId: number;
       tabIds: number[];
+      windowId?: number;
       phase: 'ready' | 'paused' | 'finished';
     } => null,
   ),
@@ -46,6 +47,7 @@ vi.mock('../../utils/browser-round', () => ({
 vi.mock('../../utils/messages', () => ({ isPanelSender: () => true }));
 
 import { startRemoteBackground } from '../../entrypoints/background/remote';
+import { PREVIEW_PORT } from '../../utils/live-preview';
 import { REMOTE_SUBPROTOCOL, type ChatEntry } from '../../utils/remote';
 
 type Handler = (m: unknown, s: unknown, r: (v: unknown) => void) => boolean;
@@ -1972,6 +1974,48 @@ describe('decision transport background', () => {
     ).toMatchObject({ id: 'image-1', preview, name: 'photo.png' });
     await respond(ws, request, { kind: 'done', text: 'Read' });
   });
+  it('retains a follow-up preview when the Agent asks for a decision', async () => {
+    const ws = await bootConnected();
+    const postMessage = vi.fn();
+    const onConnect = vi.mocked(chrome.runtime.onConnect.addListener).mock.calls[0]![0];
+    onConnect({
+      name: PREVIEW_PORT,
+      sender: {},
+      postMessage,
+      onMessage: { addListener: vi.fn() },
+      onDisconnect: { addListener: vi.fn() },
+    } as unknown as chrome.runtime.Port);
+    executor.currentControl.mockReturnValue({
+      sessionId: 'preview-task',
+      windowId: 1,
+      tabId: 3,
+      tabIds: [3],
+      phase: 'ready',
+    });
+    const request = await begin(ws);
+    expect(postMessage).toHaveBeenLastCalledWith({
+      type: 'preview-state',
+      preview: expect.objectContaining({ status: 'running', tabId: 3 }),
+    });
+    const text = 'Which price should I enter?';
+    await respond(ws, request, { kind: 'blocked', text });
+    expect(postMessage).toHaveBeenLastCalledWith({
+      type: 'preview-state',
+      preview: expect.objectContaining({
+        status: 'blocked',
+        tabId: 3,
+        availability: 'paused',
+        canReveal: true,
+        canStop: false,
+      }),
+    });
+    expect(ws.last('agent-turn-end')).toMatchObject({ status: 'blocked', text });
+    expect((await state()).chat).toContainEqual(
+      expect.objectContaining({ role: 'assistant', text }),
+    );
+    expect(executor.completeTask).toHaveBeenCalledOnce();
+  });
+
   it.each(['done', 'blocked', 'stopped'] as const)(
     'merges a new message in the same task and accepts a fresh task after %s',
     async (status) => {
