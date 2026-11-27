@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- GitHub release zips always carry the fixed extension ID
+  `fedaknpgpclnololpbanedpbhlfdbhlp` again (OPENM-1548). 0.18.1 and 0.18.2 were
+  packaged without the manifest `key`, so manual installs got a folder-derived
+  ID and OpenMax Workspace sign-in failed with "This sign-in request isn't
+  valid". Packaging is now explicit: `npm run zip:github` (also `npm run zip`)
+  adds the key and fails unless the zip's ID is the fixed one;
+  `npm run zip:store` builds the Chrome Web Store upload without it.
+
 - The tab preview shows "Needs follow-up" when the Agent reports a blocker or
   asks the user for a decision.
 

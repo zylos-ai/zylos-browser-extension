@@ -222,7 +222,7 @@ Remote 只负责鉴权、实例关联和有界传输，不复制动作注册表�
 npm test
 npm run test:build
 npm run test:e2e
-npm run zip
+npm run zip:github
 ```
 
 单元测试覆盖动作参数、页面范围、浏览器循环、传输状态、预览和 UI。
@@ -237,3 +237,35 @@ E2E 使用临时 Chrome profile、本地网页和相邻 Remote 仓库，模拟 A
 `npm run test:e2e` 包含两份临时 Chrome profile 共用一个 Key 的回归场景：
 A/B 分别操作各自页面，拒绝错目标回复，停止和重连 A 不影响 B，重启 A 保留身份。
 测试使用实际插件、Remote 和本地网页，Agent 决策由确定性测试输入代替，不接入真实 Agent 队列。
+
+## 发布打包与固定扩展 ID
+
+OpenMax Workspace（生产与 INT）只接受两个扩展 ID 的登录：Chrome 应用商店 ID
+`mehokihmomodpmdghdeajmgpphncanae`，以及手动安装包的固定 ID `fedaknpgpclnololpbanedpbhlfdbhlp`。
+手动安装的 ID 由 Manifest 的公钥 `key` 决定；没有 `key` 时 Chrome 按安装目录路径生成 ID，
+Workspace 登录会提示 "This sign-in request isn't valid"。公钥及 ID 计算位于
+`scripts/extension-key.mjs`（只有公钥，不需要私钥）。0.18.1、0.18.2 的发布包缺少 `key`，即此问题来源。
+
+`WXT_MANIFEST_KEY` 选择打包目标，`wxt.config.ts` 据此写入或省略 `key`：
+
+| 命令                                       | `key` | 用途                                                  |
+| ------------------------------------------ | ----- | ----------------------------------------------------- |
+| `npm run zip:github`（`npm run zip` 同此） | 固定  | GitHub Release 附件、手动安装，ID 为 `fedakn…`        |
+| `npm run zip:store`                        | 无    | 上传 Chrome 应用商店（商店拒绝 `key`，使用自己的 ID） |
+| `WXT_MANIFEST_KEY=release npm run build`   | 固定  | INT 等测试构建以解压方式加载时需要 Workspace 登录     |
+| `npm run build` / `npm run dev`            | 无    | 本地开发与测试，行为不变                              |
+
+直接运行 `wxt zip` 而不设置 `WXT_MANIFEST_KEY` 会报错，避免再次发出缺少 `key` 的包。
+打包完成后会读取 zip 内的 `manifest.json` 校验：GitHub 包必须含 `key` 且计算出的 ID 等于
+`fedaknpgpclnololpbanedpbhlfdbhlp`，商店包不得含 `key`；校验失败时删除该 zip 并以非零退出。
+商店包命名为 `*-chrome-store.zip`，GitHub 包保持原名 `zylos-browser-extension-<版本>-chrome.zip`。
+
+发布步骤：
+
+1. 更新 `package.json` 版本和 `CHANGELOG.md`，合并到 `main` 并打标签。
+2. `npm test`，`WXT_WORKSPACE_URL=<生产 Workspace 地址> npm run test:build`。
+3. `WXT_WORKSPACE_URL=<生产 Workspace 地址> npm run zip:github`，上传
+   `.output/zylos-browser-extension-<版本>-chrome.zip` 到 GitHub Release。
+4. 需要上架商店时，`WXT_WORKSPACE_URL=<生产 Workspace 地址> npm run zip:store`，上传
+   `.output/zylos-browser-extension-<版本>-chrome-store.zip`。
+5. 可复核：`unzip -p <zip> manifest.json` 查看 `key`；ID 为 base64 解码后 SHA-256 的前 32 个十六进制字符按 0-f → a-p 映射。

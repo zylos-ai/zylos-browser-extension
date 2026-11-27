@@ -14,7 +14,10 @@ test('ships only the background and sidepanel entrypoints', () => {
   ).toEqual(['background', 'sidepanel']);
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   expect(pkg.scripts.build).toBe('wxt build');
-  expect(pkg.scripts.zip).toBe('wxt zip');
+  // GitHub release zips carry the fixed extension ID; Store uploads must not.
+  expect(pkg.scripts.zip).toBe('npm run zip:github');
+  expect(pkg.scripts['zip:github']).toBe('WXT_MANIFEST_KEY=release wxt zip');
+  expect(pkg.scripts['zip:store']).toBe('WXT_MANIFEST_KEY=store wxt zip');
   for (const item of [
     'entrypoints/background/index.ts',
     'entrypoints/background/remote.ts',

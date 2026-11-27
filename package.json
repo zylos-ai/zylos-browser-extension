@@ -9,7 +9,9 @@
   "scripts": {
     "dev": "wxt",
     "build": "wxt build",
-    "zip": "wxt zip",
+    "zip": "npm run zip:github",
+    "zip:github": "WXT_MANIFEST_KEY=release wxt zip",
+    "zip:store": "WXT_MANIFEST_KEY=store wxt zip",
     "postinstall": "wxt prepare",
     "typecheck": "wxt prepare && tsc --noEmit",
     "test": "npm run typecheck && vitest run",

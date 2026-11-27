@@ -102,3 +102,10 @@ test('release build (WXT_WORKSPACE_URL only) drops the ws:// loopback relay allo
   assert.ok(relayCheck, 'isSecureRelayUrl not found');
   assert.ok(['!1', 'false'].includes(relayCheck[1]), relayCheck[0]);
 });
+
+test('a manifest key, when built with one, gives the fixed manual-install ID', async () => {
+  const { assertManifestKey } = await import('../scripts/extension-key.mjs');
+  const manifest = JSON.parse(fs.readFileSync(path.join(output, 'manifest.json'), 'utf8'));
+  if (process.env.WXT_MANIFEST_KEY?.trim() === 'release') assertManifestKey(manifest, 'release');
+  else assert.equal(manifest.key, undefined);
+});
