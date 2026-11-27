@@ -591,6 +591,59 @@ test('Agent-started prompts are labelled instead of attributed to the user', asy
   expect(agent!.querySelector('.system-label')!.textContent).toBe('Agent 发起');
 });
 
+test('a follow-up renders like an Agent reply, names its task and is marked read when shown', async () => {
+  state.chat = [
+    { id: 'task-1', role: 'user', text: 'Ask a reviewer\nthen report', ts: 1, loopStatus: 'done' },
+    { id: 'r1', role: 'assistant', text: 'I will report back.', ts: 2, final: true },
+    {
+      id: 'append:1',
+      role: 'assistant',
+      text: 'Review **done**.',
+      ts: 3,
+      final: true,
+      followUp: true,
+      taskId: 'task-1',
+      unread: true,
+    },
+  ];
+  await mount();
+  const reply = [...container.querySelectorAll('article.message.assistant')].at(-1)!;
+  expect(reply.querySelector('.follow-up-label')!.textContent).toBe('后续回复');
+  expect(reply.querySelector('.follow-up-origin')!.textContent).toBe('关于：Ask a reviewer');
+  expect(reply.querySelector('.markdown-body strong')!.textContent).toBe('done');
+  expect(reply.querySelector('button')).toBeNull();
+  expect(send).toHaveBeenCalledWith({ type: 'remote-chat-read' });
+  const first = container.querySelectorAll('article.message.assistant')[0]!;
+  expect(first.querySelector('.follow-up-label')).toBeNull();
+});
+
+test('a follow-up to an earlier task does not end the progress of the running one', async () => {
+  state.chat = [
+    { id: 'task-1', role: 'user', text: 'Earlier', ts: 1, loopStatus: 'done' },
+    { id: 'r1', role: 'assistant', text: 'Earlier answer', ts: 2, final: true },
+    {
+      id: 'task-2',
+      role: 'user',
+      text: 'Now running',
+      ts: 3,
+      loopStatus: 'active',
+      delivery: 'queued',
+    },
+    {
+      id: 'append:1',
+      role: 'assistant',
+      text: 'Late result for the earlier task',
+      ts: 4,
+      final: true,
+      followUp: true,
+      taskId: 'task-1',
+    },
+  ];
+  await mount();
+  expect(container.querySelector('.reply-status')).not.toBeNull();
+  expect(send).not.toHaveBeenCalledWith({ type: 'remote-chat-read' });
+});
+
 test('legacy progress keeps its timing but no longer expands local browser steps', async () => {
   state.chat = [
     { id: 'question', role: 'user', text: '看看当前页面', ts: 1 },

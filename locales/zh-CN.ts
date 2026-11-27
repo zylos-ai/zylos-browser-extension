@@ -132,6 +132,8 @@ export default {
   markdownFootnoteBack: '返回正文',
   you: '你',
   agentStarted: 'Agent 发起',
+  followUp: '后续回复',
+  followUpTo: '关于：{task}',
   system: '系统',
   systemMessage: '系统消息',
   today: '今天',

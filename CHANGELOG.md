@@ -5,6 +5,10 @@
 Pairs with the zylos-browser-remote release that accepts `target: "current-tab"`;
 older relays keep URL starts only.
 
+Follow-up replies need zylos-browser-remote with `agent-task-append-v1`
+(zylos-ai/zylos-browser-remote#7). Older relays keep working; they never send
+follow-ups.
+
 ### Added
 
 - Rename this browser from the connection menu (#34). The new name is saved in
@@ -38,6 +42,15 @@ older relays keep URL starts only.
   `TASK_START_PAGE_NOT_READY`, `TASK_START_TAB_CLOSED`,
   `TASK_START_PAGE_CHANGED`) and never replaced by a new tab. URL starts are
   unchanged.
+- Follow-up replies to an ended task (zylos-ai/zylos-browser-remote#7): the
+  Agent can add a result to a task it already answered (done/blocked), for
+  example after a background review finishes. It appears as a new Agent message
+  labelled "Follow-up" with the task it belongs to, rendered like other replies
+  (text only, no action buttons), and is saved in the chat history. Allowed up to
+  24 hours after the task ended and at most 20 times per task; stopped,
+  interrupted, running and cleared tasks are refused. If the side panel is
+  closed, the message is marked unread and the toolbar badge shows the count
+  until the panel is opened. Negotiated as `agent-task-append-v1`.
 
 ### Changed
 

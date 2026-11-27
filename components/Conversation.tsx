@@ -43,13 +43,12 @@ export function Conversation({
   const agentHistoryRevision = JSON.stringify(
     chat.findLast((message) => message.agentHistory)?.agentHistory,
   );
-  const turn = [...chat]
-    .reverse()
-    .find(
-      (message) =>
-        (message.role === 'user' && !message.taskId) ||
-        (message.role === 'assistant' && message.final !== false),
-    );
+  const turn = [...chat].reverse().find(
+    (message) =>
+      (message.role === 'user' && !message.taskId) ||
+      // A follow-up to an ended task must not end the current turn.
+      (message.role === 'assistant' && message.final !== false && !message.followUp),
+  );
   const turnActivity =
     turn &&
     chat
@@ -180,7 +179,13 @@ export function Conversation({
                         <div className="message-author">
                           <Brand />
                           <span>Zylos</span>
+                          {message.followUp && (
+                            <span className="follow-up-label text-muted">{t('followUp')}</span>
+                          )}
                         </div>
+                      )}
+                      {message.role === 'assistant' && message.followUp && (
+                        <FollowUpOrigin chat={chat} taskId={message.taskId} />
                       )}
                       {message.role === 'system' && (
                         <span className="system-label">{t('system')}</span>
@@ -288,5 +293,17 @@ export function Conversation({
         </button>
       )}
     </div>
+  );
+}
+
+/** Names the earlier task a follow-up belongs to (first line, shortened). */
+function FollowUpOrigin({ chat, taskId }: { chat: ChatEntry[]; taskId?: string }) {
+  const { t } = useI18n();
+  const task = taskId && chat.find((entry) => entry.role === 'user' && entry.id === taskId);
+  if (!task) return null;
+  const line = task.text.split('\n', 1)[0]!.trim();
+  const excerpt = line.length > 60 ? `${line.slice(0, 60)}…` : line;
+  return (
+    <p className="follow-up-origin text-caption text-muted">{t('followUpTo', { task: excerpt })}</p>
   );
 }

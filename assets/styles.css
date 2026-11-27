@@ -497,6 +497,14 @@ html[data-theme='zylos'] > body {
     font-weight: 500;
     line-height: var(--text-caption--line-height);
   }
+  .follow-up-label::before {
+    content: '·';
+    margin-right: var(--zylos-space-8);
+  }
+  .follow-up-origin {
+    margin-top: calc(-1 * var(--zylos-space-8));
+    overflow-wrap: anywhere;
+  }
   .message-text {
     white-space: pre-wrap;
     overflow-wrap: anywhere;

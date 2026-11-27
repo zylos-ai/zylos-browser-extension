@@ -88,6 +88,10 @@ export const chatEntrySchema = z
     delivery: z.enum(['sent', 'queued', 'failed', 'unknown']).optional(),
     deliveryError: z.string().optional(),
     final: z.boolean().optional(),
+    // An Agent reply added after taskId's request ended (agent-task-append-v1).
+    followUp: z.boolean().optional(),
+    // Arrived while the side panel was closed; cleared when the panel shows it.
+    unread: z.boolean().optional(),
     taskId: z.string().max(128).optional(),
     steerStatus: z.enum(['pending', 'sent', 'applied', 'interrupted']).optional(),
     loopStatus: z.enum(['active', 'done', 'blocked', 'interrupted', 'stopped']).optional(),
@@ -268,6 +272,7 @@ export const remoteRequestSchema = z.discriminatedUnion('type', [
     })
     .strict(),
   z.object({ type: z.literal('remote-chat-clear') }).strict(),
+  z.object({ type: z.literal('remote-chat-read') }).strict(),
   z.object({ type: z.literal('remote-reveal') }).strict(),
   z.object({ type: z.literal('remote-preview-reveal') }).strict(),
   z.object({ type: z.literal('remote-stop') }).strict(),
