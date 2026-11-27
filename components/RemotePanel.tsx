@@ -224,6 +224,7 @@ export function RemotePanel() {
               busy={pending !== null}
               onRequest={workspaceAction}
               onSwitch={openSwitch}
+              onRename={(browserName) => action({ type: 'workspace-rename', browserName })}
             />
           ) : (
             <span

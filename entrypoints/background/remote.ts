@@ -1993,6 +1993,9 @@ export function startRemoteBackground() {
         case 'workspace-cancel':
           await workspace.cancel();
           return snapshot();
+        case 'workspace-rename':
+          await workspace.rename(m.browserName);
+          return snapshot();
         case 'workspace-set-url': {
           // Only a build-configured environment can be selected.
           const next = normalizeWorkspaceUrl(m.url);

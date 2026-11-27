@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- Rename this browser from the connection menu (#34). The new name is saved in
+  OpenMax Workspace and sent to the relay, so the Agent sees it. An empty name,
+  a connection that is still being prepared, and Workspace errors (revoked
+  connection, expired sign-in, rate limit, unreachable) each show a clear
+  message, and the old name is kept.
+- The popup shows this connection as "name · first 8 characters of the
+  connection ID", the same label the Agent sees, so you can match a browser to
+  the Agent's connection list (#34).
+- When you connect, the name step suggests adding the computer and Chrome
+  profile (for example "Mac mini · Work"). The default name is pre-filled and
+  can be kept with one click. Switching Agents keeps the name you already chose.
+
 ### Fixed
 
 - The tab preview shows "Needs follow-up" when the Agent reports a blocker or

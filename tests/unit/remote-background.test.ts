@@ -48,7 +48,7 @@ vi.mock('../../utils/messages', () => ({ isPanelSender: () => true }));
 
 import { startRemoteBackground } from '../../entrypoints/background/remote';
 import { PREVIEW_PORT } from '../../utils/live-preview';
-import { REMOTE_SUBPROTOCOL, type ChatEntry } from '../../utils/remote';
+import { REMOTE_SUBPROTOCOL, remoteRequestSchema, type ChatEntry } from '../../utils/remote';
 
 type Handler = (m: unknown, s: unknown, r: (v: unknown) => void) => boolean;
 let internal: Handler;
@@ -2724,6 +2724,26 @@ describe('OpenMax Workspace mode', () => {
     expect((await state()).workspace).toMatchObject({
       connection: { phase: 'key-rejected', error: 'ui.error.workspaceKeyElsewhere' },
     });
+  });
+
+  it('workspace-rename is routed to the connector; the view carries the connection id', async () => {
+    const relayUrl = (storage.remoteConfig as { relayUrl: string }).relayUrl;
+    storage.workspaceConnection = workspaceRecord(relayUrl);
+    await bootConnected();
+    expect((await state()).workspace).toMatchObject({
+      connection: { browserName: 'Chrome · Mac', connectionId: workspaceRecord('').connectionId },
+    });
+    const blank = await ask({ type: 'workspace-rename', browserName: ' \u0007 ' });
+    expect(blank).toMatchObject({ ok: false, error: 'ui.error.workspaceBrowserNameRequired' });
+    // Over-long names are rejected by the request schema (the panel input stops at 100).
+    expect(
+      remoteRequestSchema.safeParse({ type: 'workspace-rename', browserName: 'x'.repeat(101) })
+        .success,
+    ).toBe(false);
+    // An unchanged name succeeds without a Workspace request.
+    const same = await ask({ type: 'workspace-rename', browserName: ' Chrome · Mac ' });
+    expect(same.ok).toBe(true);
+    expect(storage.workspaceConnection).toMatchObject({ browserName: 'Chrome · Mac' });
   });
 
   it('workspace-set-url only accepts a build-configured environment', async () => {

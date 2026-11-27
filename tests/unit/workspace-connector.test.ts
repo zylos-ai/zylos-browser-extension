@@ -4,10 +4,12 @@ import {
   POLL_INTERVAL_MS,
   PREPARE_TIMEOUT_MS,
   WorkspaceConnector,
+  connectionLabel,
   isSecureRelayUrl,
   prepareErrorKey,
   queuedRelayClear,
   queuedRelayWrite,
+  shortConnectionId,
   type ConnectorDeps,
 } from '../../utils/workspace/connector';
 import {
@@ -885,4 +887,104 @@ test('rename does not notify the relay when the relay is not Workspace-owned', a
   await connector.rename('Home');
   expect((api as any).rename).toHaveBeenCalledWith('c1', 'Home');
   expect(onBrowserName).not.toHaveBeenCalled();
+});
+
+test('connection label is "name · first 8 chars of the connection id", like the Agent shows it', () => {
+  const id = '6f62aefa-1234-4abc-8def-0123456789ab';
+  expect(shortConnectionId(id)).toBe('6f62aefa');
+  expect(shortConnectionId(`openmax:${id}`)).toBe('6f62aefa');
+  expect(shortConnectionId(undefined)).toBe('');
+  expect(connectionLabel('Mac mini · Work', id)).toBe('Mac mini · Work · 6f62aefa');
+  // Before Workspace assigned an id there is nothing to add.
+  expect(connectionLabel('Chrome · Mac')).toBe('Chrome · Mac');
+});
+
+test('the panel view carries the connection id once Workspace created the connection', async () => {
+  const { connector } = setup([{ ...ready, relay_url: 'wss://relay/ext', key: 'abc' }]);
+  await connector.init();
+  await connector.connect(input);
+  expect(connector.view().connection).toMatchObject({
+    browserName: 'Chrome · Mac',
+    connectionId: 'c1',
+    phase: 'connected',
+  });
+  expect(JSON.stringify(connector.view())).not.toContain('abc');
+});
+
+test('rename updates the stored record and view; an unchanged name makes no request', async () => {
+  const { connector, api, storage } = setup([{ ...ready, relay_url: 'wss://relay/ext', key: 'k' }]);
+  const rename = vi.fn(async () => conn('connected').connection);
+  (api as Record<string, unknown>).rename = rename;
+  await connector.connect(input);
+  await connector.rename('  Mac mini · Work ');
+  expect(rename).toHaveBeenCalledWith('c1', 'Mac mini · Work');
+  const renamed = connector.view().connection?.browserName;
+  expect(renamed).toBe('Mac mini · Work');
+  expect((storage.data.get(WORKSPACE_CONNECTION_KEY) as { browserName: string }).browserName).toBe(
+    renamed,
+  );
+  rename.mockClear();
+  await connector.rename(` ${renamed} `);
+  expect(rename).not.toHaveBeenCalled();
+});
+
+test.each([
+  [new WorkspaceApiError(404, 'NOT_FOUND', 'gone'), 'ui.error.workspaceRevoked'],
+  [new WorkspaceApiError(403, 'FORBIDDEN', 'no'), 'ui.error.workspaceAgentUnavailable'],
+  [new WorkspaceApiError(429, 'RATE', 'slow'), 'ui.error.workspaceRateLimited'],
+  [new WorkspaceApiError(503, 'DOWN', 'down'), 'ui.error.workspaceUnreachable'],
+  [new WorkspaceApiError(422, 'INVALID', 'bad name'), 'ui.error.workspaceRequestFailed'],
+  [new WorkspaceAuthError('logged-out', 'x'), 'ui.error.workspaceLoginExpiredError'],
+])('a failed rename (%s) reports %s and keeps the old name', async (error, code) => {
+  const { connector, api, deps, storage } = setup([
+    { ...ready, relay_url: 'wss://relay/ext', key: 'k' },
+  ]);
+  const onBrowserName = vi.fn();
+  deps.onBrowserName = onBrowserName;
+  (api as Record<string, unknown>).rename = vi.fn(async () => {
+    throw error;
+  });
+  await connector.connect(input);
+  vi.mocked(deps.publish).mockClear();
+  await expect(connector.rename('Home')).rejects.toThrow(code);
+  expect(connector.view().connection).toMatchObject({ browserName: 'Chrome · Mac' });
+  expect((storage.data.get(WORKSPACE_CONNECTION_KEY) as { browserName: string }).browserName).toBe(
+    'Chrome · Mac',
+  );
+  expect(onBrowserName).not.toHaveBeenCalled();
+  expect(deps.publish).toHaveBeenCalled();
+  // The connection itself is untouched by a failed rename.
+  expect(connector.view().connection?.phase).toBe('connected');
+});
+
+test('rename needs a settled Workspace connection and a non-empty name', async () => {
+  const { connector, api } = setup([]);
+  const rename = vi.fn(async () => conn('connected').connection);
+  (api as Record<string, unknown>).rename = rename;
+  await expect(connector.rename('Home')).rejects.toThrow('workspaceRenameUnavailable');
+  // Still preparing: the record has a connection id but is not settled.
+  let release!: () => void;
+  api.getConnection.mockImplementationOnce(
+    () => new Promise((resolve) => (release = () => resolve(conn('preparing')))),
+  );
+  const connecting = connector.connect(input);
+  await vi.waitFor(() => expect(connector.view().connection?.connectionId).toBe('c1'));
+  expect(connector.view().connection?.phase).toBe('preparing');
+  await expect(connector.rename('Home')).rejects.toThrow('workspaceRenameUnavailable');
+  await expect(connector.rename(' \u0007 ')).rejects.toThrow('workspaceBrowserNameRequired');
+  expect(rename).not.toHaveBeenCalled();
+  await connector.cancel();
+  release();
+  await connecting;
+});
+
+test('a failed connection can still be renamed', async () => {
+  const { connector, api } = setup([conn('failed', { last_error: 'x' })]);
+  const rename = vi.fn(async () => conn('failed').connection);
+  (api as Record<string, unknown>).rename = rename;
+  await connector.connect(input);
+  expect(connector.view().connection?.phase).toBe('failed');
+  await connector.rename('Mac mini');
+  expect(rename).toHaveBeenCalledWith('c1', 'Mac mini');
+  expect(connector.view().connection?.browserName).toBe('Mac mini');
 });

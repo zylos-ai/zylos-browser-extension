@@ -3,7 +3,7 @@ import { useI18n } from './LanguageProvider';
 import { Brand } from './Brand';
 import type { RemoteRequest, RemoteState } from '../utils/remote';
 import { defaultBrowserName, workspaceEnvs } from '../utils/workspace/config';
-import type { WorkspaceView } from '../utils/workspace/connector';
+import { connectionLabel, type WorkspaceView } from '../utils/workspace/connector';
 
 type Agent = NonNullable<WorkspaceView['agents']>[number];
 type Connection = NonNullable<WorkspaceView['connection']>;
@@ -119,20 +119,28 @@ export function ConnectionChip({
   busy,
   onRequest,
   onSwitch,
+  onRename,
 }: {
   state: RemoteState;
   status: string;
   busy: boolean;
   onRequest: (request: RemoteRequest) => void;
   onSwitch: () => void;
+  /** Resolves true when the rename succeeded (failures are shown by the panel). */
+  onRename: (browserName: string) => Promise<boolean>;
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
+  // The rename form replaces the menu items while open; undefined when closed.
+  const [renameDraft, setRenameDraft] = useState<string | undefined>();
   const ref = useRef<HTMLDivElement>(null);
   const ws = state.workspace;
   const connection = ws?.connection;
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setRenameDraft(undefined);
+      return;
+    }
     const close = (event: Event) => {
       if (
         event instanceof KeyboardEvent
@@ -155,6 +163,83 @@ export function ConnectionChip({
     setOpen(false);
     fn();
   };
+  const label = connectionLabel(connection.browserName, connection.connectionId);
+  const canRename = signedIn && !!connection.connectionId && !isSettling(connection);
+  const submitRename = async () => {
+    const next = renameDraft?.trim();
+    if (!next || busy) return;
+    if (next === connection.browserName) return setOpen(false);
+    if (await onRename(next)) setOpen(false);
+  };
+  const menuItems = (
+    <>
+      {canRename && (
+        <button
+          type="button"
+          role="menuitem"
+          className="connection-menu-item workspace-rename"
+          disabled={busy}
+          onClick={() => setRenameDraft(connection.browserName)}
+        >
+          {t('workspaceRename')}
+        </button>
+      )}
+      {signedIn ? (
+        <button
+          type="button"
+          role="menuitem"
+          className="connection-menu-item"
+          disabled={busy || isSettling(connection)}
+          onClick={run(onSwitch)}
+        >
+          {t('workspaceSwitchAgent')}
+        </button>
+      ) : (
+        <button
+          type="button"
+          role="menuitem"
+          className="connection-menu-item"
+          disabled={busy}
+          onClick={run(() => onRequest({ type: 'workspace-sign-in' }))}
+        >
+          {t('workspaceLoginAgain')}
+        </button>
+      )}
+      {signedIn && (
+        <button
+          type="button"
+          role="menuitem"
+          className="connection-menu-item"
+          disabled={busy}
+          onClick={run(() => onRequest({ type: 'workspace-sign-out' }))}
+        >
+          {t('workspaceLogout')}
+        </button>
+      )}
+      <hr />
+      <button
+        type="button"
+        role="menuitem"
+        className="connection-menu-item workspace-disconnect"
+        disabled={busy || isSettling(connection)}
+        onClick={run(() => onRequest({ type: 'remote-set-enabled', enabled: !state.enabled }))}
+      >
+        {t(state.enabled ? 'workspaceDisconnect' : 'workspaceReconnect')}
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        className="connection-menu-item is-danger workspace-revoke"
+        disabled={busy || isSettling(connection)}
+        onClick={run(() => {
+          if (window.confirm(t('workspaceRevokeConfirm', { agent: connection.agentName })))
+            onRequest({ type: 'workspace-revoke' });
+        })}
+      >
+        {t('workspaceRevoke')}
+      </button>
+    </>
+  );
   return (
     <div className="connection-chip-wrap" ref={ref}>
       <button
@@ -193,64 +278,59 @@ export function ConnectionChip({
               <strong>{connection.agentName}</strong>
               <span className="connection-menu-sub">
                 <span className={`connection-menu-status is-${tone}`}>{status}</span> ·{' '}
-                {connection.browserName}
+                <span className="connection-menu-browser" title={connection.connectionId}>
+                  {label}
+                </span>
               </span>
             </div>
           </div>
-          {signedIn ? (
-            <button
-              type="button"
-              role="menuitem"
-              className="connection-menu-item"
-              disabled={busy || isSettling(connection)}
-              onClick={run(onSwitch)}
+          {renameDraft !== undefined ? (
+            <form
+              className="connection-rename"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void submitRename();
+              }}
             >
-              {t('workspaceSwitchAgent')}
-            </button>
+              <label className="form-field" htmlFor="workspace-rename-input">
+                <span>{t('workspaceRename')}</span>
+                <input
+                  className="input input-sm"
+                  id="workspace-rename-input"
+                  value={renameDraft}
+                  maxLength={100}
+                  placeholder={t('workspaceBrowserNamePlaceholder')}
+                  onChange={(e) => setRenameDraft(e.target.value)}
+                  onFocus={(e) => e.currentTarget.select()}
+                  autoFocus
+                  required
+                  disabled={busy}
+                />
+                <span className="settings-hint">
+                  {t('workspaceRenameHint', { agent: connection.agentName })}
+                </span>
+              </label>
+              <div className="connection-rename-actions">
+                <button
+                  className="btn btn-ghost btn-sm workspace-rename-cancel"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setRenameDraft(undefined)}
+                >
+                  {t('cancel')}
+                </button>
+                <button
+                  className="btn btn-primary btn-sm workspace-rename-save"
+                  type="submit"
+                  disabled={busy || !renameDraft.trim()}
+                >
+                  {t('workspaceRenameSave')}
+                </button>
+              </div>
+            </form>
           ) : (
-            <button
-              type="button"
-              role="menuitem"
-              className="connection-menu-item"
-              disabled={busy}
-              onClick={run(() => onRequest({ type: 'workspace-sign-in' }))}
-            >
-              {t('workspaceLoginAgain')}
-            </button>
+            menuItems
           )}
-          {signedIn && (
-            <button
-              type="button"
-              role="menuitem"
-              className="connection-menu-item"
-              disabled={busy}
-              onClick={run(() => onRequest({ type: 'workspace-sign-out' }))}
-            >
-              {t('workspaceLogout')}
-            </button>
-          )}
-          <hr />
-          <button
-            type="button"
-            role="menuitem"
-            className="connection-menu-item workspace-disconnect"
-            disabled={busy || isSettling(connection)}
-            onClick={run(() => onRequest({ type: 'remote-set-enabled', enabled: !state.enabled }))}
-          >
-            {t(state.enabled ? 'workspaceDisconnect' : 'workspaceReconnect')}
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            className="connection-menu-item is-danger workspace-revoke"
-            disabled={busy || isSettling(connection)}
-            onClick={run(() => {
-              if (window.confirm(t('workspaceRevokeConfirm', { agent: connection.agentName })))
-                onRequest({ type: 'workspace-revoke' });
-            })}
-          >
-            {t('workspaceRevoke')}
-          </button>
         </div>
       )}
     </div>
@@ -284,7 +364,10 @@ export function ConnectView({
   const { t, errorText } = useI18n();
   const ws = state.workspace;
   const [step, setStep] = useState<Step>({ kind: 'list' });
-  const [browserName, setBrowserName] = useState(defaultBrowserName());
+  // Keep the name already chosen for this browser (e.g. when switching Agents).
+  const [browserName, setBrowserName] = useState(
+    () => ws?.connection?.browserName || defaultBrowserName(),
+  );
   const [manualOpen, setManualOpen] = useState(!ws || (state.configured && !ws.connection));
   const connection = ws?.connection;
   const signedIn = ws?.auth === 'signed-in';
@@ -416,7 +499,10 @@ export function ConnectView({
             aria-label={t('workspaceBrowserName')}
             value={browserName}
             maxLength={100}
+            placeholder={t('workspaceBrowserNamePlaceholder')}
             onChange={(e) => setBrowserName(e.target.value)}
+            onFocus={(e) => e.currentTarget.select()}
+            autoFocus
             required
             disabled={busy}
           />
@@ -557,7 +643,9 @@ export function ConnectView({
             <AgentAvatar name={connection.agentName} url={connectionAvatar(ws)} />
             <span className="agent-row-name">
               {connection.agentName}
-              <small>{connection.browserName}</small>
+              <small className="connection-browser" title={connection.connectionId}>
+                {connectionLabel(connection.browserName, connection.connectionId)}
+              </small>
             </span>
             {state.connected && <span className="agent-chip is-authorized">{t('connected')}</span>}
           </div>
