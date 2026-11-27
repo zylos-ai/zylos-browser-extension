@@ -2,12 +2,13 @@
 
 ## [Unreleased]
 
-Pairs with the zylos-browser-remote release that accepts `target: "current-tab"`;
-older relays keep URL starts only.
+## [0.19.0] - 2026-11-27
 
-Follow-up replies need zylos-browser-remote with `agent-task-append-v1`
-(zylos-ai/zylos-browser-remote#7). Older relays keep working; they never send
-follow-ups.
+Requires Chrome 140 or later. Pairs with zylos-browser-remote 0.13.0: starting
+a task on the current tab and follow-up replies (`agent-task-append-v1`,
+zylos-ai/zylos-browser-remote#7) need both sides. Older relays keep working
+with URL starts only and never send follow-ups. Manual installs from the GitHub
+zip keep the fixed extension ID `fedaknpgpclnololpbanedpbhlfdbhlp`.
 
 ### Added
 
@@ -66,7 +67,6 @@ follow-ups.
   valid". Packaging is now explicit: `npm run zip:github` (also `npm run zip`)
   adds the key and fails unless the zip's ID is the fixed one;
   `npm run zip:store` builds the Chrome Web Store upload without it.
-
 - The tab preview shows "Needs follow-up" when the Agent reports a blocker or
   asks the user for a decision.
 - "No public address" connection failures no longer always say the Agent was
