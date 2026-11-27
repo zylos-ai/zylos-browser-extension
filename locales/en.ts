@@ -495,7 +495,11 @@ export default {
   workspaceAgentBrowserRemoteOld:
     "The Agent's browser-remote component is too old. Ask the Agent to upgrade browser-remote, then try again.",
   workspaceAgentNoPublicUrl:
-    'The Agent has no public address configured yet. It has been notified to set one; try again later.',
+    "The Agent has no public HTTPS address yet, so this browser can't connect. Ask the Agent to set its public address (AGENT_PUBLIC_BASE_URL), or set it on the Agent's machine, then try again.",
+  workspaceAgentNoPublicUrlNotified:
+    "The Agent has no public HTTPS address yet, so this browser can't connect. A setup reminder was queued for the Agent; try again once it has set the address. If it still fails, ask the Agent in chat to set its public address (AGENT_PUBLIC_BASE_URL).",
+  workspaceAgentNoPublicUrlNotNotified:
+    "The Agent has no public HTTPS address yet, so this browser can't connect, and the setup reminder could not be sent to the Agent. Ask the Agent in chat to set its public address (AGENT_PUBLIC_BASE_URL), or set it on the Agent's machine, then try again.",
   workspaceAgentPublicUrlInvalid:
     "The Agent's public address is misconfigured. Ask the Agent to fix its public URL, then try again.",
   workspaceRelayInsecure:

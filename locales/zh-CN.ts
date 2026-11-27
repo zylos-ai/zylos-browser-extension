@@ -460,7 +460,12 @@ export default {
     'Agent 没有在规定时间内准备好。可能仍在安装或启动 browser-remote（首次使用可能需要几分钟），也可能是 Agent 的 openmax 插件版本过旧。请稍后重试；如果反复超时，请让 Agent 升级 openmax。',
   workspaceAgentBrowserRemoteOld:
     'Agent 的 browser-remote 组件版本过旧，请让 Agent 升级 browser-remote 后重试。',
-  workspaceAgentNoPublicUrl: 'Agent 还没有配置公网地址，已通知它进行设置，请稍后重试。',
+  workspaceAgentNoPublicUrl:
+    'Agent 还没有配置公网 HTTPS 地址，暂时无法连接。请让 Agent 设置公网地址（AGENT_PUBLIC_BASE_URL），或在 Agent 所在机器上配置后重试。',
+  workspaceAgentNoPublicUrlNotified:
+    'Agent 还没有配置公网 HTTPS 地址，暂时无法连接。设置提醒已排队发给 Agent；等它完成设置后重试。如果仍然失败，请在聊天中让 Agent 设置公网地址（AGENT_PUBLIC_BASE_URL）。',
+  workspaceAgentNoPublicUrlNotNotified:
+    'Agent 还没有配置公网 HTTPS 地址，暂时无法连接，而且设置提醒没能发给 Agent。请在聊天中让 Agent 设置公网地址（AGENT_PUBLIC_BASE_URL），或在 Agent 所在机器上配置后重试。',
   workspaceAgentPublicUrlInvalid: 'Agent 的公网地址配置有误，请让 Agent 修正公网地址后重试。',
   workspaceRelayInsecure:
     'Agent 提供的连接地址不安全（不是 wss://），已拒绝使用。请让 Agent 使用 https 公网地址。',

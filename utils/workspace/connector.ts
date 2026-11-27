@@ -29,7 +29,16 @@ export const PREPARE_TIMEOUT_MS = 300_000;
 export function prepareErrorKey(lastError: string | undefined): string {
   const e = lastError ?? '';
   if (/browser-remote is too old/i.test(e)) return 'ui.error.workspaceAgentBrowserRemoteOld';
+  // OpenMax ≥ #322: a stable code plus whether the Agent session notice was
+  // queued ("queued" / "recently queued") or "could not be queued".
+  if (/BROWSER_PUBLIC_URL_MISSING/.test(e)) {
+    if (/notice could not be queued/i.test(e))
+      return 'ui.error.workspaceAgentNoPublicUrlNotNotified';
+    if (/notice (?:recently )?queued/i.test(e)) return 'ui.error.workspaceAgentNoPublicUrlNotified';
+    return 'ui.error.workspaceAgentNoPublicUrl';
+  }
   if (/not a valid http\(s\) URL/i.test(e)) return 'ui.error.workspaceAgentPublicUrlInvalid';
+  // Older OpenMax prose: whether the Agent was notified is unknown.
   if (/no public domain|AGENT_PUBLIC_BASE_URL/i.test(e))
     return 'ui.error.workspaceAgentNoPublicUrl';
   return 'ui.error.workspacePrepareFailed';

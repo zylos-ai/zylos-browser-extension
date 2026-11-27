@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- "No public address" connection failures no longer always say the Agent was
+  notified (zylos-ai/zylos-openmax#313). With an OpenMax release that reports
+  `BROWSER_PUBLIC_URL_MISSING`, the message says whether the setup reminder was
+  queued for the Agent or could not be sent, and what to do next in each case.
+  Older OpenMax versions get a neutral message that asks you to have the Agent
+  set `AGENT_PUBLIC_BASE_URL`.
+
 ## [0.18.2] - 2026-11-25
 
 Requires Chrome 140 or later. Pairs with zylos-browser-remote 0.12.0.
