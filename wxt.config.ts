@@ -2,6 +2,8 @@ import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'wxt';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { rmSync } from 'node:fs';
+import { assertZipManifestKey, manifestKey, manifestKeyMode } from './scripts/extension-key.mjs';
 
 let commit = 'unavailable';
 let dirty = true;
@@ -26,6 +28,10 @@ try {
 // - Development (`wxt` dev mode) with neither set defaults to INT.
 const WORKSPACE_INT_URL = 'https://cws-int.coco.xyz';
 const releaseCommand = ['build', 'zip'].includes(process.argv[2] ?? '');
+// Manifest `key` (fixed extension ID for manual installs), see scripts/extension-key.mjs:
+// WXT_MANIFEST_KEY=release (npm run zip:github) or store (npm run zip:store).
+// `wxt zip` without either fails here; dev/test builds omit the key unless set.
+const keyMode = () => manifestKeyMode(process.env, process.argv[2]);
 
 function workspaceOrigin(value: string, source: string): string {
   let url: URL;
@@ -83,6 +89,10 @@ function workspaceLoopbackRelay(
   return mode === 'development' || !!env.WXT_WORKSPACE_ENVS?.trim();
 }
 
+function withKey(key: string | undefined): { key?: string } {
+  return key ? { key } : {};
+}
+
 const detailBuild = JSON.stringify({
   id: randomUUID(),
   commit,
@@ -101,7 +111,26 @@ export default defineConfig({
     },
     plugins: [tailwindcss()],
   }),
+  zip: {
+    // Keep the GitHub release asset name; the Store upload gets its own name.
+    artifactTemplate:
+      keyMode() === 'store'
+        ? '{{name}}-{{version}}-{{browser}}-store.zip'
+        : '{{name}}-{{version}}-{{browser}}.zip',
+  },
+  hooks: {
+    // Fail packaging if the zip's manifest does not match the requested target.
+    'zip:extension:done': (_wxt, zipPath) => {
+      try {
+        assertZipManifestKey(zipPath, keyMode());
+      } catch (error) {
+        rmSync(zipPath, { force: true });
+        throw error;
+      }
+    },
+  },
   manifest: ({ mode }) => ({
+    ...withKey(manifestKey(keyMode())),
     name: 'Zylos Browser',
     description: '__MSG_extensionDescription__',
     default_locale: 'en',

@@ -137,6 +137,8 @@ npm run build
 
 打开 `chrome://extensions`，开启 **开发者模式** → **加载已解压的扩展程序**，选择本仓库的 **`.output/chrome-mv3`** 目录。
 
+> **使用 OpenMax Workspace 登录？** Workspace 只接受固定扩展 ID `fedaknpgpclnololpbanedpbhlfdbhlp`（手动安装）或 Chrome 应用商店版本。GitHub Release 提供的 zip 已带固定 ID，解压后加载即可；从源码构建时请用 `WXT_MANIFEST_KEY=release npm run build`，否则 ID 随目录变化，登录会提示 "This sign-in request isn't valid"。
+
 建议将 Zylos 固定到 Chrome 工具栏，点击章鱼图标即可打开侧边栏。
 
 需要升级时，同样切到新的正式版本再重新构建，然后在扩展管理页点击 **重新加载**：
@@ -241,7 +243,8 @@ npm run dev         # WXT 开发模式
 npm test            # 类型检查与单元测试
 npm run test:build  # 构建与产物检查
 npm run test:e2e    # 真实 Chrome 与 Relay 的端到端测试
-npm run zip         # 生成插件压缩包
+npm run zip:github  # GitHub Release 压缩包（固定扩展 ID，npm run zip 同此）
+npm run zip:store   # Chrome 应用商店上传包（不含 key）
 ```
 
 端到端测试需要 Chrome 和相邻的 `zylos-browser-remote` 仓库；可通过 `CHROME_PATH`、`RELAY_ROOT` 指定路径。完整环境与验证说明见 [开发指南](docs/DEVELOPMENT.md#8-常用命令与验证)。
